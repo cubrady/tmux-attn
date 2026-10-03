@@ -1,246 +1,131 @@
-# tmux attention inbox
+# tmux Attention
 
-A global agent inbox for a Ghostty client connected over SSH to a Mac running
-tmux. The status bar stays visible; Prefix + a opens a temporary popup.
-The popup groups all tracked agents into WAIT, IDLE and RUNNING. Existing
-sessions, windows and agent panes keep running.
+在 tmux 裡同時使用多個 coding agent 時，讓你一眼看到**哪些正在工作、哪些需要回覆、哪些已完成但尚未查看**，減少來回巡查視窗。
 
-## Three agent states
+支援 Claude Code、Codex CLI 和 Pi。適合在 Mac 工作機上執行 agent，再從 Ghostty 透過 SSH 連線使用；設定應安裝在執行 tmux／agent 的工作機上。
 
-- **RUNNING**: working; listed in the RUNNING group.
-- **IDLE**: not working. A completed response has an unread flag (**⚪ •**), so
-  it enters the inbox until you review it. Initial registration does not notify.
-- **WAIT**: waiting for approval, an answer or a decision; shown first.
+## 畫面與操作
 
-Opening a pane does **not** acknowledge it. A new work event clears its previous
-pending item. Marking an item reviewed leaves the agent's actual state unchanged.
-All completed responses enter unread IDLE, including interrupted/error endings
-when the agent emits the corresponding event. A response ending in `?` or `？`
-is inferred to need an answer and appears as WAIT; this rule can misclassify
-rhetorical questions. Completion has a two-second settling delay to avoid
-flashing an inbox item during automatic continuation.
+底部視窗列以「專案別名＋圖示」顯示狀態，左側選單不常駐：
 
-Claude background tasks keep the agent RUNNING. Pi uses `agent_settled`, rather
-than `agent_end`, so retries and queued work do not appear prematurely completed.
-Native hooks drive the main lifecycle. A read-only compatibility observer also
-tracks existing Codex CLIs without requiring restart; no LLM calls are used.
+```text
+sampleapp 🟢    wallet ⚪ •    lending 🟠
+```
 
-## Install and activate
+| 圖示 | 含意 |
+| --- | --- |
+| 🟠 | 等待你回答、批准或下判斷 |
+| 🟢 | 正在工作 |
+| ⚪ • | 閒置，有完成回覆尚未查看 |
+| ⚪ | 閒置，沒有待查看回覆 |
 
-On a new Mac with Python 3.11+ and tmux available, copy/clone this folder and run:
+底部右側會顯示總數，例如 `🟠 1 · ⚪ 3 (•2) · 🟢 4`，其中 `•2` 表示有兩個閒置 agent 的回覆尚未查看。底部約每兩秒更新，popup 約每秒更新。
+
+同一個視窗有多個 agent 時，優先顯示：等待回覆 → 尚未查看 → 工作中 → 閒置。尚未建立狀態追蹤的 pane 會先顯示專案名稱，不加狀態圖示。
+
+預設 tmux prefix 為 **Ctrl-b**；若你有自訂 prefix，請使用自己的設定。
+
+| 按鍵 | 功能 |
+| --- | --- |
+| Prefix → `a` | 開啟 popup，分群顯示所有已追蹤 agent |
+| Prefix → `N` | 跳到第一個待處理 agent（大寫 N） |
+| Popup 中 `j` / `k` 或方向鍵 | 選擇項目 |
+| Enter | 跳到對應 pane 並關閉 popup |
+| `v` | 開啟／關閉所選 pane 的預覽 |
+| `d` | 標記已查看，移除未查看的 `•` |
+| `1` | 暫緩這一筆待處理項目五分鐘 |
+| `a` | 切換全部 agent／僅待處理項目 |
+| Esc / `q` | 關閉 popup |
+
+跳到 pane 不會自動標記已查看。`d` 只標記你已看過這次回覆，不會代替你批准操作或回覆 agent；下一次完成回覆會再次加上 `•`。
+
+## 安裝
+
+### 前置需求
+
+- Python **3.11 或更新版本**。
+- 支援 `display-popup`、`split-window -e` 和 hooks 的 tmux，已在 **tmux 3.7b** 驗證。
+- 已安裝並登入你要使用的 agent CLI。
+- clone 本 private repo 所需的 GitHub 存取權限。
+
+目前主要在 macOS 驗證。Pi 整合需支援 `agent_settled` 與 `ui_prompt_start` 等事件，已在 Pi 1.0.0 驗證。
+
+### 一個指令安裝
+
+先取得專案，再執行 bootstrap：
 
 ```sh
+git clone git@github.com:cubrady/tmux-attention.git
+cd tmux-attention
 sh bootstrap.sh
 ```
 
-The bootstrap checks dependencies, creates a `work` tmux session if no session
-exists, and installs the popup, status badges and hooks. It opts in to enabling
-Codex `[features] hooks = true`; the original config is backed up first. Other
-settings and hooks are retained. Unusual inline/dotted TOML hook configuration
-is left unchanged with instructions to enable hooks manually. Dependency
-installation and agent login remain separate steps. Codex may ask you to trust
-the new hook commands in `/hooks`; Pi needs `/reload` for existing sessions.
+Bootstrap 會檢查 Python／tmux，並在尚無 tmux session 時建立 `work` session。安裝程式會：
 
+- 安裝 popup、底部圖示及專案別名。
+- 合併 Claude／Codex hooks，加入 Pi extension。
+- 啟用 Codex 的 `[features] hooks = true`。
+- 備份原設定，保留其他 hooks 與目的機已有的別名。
+- 依新機器的使用者目錄和 Python 位置產生路徑。
 
-Requires Python 3.11+, tmux with `split-window -e` and hooks (tested on tmux
-3.7b), Claude Code, Codex with `[features] hooks = true`, and Pi with
-`agent_settled` / `ui_prompt_start` events (tested on Pi 1.0.0).
+Bootstrap 不會安裝前置軟體或代替 agent 登入。若既有 Codex TOML 使用無法安全編輯的 inline／dotted 寫法，安裝會提示你手動啟用 hooks。
 
-From this directory, with an existing tmux server:
+若尚未進入 tmux，可執行：
 
 ```sh
-python3 -m unittest test_attention.py test_codex_observer.py test_migration.py
-python3 install.py
+tmux attach
 ```
 
-The installer backs up affected settings, installs the Python app under
-`~/.local/share/tmux-attn`, adds `~/.local/bin/tmux-attn`, merges agent hooks,
-installs `~/.pi/agent/extensions/tmux-attention.ts`, and sources the generated
-`~/.config/tmux-attn/sidebar.conf`. It replaces only the previous
-`tmux-agent-status` hook handlers; unrelated hooks are retained. The old plugin
-files remain untouched and its commented-out tmux loading stays disabled.
+接著按 **Ctrl-b → a** 開啟清單。
 
-Run the installer once. Re-running it makes a new backup, including the prior
-installed app. Hook array index 90 is reserved for this integration; installation
-refuses to replace an unrelated hook occupying that index.
+### 讓 agent 載入設定
 
-### Existing agent processes
+- **Claude Code**：新 session 會使用已安裝的 hooks；舊 session 若沒有更新，請在方便時重新啟動／resume。
+- **Codex**：使用 `/hooks` 檢查並載入 command hooks；首次可能需要信任這些命令。舊 session 若未載入，請重新啟動／resume。
+- **Pi**：舊 session 執行 `/reload`，或重新啟動／resume。
 
-- **Claude Code**: this installation has already received a live hook event.
-  If an older session does not update, restart/resume that agent when convenient.
-- **Codex**: the eight installed handlers have been reviewed and trusted in
-  a fresh CLI. For existing sessions, open `/hooks` to inspect/reload command hooks and trust new commands
-  if prompted. Restart/resume the agent if the updated hooks are not loaded.
-- **Pi**: run `/reload`, or restart/resume Pi, to load the extension.
+空白 CLI 尚未開始任務時，可能還沒有狀態事件。系統也會唯讀追蹤可確認身分的既有 Codex 對話；名稱被截斷或對應不唯一時，會保留未配對狀態。
 
-Agent initialization never launches provider requests. For existing Codex, the compatibility observer pairs the native process to a
-unique startup session using process start time, cwd and validated session metadata.
-It reads task_started/task_complete events, and can route detached native hooks
-by session_id once the mapping is established. It never chooses a session just
-because it is newest in the same project. Until events arrive, the
-sidebar reports how many panes have no events. That count includes shell panes;
-it is not a count of broken agents. A fresh Codex starts its conversation lifecycle on the first submitted prompt;
-just opening an empty CLI may not emit a SessionStart event.
-
-Existing work is not interrupted to force
-reloads. Approval/answer handling is observed, never automated.
-
-## Keyboard
-
-Default tmux prefix is **Ctrl-b**.
-
-| Key | Action |
-| --- | --- |
-| Prefix, `a` | Open the inbox popup |
-| Prefix, `N` | Jump to the first pending item |
-| `j` / `k`, arrows | Select an item inside the inbox |
-| Enter | Jump to its exact agent pane; retain pending status |
-| `v` | Toggle a terminal preview of the selected pane |
-| `d` | Mark selected response reviewed; show confirmation and reviewed label |
-| `1` | Snooze this revision for five minutes |
-| `a` | Switch between all agents (default) and pending items |
-| Esc | Close the popup (also `q`) |
-
-A new event overrides an old snooze. When a snooze expires, the same pending
-item returns. Duplicate events with the same state and reason do not repeat a
-notification. Selection follows pane identity as the list changes.
-
-## Commands and files
+### 更新與其他顯示模式
 
 ```sh
-~/.local/bin/tmux-attn          # open inbox popup
-~/.local/bin/tmux-attn status   # WAIT / IDLE (unread) / RUN counts
-~/.local/bin/tmux-attn dump     # registered live panes and metadata
+git pull --ff-only
+sh bootstrap.sh
 ```
 
-The state store is `~/.local/state/tmux-attn/inbox.sqlite3`. SQLite transactions
-serialize concurrent hooks and review actions. Keys include tmux socket, pane ID
-and pane PID to avoid cross-server state and reused-pane mistakes. Hooks resolve the actual
-parent process chain across local tmux sockets, rather than relying on possibly
-stale `TMUX_PANE` values from Codex shell snapshots. Window labels
-and project paths are resolved live, so renaming does not lose tracking.
-
-Hook failures are recorded in `~/.local/state/tmux-attn/hook-errors.log`; hooks
-return an empty JSON object without making agent approval decisions. No full
-transcripts or preview contents are stored. Closed-pane records are filtered
-from the UI, but historical records currently remain in the database.
-
-The status bar refreshes every two seconds and displays `🟠 1 · ⚪ 3 (•2) · 🟢 4`.
-The number in parentheses is unread completed responses within IDLE. The popup
-refreshes every second; Enter jumps to the exact agent pane and closes it.
-Multiple clients share review flags; each popup targets the client that opened it.
-Visible counts and the inbox work over the existing SSH link.
-
-The bottom window strip shows project names with explicit state labels:
-`🟠` (waiting), `🟢` (working), `⚪ •` (idle with unread response), `⚪` (idle without unread response).
-Windows with multiple tracked agents use that priority order. Shell windows with
-no tracked events have no badge. Reviewing a completed response clears its
-unread dot on the next two-second refresh. The project display name comes from
-the tracked pane cwd and the alias settings below; the popup retains the full
-project name. Original window names remain as the fallback for untracked windows.
-The installer retains window flags and backs up both window formats for rollback.
-
-For the previous persistent 38-column left sidebar, install with `--sidebar`.
-The default installer removes only marked sidebar panes and disables their
-creation hooks. Agent panes and background tracking keep running.
-
-## Rollback
-
-The installer prints a timestamped backup directory. Use that exact path:
+每次安裝都會建立新的備份。若偏好常駐左側清單，可改用：
 
 ```sh
-python3 rollback.py ~/.local/state/tmux-attn/backups/YYYYMMDD-HHMMSS
+sh bootstrap.sh --sidebar
 ```
 
-Rollback restores saved settings and keybindings, removes only marked attention
-sidebar panes, and preserves agent panes. When rolling back an upgrade, it also
-restores the prior installed app/hooks and display mode. Reload agents
-to restore the previous hook/extension behavior. Rollback restores whole backed-up
-configuration files, so preserve any edits made after installation first.
+## 專案別名
 
-The Codex compatibility observer has one process per tmux server and reads local
-session records incrementally every two seconds. It discovers new CLI processes
-periodically. Legacy pending approval is detected only from an actual visible
-approval dialog with Yes/No options; escalation arguments alone do not count.
-A completed response ending in a question uses the same inferred WAIT rule as hooks.
-
-Startup matching cannot establish an arbitrary `/new` or `/resume` switch inside
-an older CLI PID. Native session registrations supersede startup inference; if
-an older CLI switches sessions without emitting hooks, reload its hooks or restart
-and resume it. This adapter depends on the installed Codex's local session schema;
-unsupported/ambiguous metadata is left unmapped rather than guessed. Adapter
-errors go to `~/.local/state/tmux-attn/observer-errors.log`.
-
-The original polling/scheduling starter is archived under `legacy/`; its old
-JSON state and configuration are not used by the event-based sidebar.
-
-## Validation evidence
-
-`python3 -m unittest test_attention.py test_codex_observer.py test_migration.py` runs nineteen tests. Integration runs in an
-isolated tmux server and explicitly poisons `TMUX_PANE` to verify actual process
-ancestry wins over stale environment. It covers rendering, review/snooze, new
-windows, precise jumps and first-install/upgrade rollback.
-
-After installation, optional native checks are available:
-
-```sh
-python3 tests/native_codex_roundtrip.py
-python3 tests/native_pi_dialog.py
-```
-
-Codex uses an in-process localhost Responses stub, so no remote model is called.
-Pi invokes a local confirmation command without a model request. Both launch
-disposable isolated tmux servers and remove only their own test server. These
-checks were run successfully against the installed CLI versions.
-
-`python3 tests/popup_roundtrip.py` attaches a disposable PTY client to verify
-three-group rendering, popup close and precise navigation without agent pane loss.
-
-Reviewing retains the agent in its actual state group. ⚪ • loses its unread
-dot and displays `reviewed 已查看`; WAIT retains WAIT until the agent resumes.
-Pressing d on RUNNING reports that there is no response to review. New completed
-responses become unread again. Review confirmation remains visible for four seconds.
-
-Codex child hooks can share their parent session_id. The integration validates
-the transcript session_meta.id and subagent source before changing visible pane
-state. Child tools, permissions, completion and exit events are excluded from
-parent state. The observer also validates mapped transcript identity before reading
-it; canonical root paths are recovered from the local threads database.
-
-Popup reasons describe the action in Chinese: approval, answer/decision, work
-in progress, or completed/interrupted/error response awaiting review. Inferred
-questions are explicitly labelled as inference. Reviewing keeps the underlying
-agent state and removes the unread dot.
-
-## Project aliases
-
-Edit `~/.config/tmux-attn/project-aliases.json`. The default mappings are sampleapp,
-tmux, sample, mail, lending, wallet and sample; see `project-aliases.example.json`.
-An exact absolute project path takes priority over a folder-name mapping:
+編輯 `~/.config/tmux-attn/project-aliases.json`，約兩秒內生效：
 
 ```json
-{"aliases": {"web-app-sampleapp": "sampleapp", "/Users/example/proj/another/api": "other-api"}}
+{
+  "aliases": {
+    "web-app-sampleapp": "sampleapp",
+    "example-wallet-gateway": "wallet",
+    "/Users/your-name/projects/api": "my-api"
+  }
+}
 ```
 
-Unmapped folder names are shown unchanged up to 12 characters, otherwise as
-11 characters plus an ellipsis. Different projects with duplicate display names
-get a readable folder suffix when possible, otherwise a stable short hash of the
-full path. Multiple windows for the same project retain the same alias. Changes
-apply on the next two-second refresh. The installer preserves existing mappings
-and includes the file in its rollback backup. Popup project names stay complete.
+完整路徑 mapping 優先，其次是資料夾名稱 mapping。沒有設定的新專案會自動顯示資料夾名稱；超過 12 字元時截短並加 `…`。不同專案名稱撞到時，優先加可讀後綴，否則使用穩定的短識別碼。同一專案的多個視窗沿用相同別名。
 
-## 移植到另一台 Mac
+預設 mapping 參見 [project-aliases.example.json](project-aliases.example.json)。Popup 保留完整專案名稱，不受底部縮寫影響。
 
-設定安裝在**執行 tmux／agent 的機器**。如果 M3 仍透過 SSH 使用目前的 M1，
-這套環境繼續放在 M1 即可；只有換工作 server，或在另一台機器直接跑 agent，才需移植。
+## 移植到另一台機器
 
-匯出目前程式及你的別名設定：
+直接 clone repo 並執行 `sh bootstrap.sh` 即可安裝預設設定。若要一起帶走**目前的個人別名**，在原機器匯出：
 
 ```sh
 python3 migrate.py export dist/tmux-attn-migration.tar.gz
 ```
 
-將壓縮檔複製到新機器，再執行：
+將壓縮檔複製到新工作機器，再執行：
 
 ```sh
 tar -xzf tmux-attn-migration.tar.gz
@@ -248,31 +133,53 @@ cd tmux-attn
 sh bootstrap.sh
 ```
 
-匯出只使用固定檔案清單，包含程式、安裝／還原工具、測試與別名。
-不包含 tmux 執行狀態、agent 帳號憑證、完整個人設定或對話紀錄。
-新機器的路徑會重新產生；別名以資料夾名稱為鍵時可直接沿用。
-使用完整絕對路徑的 mapping，需按新機器的專案位置調整。
-目的機已有別名時，保留目的機的設定，補上匯入檔中的缺少項目。
-匯出檔不會覆蓋同名檔案；重新匯出時請使用新的輸出檔名。
+匯出檔包含程式、安裝／還原工具、測試及目前別名，不包含 agent 帳號憑證、對話紀錄或執行狀態。目的機已有的別名優先保留，匯入檔只補上缺少項目。
 
-新機器須先備好 Python 3.11+、支援 popup 的 tmux，以及要使用的 agent CLI。
-安裝不會代替 agent 登入或同意 Codex 的 hook 信任提示。
-備份位置由安裝指令輸出；用 `python3 rollback.py <備份路徑>` 還原。
-遷移工具不會遠端登入或直接寫入另一台機器。
+資料夾名稱 mapping 可沿用；完整路徑 mapping 需依新機器調整。重新匯出請換新檔名，工具不會覆蓋同名壓縮檔。
 
-## Repository tracking
+## 還原
 
-Track the app, observer, installer/bootstrap, migration and rollback scripts,
-tests, README and default alias example. The provided `.gitignore` excludes
-Python caches, export bundles, local exported aliases, SQLite files and machine
-installation/audit records. Personal full-path mappings belong in the local
-alias file; reusable folder aliases can live in the versioned example.
-The `legacy/` directory preserves the original starter and can remain archived.
-A private repository is a suitable home for this personalized tool.
+安裝完成會輸出 `backup` 路徑。使用該次安裝輸出的完整路徑還原：
 
-Named `codex resume` processes can also be paired using the exact current footer
-project path and full conversation name, provided the local thread database has
-one matching root transcript with matching cwd and CLI originator. Ambiguous or
-truncated names are left unpaired; the observer never selects the newest thread
-by project directory. Untracked panes still display their cwd-derived project
-alias, with no state badge until actual events establish their state.
+```sh
+python3 rollback.py /path/to/printed/backup
+```
+
+還原會恢復備份中的設定和快捷鍵，保留工作 pane。它會還原整份設定檔；若安裝後又做過修改，請先保存那些修改。Agent 也需重新載入還原後的 hooks／extension。
+
+## 運作方式與判斷範圍
+
+狀態主要來自 agent hooks／Pi 事件，保存在本機 SQLite。Codex 相容監控會唯讀讀取本機對話事件及必要的 pane 畫面，交叉驗證主對話身分；子 agent 的事件不會覆蓋主 agent 狀態。這些判斷不需要額外 LLM 呼叫。
+
+一般完成回覆會成為未查看項目。若回覆最後以 `?` 或 `？` 結尾，目前會推測為等待回答；這是啟發式判斷，可能把反問誤判。明確的批准／輸入事件會直接標記為等待回覆。
+
+同一 CLI 程序內切換 `/new` 或 `/resume`、且未發出可定位的原生 hooks 時，追蹤可能無法跟上；請重新載入 hooks，或重新啟動並 resume。Codex 相容監控依賴本機資料格式，無法確認的對應不會猜測。
+
+## 檔案與檢查
+
+| 位置 | 用途 |
+| --- | --- |
+| `~/.local/bin/tmux-attn` | 開啟 popup 或查詢狀態 |
+| `~/.local/share/tmux-attn/` | 安裝後的程式 |
+| `~/.config/tmux-attn/sidebar.conf` | tmux 顯示及快捷鍵設定 |
+| `~/.config/tmux-attn/project-aliases.json` | 個人別名 |
+| `~/.local/state/tmux-attn/inbox.sqlite3` | 狀態及已查看標記 |
+| `~/.local/state/tmux-attn/backups/` | 安裝備份 |
+
+查詢狀態與診斷資料：
+
+```sh
+~/.local/bin/tmux-attn status
+~/.local/bin/tmux-attn dump
+```
+
+Hooks／監控錯誤會記錄在 state 目錄中的 `hook-errors.log`／`observer-errors.log`。
+
+開發驗證使用隔離的 tmux server，涵蓋狀態事件、resume 配對、查看標記、別名、移植及還原：
+
+```sh
+python3 -m unittest test_attention.py test_codex_observer.py test_migration.py
+python3 tests/popup_roundtrip.py
+```
+
+Repo 追蹤程式、測試、文件及預設別名；本機狀態、匯出檔和個人紀錄由 `.gitignore` 排除。原始 polling starter 保留在 `legacy/` 作為歷史參考。
