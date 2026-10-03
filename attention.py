@@ -297,12 +297,12 @@ def acknowledge(con, item, seconds=0):
 
 def window_badge(rows):
     if any(x['state'] == 'WAIT' for x in rows):
-        return '🟠'
+        return '🙋'
     if any(x['state'] == 'IDLE' and x['pending'] for x in rows):
-        return '⚪ •'
+        return '👀'
     if any(x['state'] == 'RUNNING' for x in rows):
-        return '🟢'
-    return '⚪' if rows else ''
+        return '🔄'
+    return '💤' if rows else ''
 
 
 def window_project_path(rows):
@@ -412,7 +412,7 @@ def display_reason(item, reviewed):
 
 def inbox_lines(rows):
     lines = []
-    for state, title in [('WAIT', '🟠 等待回覆'), ('IDLE', '⚪ 閒置'), ('RUNNING', '🟢 運行中')]:
+    for state, title in [('WAIT', '🙋 等待回覆'), ('IDLE', '💤 閒置'), ('RUNNING', '🔄 運行中')]:
         group = [x for x in rows if x['state'] == state]
         lines.append((None, f'── {title} ({len(group)}) ──'))
         for item in group:
@@ -461,8 +461,8 @@ def sidebar(win, popup=False, client=None):
         draw(win, 0, 1, '待處理清單', curses.A_BOLD)
         waiting = sum(x['state'] == 'WAIT' for x in registered)
         review = sum(x['pending'] and x['state'] == 'IDLE' for x in rows)
-        draw(win, 1, 1, f'🟠 {waiting} · ⚪ {idle}（未查看 {review}）· 🟢 {running}', curses.A_BOLD)
-        draw(win, 2, 1, '全部 agent · • 表示尚未查看' if show_all else '僅顯示待處理項目')
+        draw(win, 1, 1, f'🙋 {waiting} · 👀 {review} · 🔄 {running} · 💤 {idle-review}', curses.A_BOLD)
+        draw(win, 2, 1, '全部 agent · 👀 表示尚未查看' if show_all else '僅顯示待處理項目')
         lines = inbox_lines(rows)
         slots = max(1, (h//2 if preview else h-4)-4)
         selected_line = next((i for i,(identity,_) in enumerate(lines) if identity == selected), 0)
@@ -593,7 +593,9 @@ def main():
             if args.command == 'status':
                 registered, _ = items(con, socket(), live, True)
                 update_window_badges(registered, live)
-                print(f'🟠 {sum(x["state"]=="WAIT" for x in registered)} · ⚪ {sum(x["state"]=="IDLE" for x in registered)} (•{sum(x["state"]=="IDLE" for x in rows)}) · 🟢 {running}')
+                review = sum(x['state']=='IDLE' for x in rows)
+                idle = sum(x['state']=='IDLE' for x in registered) - review
+                print(f'🙋 {sum(x["state"]=="WAIT" for x in registered)} · 👀 {review} · 🔄 {running} · 💤 {idle}')
             elif args.command == 'dump':
                 print(json.dumps(rows, ensure_ascii=False, indent=2))
             elif rows:
