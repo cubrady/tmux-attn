@@ -1,0 +1,11 @@
+{
+  "aliases": {
+    "web-app-sampleapp": "sampleapp",
+    "tmux-attn-starter": "tmux",
+    "sample-coaching-project": "sample",
+    "example-mail-service": "mail",
+    "example-lending": "lending",
+    "example-wallet-gateway": "wallet",
+    "sample-agent-project": "sample"
+  }
+}

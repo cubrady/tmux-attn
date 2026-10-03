@@ -1,0 +1,505 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import curses
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+APP = "tmux-attn"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / APP
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
+STATE_FILE = STATE_DIR / "state.json"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+DEFAULT_CONFIG = {
+    "default_interval_seconds": 1800,
+    "preview_lines": 50,
+    "shell_commands": ["bash", "zsh", "fish", "sh", "dash", "nu"],
+    "session_intervals_seconds": {},
+    "ignore_sessions": [],
+    "needs_input_patterns": [
+        r"(?i)\bwould you like me to\b",
+        r"(?i)\bdo you want (?:me )?to\b",
+        r"(?i)\bwaiting for (?:your )?(?:input|approval|confirmation)\b",
+        r"(?i)\bpress enter\b",
+        r"(?i)\bapprove\b.*\b(?:y/n|yes/no)\b",
+        r"(?i)\bproceed\?\s*(?:\[?y/n\]?)?",
+        r"(?i)\bcontinue\?\s*(?:\[?y/n\]?)?",
+        r"(?i)\bpermission\b.*\brequired\b",
+    ],
+    "error_patterns": [
+        r"(?i)\btraceback \(most recent call last\)",
+        r"(?i)\bpanic:",
+        r"(?i)\bfatal:",
+        r"(?i)\bunhandled exception\b",
+        r"(?i)\bcommand failed\b",
+        r"(?i)\bbuild failed\b",
+        r"(?i)\btests? failed\b",
+    ],
+}
+
+CADENCES = {
+    ord("1"): 5 * 60,
+    ord("2"): 15 * 60,
+    ord("3"): 30 * 60,
+    ord("4"): 60 * 60,
+    ord("5"): 3 * 60 * 60,
+}
+
+STATUS_RANK = {
+    "ERROR": 0,
+    "WAIT": 1,
+    "DUE": 2,
+    "ACTIVE": 3,
+    "IDLE": 4,
+    "SLEEP": 5,
+    "DONE": 6,
+}
+
+ATTENTION_STATUSES = {"ERROR", "WAIT", "DUE"}
+
+
+@dataclass
+class Session:
+    sid: str
+    name: str
+    created: int
+    attached: bool
+    pane_id: str = ""
+    command: str = ""
+    text: str = ""
+    text_hash: str = ""
+    status: str = "IDLE"
+    reason: str = ""
+    next_check: int = 0
+    last_checked: int = 0
+    last_change: int = 0
+
+    @property
+    def key(self) -> str:
+        # session_id alone may be reused after a tmux server restart.
+        return f"{self.sid}:{self.created}"
+
+
+def which(cmd: str) -> str | None:
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        path = Path(directory) / cmd
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def run_tmux(*args: str, check: bool = True) -> str:
+    p = subprocess.run(
+        ["tmux", *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if check and p.returncode != 0:
+        raise RuntimeError(p.stderr.strip() or f"tmux {' '.join(args)} failed")
+    return p.stdout
+
+
+def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default.copy()
+
+
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    tmp.replace(path)
+
+
+def load_config() -> dict[str, Any]:
+    cfg = DEFAULT_CONFIG.copy()
+    user = load_json(CONFIG_FILE, {})
+    cfg.update(user)
+    return cfg
+
+
+def load_state() -> dict[str, Any]:
+    return load_json(STATE_FILE, {"sessions": {}})
+
+
+def save_state(state: dict[str, Any]) -> None:
+    atomic_write_json(STATE_FILE, state)
+
+
+def ensure_config() -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
+
+
+def list_tmux_sessions() -> list[Session]:
+    fmt = "#{session_id}\t#{session_name}\t#{session_created}\t#{session_attached}"
+    out = run_tmux("list-sessions", "-F", fmt, check=False)
+    sessions: list[Session] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4:
+            continue
+        sid, name, created, attached = parts
+        sessions.append(
+            Session(
+                sid=sid,
+                name=name,
+                created=int(created or 0),
+                attached=(attached != "0"),
+            )
+        )
+    return sessions
+
+
+def current_pane_for_session(sid: str) -> tuple[str, str]:
+    # Targeting a session resolves to its current window and active pane.
+    fmt = "#{pane_id}\t#{pane_current_command}"
+    out = run_tmux("display-message", "-p", "-t", sid, fmt, check=False).strip()
+    if not out:
+        return "", ""
+    pane, _, cmd = out.partition("\t")
+    return pane, cmd
+
+
+def capture_pane(pane_id: str, lines: int) -> str:
+    if not pane_id:
+        return ""
+    return run_tmux(
+        "capture-pane",
+        "-p",
+        "-J",
+        "-t",
+        pane_id,
+        "-S",
+        f"-{lines}",
+        check=False,
+    ).rstrip()
+
+
+def sha1(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+
+
+def tail_nonempty(text: str, n: int = 18) -> str:
+    lines = [line for line in text.splitlines() if line.strip()]
+    return "\n".join(lines[-n:])
+
+
+def matches_any(patterns: list[str], text: str) -> bool:
+    return any(re.search(pat, text) for pat in patterns)
+
+
+def human_duration(seconds: int) -> str:
+    seconds = int(seconds)
+    if seconds <= 0:
+        return "now"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    h, rem = divmod(seconds, 3600)
+    if rem < 60:
+        return f"{h}h"
+    return f"{h}h{rem // 60:02d}m"
+
+
+def initial_interval(config: dict[str, Any], session_name: str) -> int:
+    overrides = config.get("session_intervals_seconds", {})
+    return int(overrides.get(session_name, config["default_interval_seconds"]))
+
+
+def scan(config: dict[str, Any], state: dict[str, Any]) -> list[Session]:
+    now = int(time.time())
+    records = state.setdefault("sessions", {})
+    ignore = set(config.get("ignore_sessions", []))
+    shells = set(config["shell_commands"])
+    live_keys: set[str] = set()
+    result: list[Session] = []
+
+    for s in list_tmux_sessions():
+        if s.name in ignore:
+            continue
+
+        live_keys.add(s.key)
+        rec = records.setdefault(
+            s.key,
+            {
+                "name": s.name,
+                "interval": initial_interval(config, s.name),
+                "last_checked": 0,
+                "next_check": 0,
+                "done": False,
+                "last_hash": "",
+                "last_change": now,
+                "ack_hash": "",
+            },
+        )
+        rec["name"] = s.name
+
+        s.pane_id, s.command = current_pane_for_session(s.sid)
+        s.text = capture_pane(s.pane_id, int(config["preview_lines"]))
+        s.text_hash = sha1(s.text)
+
+        if rec.get("last_hash") != s.text_hash:
+            rec["last_hash"] = s.text_hash
+            rec["last_change"] = now
+
+        s.last_change = int(rec.get("last_change", now))
+        s.last_checked = int(rec.get("last_checked", 0))
+        s.next_check = int(rec.get("next_check", 0))
+
+        recent = tail_nonempty(s.text)
+        new_since_ack = s.text_hash != rec.get("ack_hash", "")
+        has_error = new_since_ack and matches_any(config["error_patterns"], recent)
+        needs_input = new_since_ack and matches_any(config["needs_input_patterns"], recent)
+
+        # Strong events preempt timers, but only when output changed since the
+        # last time the user acknowledged this exact pane snapshot.
+        if has_error:
+            s.status, s.reason = "ERROR", "new error-like output"
+        elif needs_input:
+            s.status, s.reason = "WAIT", "new output likely needs input"
+        elif rec.get("done"):
+            s.status, s.reason = "DONE", "manually marked done"
+        elif s.next_check and s.next_check <= now:
+            s.status, s.reason = "DUE", "scheduled check is due"
+        elif s.next_check and s.next_check > now:
+            s.status, s.reason = "SLEEP", f"next check in {human_duration(s.next_check - now)}"
+        elif s.command and s.command not in shells:
+            s.status, s.reason = "ACTIVE", f"running {s.command}"
+        else:
+            s.status, s.reason = "IDLE", s.command or "shell"
+
+        result.append(s)
+
+    # Remove stale state for sessions that no longer exist.
+    for key in list(records):
+        if key not in live_keys:
+            records.pop(key, None)
+
+    save_state(state)
+    result.sort(key=lambda s: (STATUS_RANK[s.status], s.next_check or 2**62, s.name))
+    return result
+
+
+def acknowledge(s: Session, state: dict[str, Any]) -> None:
+    state["sessions"][s.key]["ack_hash"] = s.text_hash
+
+
+def mark_checked(s: Session, state: dict[str, Any], config: dict[str, Any]) -> None:
+    now = int(time.time())
+    rec = state["sessions"][s.key]
+    interval = int(rec.get("interval", initial_interval(config, s.name)))
+    rec["last_checked"] = now
+    rec["next_check"] = now + interval
+    rec["done"] = False
+    acknowledge(s, state)
+    save_state(state)
+
+
+def snooze(s: Session, seconds: int, state: dict[str, Any]) -> None:
+    now = int(time.time())
+    rec = state["sessions"][s.key]
+    rec["interval"] = seconds
+    rec["last_checked"] = now
+    rec["next_check"] = now + seconds
+    rec["done"] = False
+    acknowledge(s, state)
+    save_state(state)
+
+
+def set_done(s: Session, state: dict[str, Any], done: bool) -> None:
+    rec = state["sessions"][s.key]
+    rec["done"] = done
+    rec["next_check"] = 0
+    acknowledge(s, state)
+    save_state(state)
+
+
+def reset_session(s: Session, state: dict[str, Any]) -> None:
+    rec = state["sessions"][s.key]
+    rec["done"] = False
+    rec["next_check"] = 0
+    rec["ack_hash"] = ""
+    save_state(state)
+
+
+def attach_or_switch(s: Session) -> None:
+    if os.environ.get("TMUX"):
+        subprocess.run(["tmux", "switch-client", "-t", s.sid], check=False)
+    else:
+        os.execvp("tmux", ["tmux", "attach-session", "-t", s.sid])
+
+
+def safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
+    h, w = win.getmaxyx()
+    if y < 0 or y >= h or x >= w:
+        return
+    try:
+        win.addnstr(y, x, text, max(0, w - x - 1), attr)
+    except curses.error:
+        pass
+
+
+def one_line_status(sessions: list[Session]) -> str:
+    counts: dict[str, int] = {}
+    for s in sessions:
+        counts[s.status] = counts.get(s.status, 0) + 1
+
+    urgent = sum(counts.get(k, 0) for k in ATTENTION_STATUSES)
+    if urgent:
+        parts = [f"ATTN {urgent}"]
+        for k in ("ERROR", "WAIT", "DUE"):
+            if counts.get(k):
+                parts.append(f"{k} {counts[k]}")
+        return " · ".join(parts)
+
+    return f"ATTN 0 · ACTIVE {counts.get('ACTIVE', 0)}"
+
+
+def tui(stdscr, config: dict[str, Any], state: dict[str, Any]) -> None:
+    curses.curs_set(0)
+    stdscr.keypad(True)
+
+    selected = 0
+    show_all = True
+    message = ""
+
+    while True:
+        sessions = scan(config, state)
+        visible = sessions if show_all else [s for s in sessions if s.status in ATTENTION_STATUSES]
+
+        if visible:
+            selected = min(selected, len(visible) - 1)
+        else:
+            selected = 0
+
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        safe_addstr(stdscr, 0, 0, " tmux-attn ", curses.A_BOLD | curses.A_REVERSE)
+        safe_addstr(
+            stdscr,
+            0,
+            12,
+            "Enter=attach  1=5m 2=15m 3=30m 4=1h 5=3h  d=done  u=reset  a=all/attention  r=refresh  q=quit",
+        )
+
+        list_w = max(44, min(74, w // 2))
+        safe_addstr(stdscr, 2, 0, f"{'STATUS':<7} {'SESSION':<26} {'CMD':<13} {'NEXT':<9}")
+        safe_addstr(stdscr, 3, 0, "-" * min(list_w - 1, w - 1))
+
+        max_rows = max(1, h - 7)
+        start = max(0, selected - max_rows + 1)
+        shown = visible[start : start + max_rows]
+        now = int(time.time())
+
+        for i, s in enumerate(shown):
+            idx = start + i
+            y = 4 + i
+            next_txt = "-"
+            if s.next_check:
+                delta = s.next_check - now
+                next_txt = human_duration(delta) if delta > 0 else "DUE"
+
+            row = f"{s.status:<7} {s.name[:26]:<26} {s.command[:13]:<13} {next_txt:<9}"
+            attr = curses.A_REVERSE if idx == selected else 0
+            if s.status in ATTENTION_STATUSES:
+                attr |= curses.A_BOLD
+            safe_addstr(stdscr, y, 0, row, attr)
+
+        divider_x = min(list_w, w - 1)
+        for y in range(2, h - 2):
+            safe_addstr(stdscr, y, divider_x, "│")
+
+        if visible:
+            s = visible[selected]
+            x = divider_x + 2
+            safe_addstr(stdscr, 2, x, f"{s.name} [{s.status}]", curses.A_BOLD)
+            safe_addstr(stdscr, 3, x, f"{s.reason} | pane={s.pane_id} | cmd={s.command}")
+
+            preview_height = max(1, h - 7)
+            for i, line in enumerate(s.text.splitlines()[-preview_height:]):
+                safe_addstr(stdscr, 5 + i, x, line)
+
+        mode = "ALL" if show_all else "ATTENTION ONLY"
+        footer = message or f"{len(visible)} sessions | mode={mode}"
+        safe_addstr(stdscr, h - 1, 0, f" {footer} ", curses.A_REVERSE)
+
+        stdscr.refresh()
+        key = stdscr.getch()
+        message = ""
+
+        if key in (ord("q"), 27):
+            return
+        elif key in (curses.KEY_DOWN, ord("j")) and visible:
+            selected = min(selected + 1, len(visible) - 1)
+        elif key in (curses.KEY_UP, ord("k")) and visible:
+            selected = max(selected - 1, 0)
+        elif key == ord("a"):
+            show_all = not show_all
+            selected = 0
+        elif key == ord("r"):
+            pass
+        elif key in CADENCES and visible:
+            secs = CADENCES[key]
+            s = visible[selected]
+            snooze(s, secs, state)
+            message = f"{s.name}: next check in {human_duration(secs)}"
+        elif key == ord("d") and visible:
+            s = visible[selected]
+            set_done(s, state, True)
+            message = f"{s.name}: marked done"
+        elif key == ord("u") and visible:
+            s = visible[selected]
+            reset_session(s, state)
+            message = f"{s.name}: reset"
+        elif key in (10, 13, curses.KEY_ENTER) and visible:
+            s = visible[selected]
+            mark_checked(s, state, config)
+            curses.endwin()
+            attach_or_switch(s)
+            return
+
+
+def main() -> int:
+    if not which("tmux"):
+        print("tmux-attn: tmux is not installed or not in PATH", file=sys.stderr)
+        return 2
+
+    ensure_config()
+    config = load_config()
+    state = load_state()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        print(one_line_status(scan(config, state)))
+        return 0
+
+    if len(sys.argv) > 1 and sys.argv[1] == "dump":
+        for s in scan(config, state):
+            print(f"{s.status:7} {s.name:26} {s.command:13} {s.reason}")
+        return 0
+
+    try:
+        curses.wrapper(tui, config, state)
+    except RuntimeError as exc:
+        print(f"tmux-attn: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

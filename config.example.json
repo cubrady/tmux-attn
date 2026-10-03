@@ -1,0 +1,37 @@
+{
+  "default_interval_seconds": 1800,
+  "preview_lines": 50,
+  "shell_commands": [
+    "bash",
+    "zsh",
+    "fish",
+    "sh",
+    "dash",
+    "nu"
+  ],
+  "session_intervals_seconds": {
+    "fast-agent-example": 300,
+    "research-example": 10800
+  },
+  "ignore_sessions": [],
+  "needs_input_patterns": [
+    "(?i)\\bwould you like me to\\b",
+    "(?i)\\bdo you want (?:me )?to\\b",
+    "(?i)\\bwaiting for (?:your )?(?:input|approval|confirmation)\\b",
+    "(?i)\\bpress enter\\b",
+    "(?i)\\bapprove\\b.*\\b(?:y/n|yes/no)\\b",
+    "(?i)\\bproceed\\?\\s*(?:\\[?y/n\\]?)?",
+    "(?i)\\bcontinue\\?\\s*(?:\\[?y/n\\]?)?",
+    "(?i)\\bpermission\\b.*\\brequired\\b"
+  ],
+  "error_patterns": [
+    "(?i)\\btraceback \\(most recent call last\\)",
+    "(?i)\\bpanic:",
+    "(?i)\\bfatal:",
+    "(?i)\\bunhandled exception\\b",
+    "(?i)\\bcommand failed\\b",
+    "(?i)\\bbuild failed\\b",
+    "(?i)\\btests? failed\\b"
+  ],
+  "_note": "Legacy polling configuration. The event sidebar uses ~/.config/tmux-attn/sidebar.conf; see README.md."
+}

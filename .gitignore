@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+dist/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+tasks/*-install.json
+tasks/state-accuracy-audit.json
+tasks/
+project-aliases.local.json
