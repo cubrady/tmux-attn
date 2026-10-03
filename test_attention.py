@@ -65,7 +65,9 @@ class StoreTests(unittest.TestCase):
 
     def test_classifiers(self):
         self.assertIsNone(a.classify('claude','Notification',{'notification_type':'idle_prompt'}))
-        self.assertEqual(a.classify('claude','Stop',{'background_tasks':[{'status':'running'}]})[0],'RUNNING')
+        stopped=a.classify('claude','Stop',{'background_tasks':[{'status':'running'}]})
+        self.assertEqual((stopped[0],stopped[2]),('IDLE',True))
+        self.assertIn('background tasks still running',stopped[1])
         self.assertEqual(a.classify('codex','PermissionRequest',{})[0],'WAIT')
         self.assertEqual(a.classify('codex','PreToolUse',{'tool_name':'request_user_input'})[0],'WAIT')
         self.assertEqual(a.classify('pi','ui_prompt_start',{'title':'Pick one'})[0],'WAIT')
@@ -189,6 +191,10 @@ class IntegrationTests(unittest.TestCase):
                 run('send-keys','-t',sidebar,'d')
                 wait(lambda:not json.loads(subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))[0]['pending'])
                 event('UserPromptSubmit'); event('Stop')
+                wait(lambda:'未查看 1' in run('capture-pane','-p','-t',sidebar))
+                event('UserPromptSubmit',agent='claude')
+                event('Stop',{'background_tasks':[{'status':'running'}]},agent='claude')
+                wait(lambda:'背景工作仍在運行' in run('capture-pane','-p','-t',sidebar))
                 wait(lambda:'未查看 1' in run('capture-pane','-p','-t',sidebar))
                 # A different agent registering in the same pane must retain unread work.
                 event('session_start',agent='pi')
