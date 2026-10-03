@@ -66,8 +66,8 @@ with tempfile.TemporaryDirectory() as directory:
             assert row['acknowledged']==row['revision']
             a.record(con,sock,row['pane'],row['pid'],'claude','IDLE','Fixture IDLE',True,event_time=time.time()-3,event_key='next-turn')
         feedback=drain(1.2)
-        # Curses emits only the changed suffix of the existing IDLE label.
-        assert '• · claude' in feedback,feedback
+        # Curses emits only the changed emoji of the existing idle label.
+        assert '👀' in feedback,feedback
         with a.db() as con:
             row=con.execute("SELECT * FROM panes WHERE state='IDLE'").fetchone()
             assert row['revision']>row['acknowledged']
@@ -83,7 +83,7 @@ with tempfile.TemporaryDirectory() as directory:
         drain(.4)
         assert popup.wait(timeout=3)==0,popup.communicate()
         assert tmux('display-message','-p','-c',name,'#{pane_id}')==wait_pane
-        print('Popup: three groups; d updates DB and reviewed labels; new completion restores unread dot; q closes; Enter jumps; agent panes preserved.')
+        print('Popup: three groups; d updates DB and reviewed labels; new completion restores unread emoji; q closes; Enter jumps; agent panes preserved.')
     finally:
         if popup and popup.poll() is None:
             popup.terminate()
