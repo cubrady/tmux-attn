@@ -116,7 +116,7 @@ def classify(agent, event, data):
         if last.endswith(('?', '？')):
             return 'WAIT', 'Response ends with a question; likely needs input'
         if agent == 'claude' and any(t.get('status') == 'running' for t in data.get('background_tasks', [])):
-            return 'RUNNING', 'Background work still running'
+            return 'IDLE', 'Response finished; review needed; background tasks still running', True
         return 'IDLE', 'Response finished; review needed', True
     return None
 
@@ -393,11 +393,12 @@ def grouped_rows(rows):
 
 def display_reason(item, reviewed):
     if item['state'] == 'IDLE':
+        background = '（背景工作仍在運行）' if 'background tasks still running' in item['reason'] else ''
         if reviewed:
-            return '已完成，已查看'
+            return '已完成，已查看' + background
         if item['needs_review']:
             outcome = '已中斷' if 'Interrupted' in item['reason'] else '發生錯誤' if 'error' in item['reason'] else '已完成'
-            return outcome + '，尚未查看'
+            return outcome + '，尚未查看' + background
         return '閒置，等待新任務'
     if item['state'] == 'RUNNING':
         return '背景工作仍在運行' if 'Background work' in item['reason'] else '正在工作'
