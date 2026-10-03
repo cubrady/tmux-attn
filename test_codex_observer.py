@@ -1,0 +1,146 @@
+import json
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+from datetime import datetime, timezone
+import attention as a
+from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping
+
+class ObserverTests(unittest.TestCase):
+ def test_resume_matching_requires_exact_footer_unique_name_and_root(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);database=root/'state.sqlite';path=root/'root.jsonl'
+   header={'type':'session_meta','payload':{'id':'root','originator':'codex-tui','cwd':'/project','source':'vscode'}}
+   path.write_text(json.dumps(header)+'\n')
+   with closing(sqlite3.connect(database)) as con,con:
+    con.execute('CREATE TABLE threads(id,rollout_path,cwd,agent_path,name)')
+    con.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('root',str(path),'/project',None,'My task'))
+   screen='GPT medium · /project · My task\n← for agents · ? for shortcuts'
+   self.assertEqual(resumed_match(database,'/project',screen),('root',str(path)))
+   self.assertIsNone(resumed_match(database,'/other',screen))
+   self.assertIsNone(resumed_match(database,'/project','My task\nGPT medium · /project · Other task'))
+   other=root/'other.jsonl';header['payload']['id']='other';other.write_text(json.dumps(header)+'\n')
+   with closing(sqlite3.connect(database)) as con,con:
+    con.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('other',str(other),'/project',None,'My task'))
+   self.assertIsNone(resumed_match(database,'/project',screen))
+   with closing(sqlite3.connect(database)) as con,con:
+    con.execute('DELETE FROM threads WHERE id=?',('other',))
+   header['payload']['id']='child';header['payload']['source']={'subagent':{}}
+   path.write_text(json.dumps(header)+'\n')
+   self.assertIsNone(resumed_match(database,'/project',screen))
+ def test_unique_startup_match_rejects_newest_and_ambiguous_sessions(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);path=root/'rollout.jsonl';stamp=1700000000
+   header={'type':'session_meta','payload':{'originator':'codex-tui','id':'session-1','cwd':'/project','timestamp':datetime.fromtimestamp(stamp+2,timezone.utc).isoformat()}}
+   path.write_text(json.dumps(header)+'\n')
+   database=root/'state.sqlite'
+   with closing(sqlite3.connect(database)) as con, con:
+    con.execute('CREATE TABLE threads(id,rollout_path,created_at,cwd,agent_path)')
+    con.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('session-1',str(path),stamp+2,'/project',None))
+    # A newer session and a simultaneous child must not become the mapping.
+    con.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('newer','missing',stamp+90,'/project',None))
+    con.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('child','missing',stamp+2,'/project','/child'))
+   self.assertEqual(startup_match(database,'/project',stamp),('session-1',str(path)))
+   second=root/'second.jsonl';header['payload']['id']='session-2';second.write_text(json.dumps(header)+'\n')
+   with closing(sqlite3.connect(database)) as con, con:
+    con.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('session-2',str(second),stamp+2,'/project',None))
+   self.assertIsNone(startup_match(database,'/project',stamp))
+ def test_incremental_rollout_handles_partial_line_and_completion(self):
+  with tempfile.TemporaryDirectory() as directory:
+   p=Path(directory)/'session.jsonl'
+   start={'timestamp':'2026-10-03T07:00:00Z','type':'event_msg','payload':{'type':'task_started','turn_id':'turn1'}}
+   done={'timestamp':'2026-10-03T07:01:00Z','type':'event_msg','payload':{'type':'task_complete','turn_id':'turn1','last_agent_message':'Finished.'}}
+   p.write_text(json.dumps(start)+'\n'+json.dumps(done)[:20])
+   offset,event=read_lifecycle(p)
+   self.assertEqual(event[0][0],'RUNNING')
+   with p.open('a') as f:f.write(json.dumps(done)[20:]+'\n')
+   offset,event=read_lifecycle(p,offset)
+   self.assertEqual(event[0],('IDLE','Response finished; review needed',True))
+   self.assertIsNone(read_lifecycle(p,offset)[1])
+ def test_pending_approval_requires_actual_dialog(self):
+  self.assertFalse(approval_screen('sandbox_permissions: require_escalated'))
+  self.assertFalse(approval_screen('Would you like to run tests?'))
+  self.assertTrue(approval_screen('Would you like to run the following command?\n› 1. Yes, proceed\n  2. No, tell Codex what to do differently'))
+ def test_stale_rollout_cannot_overwrite_hook_and_new_turn_realerts(self):
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     a.record(con,'socket','%1','123','codex','WAIT','Approve',event_time=200)
+     a.record(con,'socket','%1','123','codex','RUNNING','Working',event_time=100)
+     self.assertEqual(con.execute('SELECT state FROM panes').fetchone()[0],'WAIT')
+     a.record(con,'socket','%1','123','codex','IDLE','Finished',True,event_time=300,event_key='turn1')
+     item=dict(con.execute('SELECT * FROM panes').fetchone());a.acknowledge(con,item)
+     a.record(con,'socket','%1','123','codex','IDLE','Finished',True,event_time=400,event_key='turn2')
+     row=con.execute('SELECT revision,acknowledged FROM panes').fetchone()
+     self.assertGreater(row[0],row[1])
+   finally:a.STATE=previous
+ def test_same_running_state_advances_freshness_without_extra_revision(self):
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     a.record(con,'socket','%1','123','codex','RUNNING','Working',event_time=100,event_key='old')
+     a.record(con,'socket','%1','123','codex','RUNNING','Working',event_time=300,event_key='new')
+     a.record(con,'socket','%1','123','codex','IDLE','Finished',True,event_time=200,event_key='old')
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['state'],row['revision'],row['event_key'],row['last_event_time']),('RUNNING',1,'new',300))
+   finally:a.STATE=previous
+ def test_legacy_cli_exit_becomes_idle_once_and_preserves_other_agent(self):
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     mapping={'socket':'socket','pane':'%1','pid':'123','cli_pid':999}
+     a.record(con,'socket','%1','123','codex','RUNNING','Working')
+     retire_mapping(con,mapping);retire_mapping(con,mapping)
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['state'],row['needs_review'],row['revision']),('IDLE',1,2))
+     a.record(con,'socket','%1','123','pi','RUNNING','Working')
+     retire_mapping(con,mapping)
+     self.assertEqual(con.execute('SELECT agent,state FROM panes').fetchone()[:],('pi','RUNNING'))
+   finally:a.STATE=previous
+ def test_changed_thread_never_keeps_previous_rollout(self):
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     path=Path(directory)/'old.jsonl'
+     path.write_text(json.dumps({'type':'session_meta','payload':{'id':'test-old-thread','source':'vscode'}})+'\n')
+     a.register_codex_session(con,'socket','%1','123',{'session_id':'test-old-thread','transcript_path':str(path)})
+     a.register_codex_session(con,'socket','%1','123',{'session_id':'test-old-thread'})
+     self.assertEqual(con.execute('SELECT rollout_path FROM codex_sessions').fetchone()[0],str(path))
+     con.execute('UPDATE codex_sessions SET cli_pid=999')
+     a.register_codex_session(con,'socket','%1','123',{'session_id':'test-new-thread'})
+     self.assertEqual(con.execute('SELECT thread_id,rollout_path FROM codex_sessions').fetchone()[:],('test-new-thread',''))
+     self.assertEqual(con.execute('SELECT cli_pid FROM codex_sessions').fetchone()[0],0)
+   finally:a.STATE=previous
+
+class RepairTests(unittest.TestCase):
+ def test_child_completion_cannot_block_root_recovery(self):
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    root=Path(directory)/'root.jsonl'
+    child=Path(directory)/'child.jsonl'
+    root.write_text(json.dumps({'type':'session_meta','payload':{'id':'test-root','source':'vscode'}})+'\n'+json.dumps({'type':'event_msg','timestamp':'2026-10-03T07:00:00Z','payload':{'type':'task_started','turn_id':'root-turn'}})+'\n')
+    child.write_text(json.dumps({'type':'session_meta','payload':{'id':'child','session_id':'test-root','source':{'subagent':{}}}})+'\n')
+    database=Path(directory)/'threads.sqlite'
+    with closing(sqlite3.connect(database)) as source,source:
+     source.execute('CREATE TABLE threads(id,rollout_path)')
+     source.execute('INSERT INTO threads VALUES(?,?)',('test-root',str(root)))
+    with closing(a.db()) as con:
+     con.execute("INSERT INTO codex_sessions(socket,pane,pid,thread_id,rollout_path,origin) VALUES('socket','%1','123','test-root',?,'native')",(str(child),))
+     a.record(con,'socket','%1','123','codex','IDLE','Child finished',True,event_key='child-turn')
+     mapping=dict(con.execute('SELECT * FROM codex_sessions').fetchone())
+     self.assertTrue(repair_mapping(con,mapping,database))
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['state'],row['event_key'],row['needs_review']),('RUNNING','root-turn',0))
+     mapping=dict(con.execute('SELECT * FROM codex_sessions').fetchone())
+     self.assertEqual(mapping['rollout_path'],str(root))
+     self.assertFalse(repair_mapping(con,mapping,database))
+   finally:a.STATE=previous
+
+if __name__=='__main__':unittest.main(verbosity=2)

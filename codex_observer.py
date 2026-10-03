@@ -1,0 +1,284 @@
+"""Read-only legacy Codex session adapter. Native hooks remain primary."""
+from __future__ import annotations
+from datetime import datetime, timezone
+import fcntl
+from contextlib import closing
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import signal
+import subprocess
+import time
+
+from attention import STATE, classify, codex_root_transcript, codex_transcript_meta, db, live_panes, record, socket, tmux
+
+
+def processes():
+    result = {}
+    p = subprocess.run(['ps','-axo','pid=,ppid=,args='],capture_output=True,text=True,timeout=4)
+    for line in p.stdout.splitlines():
+        fields = line.strip().split(None,2)
+        if len(fields) == 3:
+            result[int(fields[0])] = (int(fields[1]),fields[2])
+    return result
+
+
+def native_codex_pids(pane_pid, table):
+    descendants = {int(pane_pid)}
+    for _ in range(30):
+        more = {pid for pid,(parent,_) in table.items() if parent in descendants}
+        if more.issubset(descendants):
+            break
+        descendants |= more
+    result = []
+    for pid in descendants:
+        args = table.get(pid,(0,''))[1]
+        executable = args.split(None,1)[0] if args else ''
+        if executable.endswith('/codex') and '/bin/codex' in executable and '/vendor/' in executable:
+            result.append(pid)
+    return result
+
+
+def process_start(pid):
+    p = subprocess.run(['ps','-p',str(pid),'-o','lstart='],env=os.environ|{'TZ':'UTC','LC_ALL':'C'},capture_output=True,text=True,timeout=4)
+    return int(datetime.strptime(p.stdout.strip(),'%a %b %d %H:%M:%S %Y').replace(tzinfo=timezone.utc).timestamp())
+
+
+def process_cwd(pid):
+    p = subprocess.run(['lsof','-n','-a','-p',str(pid),'-d','cwd','-Fn'],capture_output=True,text=True,timeout=4)
+    return next((line[1:] for line in p.stdout.splitlines() if line.startswith('n')),None)
+
+
+def startup_match(state_db, cwd, started):
+    """Only an unambiguous validated startup match is accepted, never newest cwd."""
+    if not state_db.exists() or not cwd:
+        return None
+    with closing(sqlite3.connect(state_db.as_uri()+'?mode=ro',uri=True,timeout=1)) as con:
+        rows = con.execute('SELECT id,rollout_path FROM threads WHERE cwd=? AND created_at BETWEEN ? AND ? AND agent_path IS NULL', (cwd,started,started+5)).fetchall()
+    accepted = []
+    for thread,path in rows:
+        try:
+            with Path(path).open() as f:
+                header = json.loads(f.readline())
+            meta = header.get('payload',{})
+            stamp = datetime.fromisoformat(meta['timestamp'].replace('Z','+00:00')).timestamp()
+            if (header.get('type') == 'session_meta' and meta.get('originator') == 'codex-tui'
+                and meta.get('id') == thread and meta.get('cwd') == cwd
+                and started <= stamp <= started+6):
+                accepted.append((thread,path))
+        except (OSError,ValueError,KeyError,TypeError):
+            continue
+    return accepted[0] if len(accepted) == 1 else None
+
+
+def resumed_match(state_db, cwd, screen):
+    """Bind a named resumed CLI only from an exact footer/cwd and unique root."""
+    if not state_db.exists() or not cwd:
+        return None
+    names = set()
+    for line in screen.rstrip().splitlines()[-8:]:
+        fields = [part.strip() for part in line.split(' · ')]
+        if len(fields) >= 3 and str(Path(fields[1]).expanduser()) == cwd:
+            names.add(fields[2])
+    if not names:
+        return None
+    try:
+        with closing(sqlite3.connect(state_db.as_uri()+'?mode=ro',uri=True,timeout=1)) as con:
+            rows = con.execute('SELECT id,rollout_path,name FROM threads WHERE cwd=? AND agent_path IS NULL', (cwd,)).fetchall()
+    except sqlite3.Error:
+        return None
+    accepted = []
+    for thread,path,name in rows:
+        if name not in names or not codex_root_transcript(path,thread):
+            continue
+        meta = codex_transcript_meta(path)
+        if meta and meta.get('originator') == 'codex-tui' and meta.get('cwd') == cwd:
+            accepted.append((thread,path))
+    return accepted[0] if len(accepted) == 1 else None
+
+
+def lifecycle(entry):
+    if entry.get('type') != 'event_msg':
+        return None
+    payload = entry.get('payload',{})
+    kind = payload.get('type')
+    if kind not in ('task_started','task_complete','turn_aborted'):
+        return None
+    try:
+        stamp = datetime.fromisoformat(entry['timestamp'].replace('Z','+00:00')).timestamp()
+    except (ValueError,KeyError,TypeError):
+        return None
+    if kind == 'task_started':
+        state = ('RUNNING','Working',False)
+    elif kind == 'turn_aborted':
+        state = ('IDLE','Interrupted; review current work',True)
+    else:
+        classified = classify('codex','Stop',{'last_assistant_message':payload.get('last_agent_message','')})
+        state = (*classified,False) if len(classified) == 2 else classified
+    return state,stamp,payload.get('turn_id','')
+
+
+def read_lifecycle(path, offset=0):
+    latest = None
+    with Path(path).open('rb') as f:
+        if offset > Path(path).stat().st_size:
+            offset = 0
+        f.seek(offset)
+        while True:
+            beginning = f.tell()
+            line = f.readline()
+            if not line:
+                break
+            if not line.endswith(b'\n'):
+                f.seek(beginning)
+                break
+            try:
+                event = lifecycle(json.loads(line))
+            except (ValueError,TypeError):
+                continue
+            if event:
+                latest = event
+        return f.tell(),latest
+
+
+def approval_screen(text):
+    """Fallback detects the actual approval dialog, never escalation arguments."""
+    tail = '\n'.join(text.splitlines()[-35:])
+    return (bool(re.search(r'Would you like to (?:run|make|allow|apply)',tail,re.I))
+            and bool(re.search(r'1\.\s*(?:Yes|Allow|Approve)',tail,re.I))
+            and bool(re.search(r'\b(?:No|deny|reject)\b',tail,re.I)))
+
+
+def discover(con, sock, live, table, attempted):
+    state_db = Path.home()/'.codex/state_5.sqlite'
+    for (pane,pane_pid),meta in live.items():
+        candidates = native_codex_pids(pane_pid,table)
+        if len(candidates) != 1:
+            continue
+        cli_pid = candidates[0]
+        existing = con.execute('SELECT * FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',(sock,pane,pane_pid)).fetchone()
+        if existing and existing['cli_pid'] == cli_pid:
+            continue
+        if cli_pid in attempted and time.monotonic()-attempted[cli_pid] < 60:
+            continue
+        attempted[cli_pid] = time.monotonic()
+        try:
+            started = process_start(cli_pid)
+            cwd = process_cwd(cli_pid)
+            origin = 'startup'
+            match = startup_match(state_db,cwd,started)
+            if not match and 'resume' in table[cli_pid][1].split():
+                screen = tmux('capture-pane','-p','-J','-t',pane,check=False)
+                match = resumed_match(state_db,cwd,screen)
+                origin = 'resume'
+        except (OSError,ValueError,subprocess.SubprocessError,sqlite3.Error):
+            continue
+        if not match:
+            continue
+        thread,path = match
+        with con:
+            # Explicit hook registrations have priority over inferred startup matches.
+            if existing and existing['origin'] == 'native':
+                con.execute('UPDATE codex_sessions SET cli_pid=? WHERE socket=? AND pane=? AND pid=?',(cli_pid,sock,pane,pane_pid))
+            else:
+                con.execute('''INSERT INTO codex_sessions(socket,pane,pid,cli_pid,thread_id,rollout_path,origin)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(socket,pane,pid) DO UPDATE SET
+                    cli_pid=excluded.cli_pid,thread_id=excluded.thread_id,rollout_path=excluded.rollout_path,origin=excluded.origin''', (sock,pane,pane_pid,cli_pid,thread,path,origin))
+
+
+def retire_mapping(con,mapping):
+    current = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',
+                          (mapping['socket'],mapping['pane'],mapping['pid'])).fetchone()
+    if current and current['agent'] == 'codex' and current['state'] in ('RUNNING','WAIT'):
+        record(con,mapping['socket'],mapping['pane'],mapping['pid'],'codex','IDLE',
+               'Agent exited; review current work',True,event_key='exit:'+str(mapping['cli_pid']))
+
+
+def repair_mapping(con, mapping, state_db):
+    """One-time recovery from child hooks corrupting a root transcript/turn."""
+    with closing(sqlite3.connect(state_db.as_uri()+'?mode=ro',uri=True,timeout=1)) as source:
+        canonical = source.execute('SELECT rollout_path FROM threads WHERE id=?',(mapping['thread_id'],)).fetchone()
+    if not canonical or not codex_root_transcript(canonical[0], mapping['thread_id']):
+        return False
+    _, event = read_lifecycle(canonical[0])
+    with con:
+        current = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',
+                              (mapping['socket'],mapping['pane'],mapping['pid'])).fetchone()
+        wrong_path = canonical[0] != mapping['rollout_path']
+        wrong_turn = bool(current and event and current['event_key'] and event[2] and current['event_key'] != event[2])
+        if not (wrong_path or wrong_turn):
+            return False
+        con.execute('UPDATE codex_sessions SET rollout_path=? WHERE socket=? AND pane=? AND pid=?',
+                    (canonical[0],mapping['socket'],mapping['pane'],mapping['pid']))
+        if event and current and current['agent'] == 'codex':
+            state, _, turn = event
+            # A child may have stamped its completion later than root task_started.
+            # Recovery bypasses that invalid freshness stamp exactly once.
+            record(con,mapping['socket'],mapping['pane'],mapping['pid'],'codex',*state,event_key=turn)
+    return True
+
+
+def observe():
+    sock = socket()
+    STATE.mkdir(parents=True,exist_ok=True)
+    lock = STATE / ('codex-observer-'+hashlib.sha256(sock.encode()).hexdigest()[:12]+'.lock')
+    with lock.open('a') as handle:
+        try:
+            fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        handle.seek(0); handle.truncate(); handle.write(str(os.getpid())); handle.flush()
+        stopping = False
+        def stop(*_):
+            nonlocal stopping
+            stopping = True
+        signal.signal(signal.SIGTERM,stop)
+        signal.signal(signal.SIGINT,stop)
+        con = db()
+        cursors, attempted, overlays = {},{},set()
+        table = {}; refreshed = 0
+        while not stopping and tmux('list-sessions',check=False):
+            try:
+                live = live_panes()
+                if time.monotonic()-refreshed > 10:
+                    table = processes(); refreshed = time.monotonic()
+                    discover(con,sock,live,table,attempted)
+                for mapping in con.execute('SELECT * FROM codex_sessions WHERE socket=?',(sock,)).fetchall():
+                    pane,pid = mapping['pane'],mapping['pid']
+                    if (pane,pid) not in live:
+                        continue
+                    if mapping['rollout_path'] and not codex_root_transcript(mapping['rollout_path'], mapping['thread_id']):
+                        repair_mapping(con,mapping,Path.home()/'.codex/state_5.sqlite')
+                        continue
+                    if mapping['cli_pid'] not in table:
+                        if mapping['cli_pid']:
+                            retire_mapping(con,mapping)
+                        continue
+                    key = (pane,pid,mapping['thread_id'],mapping['rollout_path'])
+                    offset,previous = cursors.get(key,(0,None))
+                    if mapping['rollout_path'] and Path(mapping['rollout_path']).is_file():
+                        offset,event = read_lifecycle(mapping['rollout_path'],offset)
+                        previous = event or previous
+                        cursors[key] = (offset,previous)
+                        if event:
+                            state,stamp,turn = event
+                            record(con,sock,pane,pid,'codex',*state,event_time=stamp,event_key=turn)
+                    # Existing older CLIs have no pending-approval event in their rollouts.
+                    screen = tmux('capture-pane','-p','-t',pane,'-S','-35',check=False)
+                    if approval_screen(screen):
+                        overlays.add(key)
+                        record(con,sock,pane,pid,'codex','WAIT','Approval dialog visible')
+                    elif key in overlays:
+                        overlays.remove(key)
+                        current = con.execute('SELECT state,reason FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
+                        if previous and current and tuple(current) == ('WAIT','Approval dialog visible'):
+                            state,_,turn = previous
+                            record(con,sock,pane,pid,'codex',*state,event_key=turn)
+            except Exception as exc:
+                with (STATE/'observer-errors.log').open('a') as log:
+                    log.write(f'{time.time():.0f} {type(exc).__name__}: {exc}\n')
+            time.sleep(2)
+        con.close()
