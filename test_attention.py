@@ -206,7 +206,7 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'💤')
                 event('UserPromptSubmit')
                 subprocess.check_output([sys.executable,str(app),'status'],env=env,text=True)
-                self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'🔄')
+                self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'🏃')
                 # Switch to popup, remove only marked panes, then restore sidebar mode.
                 original_app = app.read_text()
                 alias_path=home/'.config/tmux-attn/project-aliases.json'
