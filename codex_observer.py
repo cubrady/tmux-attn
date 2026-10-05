@@ -126,11 +126,14 @@ def resumed_match(state_db, cwd, screen):
     """Bind a named resumed CLI only from an exact footer/cwd and unique root."""
     if not state_db.exists() or not cwd:
         return None
-    names = set()
+    names, aligned_names = set(), set()
     for line in screen.rstrip().splitlines()[-8:]:
         fields = [part.strip() for part in line.split(' · ')]
         if len(fields) >= 3 and str(Path(fields[1]).expanduser()) == cwd:
+            # The terminal puts goal/progress indicators in a separate, right-
+            # aligned column on this same line; they are not part of the name.
             names.add(fields[2])
+            aligned_names.add(re.split(r'[ \t]{8,}', fields[2], maxsplit=1)[0])
     if not names:
         return None
     try:
@@ -138,14 +141,19 @@ def resumed_match(state_db, cwd, screen):
             rows = con.execute('SELECT id,rollout_path,name FROM threads WHERE cwd=? AND agent_path IS NULL', (cwd,)).fetchall()
     except sqlite3.Error:
         return None
-    accepted = []
-    for thread,path,name in rows:
-        if name not in names or not codex_root_transcript(path,thread):
-            continue
-        meta = codex_transcript_meta(path)
-        if meta and meta.get('originator') == 'codex-tui' and meta.get('cwd') == cwd:
-            accepted.append((thread,path))
-    return accepted[0] if len(accepted) == 1 else None
+    # Prefer a complete exact title, including any legitimate internal spaces.
+    # Only fall back to removing a wide terminal alignment gap if none matches.
+    for candidates in (names, aligned_names):
+        accepted = []
+        for thread,path,name in rows:
+            if name not in candidates or not codex_root_transcript(path,thread):
+                continue
+            meta = codex_transcript_meta(path)
+            if meta and meta.get('originator') == 'codex-tui' and meta.get('cwd') == cwd:
+                accepted.append((thread,path))
+        if accepted:
+            return accepted[0] if len(accepted) == 1 else None
+    return None
 
 
 def lifecycle(entry):
@@ -208,33 +216,50 @@ def discover(con, sock, live, table, attempted):
             continue
         cli_pid = candidates[0]
         existing = con.execute('SELECT * FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',(sock,pane,pane_pid)).fetchone()
-        if existing and existing['cli_pid'] == cli_pid:
+        resumed = 'resume' in table[cli_pid][1].split()
+        if existing and existing['cli_pid'] == cli_pid and not resumed:
             continue
-        if cli_pid in attempted and time.monotonic()-attempted[cli_pid] < 60:
+        if not existing and cli_pid in attempted and time.monotonic()-attempted[cli_pid] < 60:
             continue
         attempted[cli_pid] = time.monotonic()
         try:
-            started = process_start(cli_pid)
             cwd = process_cwd(cli_pid)
             origin = 'startup'
-            match = startup_match(state_db,cwd,started)
-            if not match and 'resume' in table[cli_pid][1].split():
+            match = None
+            if resumed:
                 screen = tmux('capture-pane','-p','-J','-t',pane,check=False)
                 match = resumed_match(state_db,cwd,screen)
                 origin = 'resume'
+            if not match and not resumed:
+                match = startup_match(state_db,cwd,process_start(cli_pid))
+                origin = 'startup'
         except (OSError,ValueError,subprocess.SubprocessError,sqlite3.Error):
             continue
         if not match:
             continue
         thread,path = match
+        changed = bool(existing and (existing['thread_id'],existing['rollout_path']) != (thread,path))
+        if existing and existing['cli_pid'] == cli_pid and not changed:
+            continue
+        latest = read_lifecycle(path)[1] if origin == 'resume' and changed else None
         with con:
             # Explicit hook registrations have priority over inferred startup matches.
-            if existing and existing['origin'] == 'native':
+            # A uniquely verified resumed foreground thread can repair an old
+            # native registration belonging to a different root conversation.
+            if existing and existing['origin'] == 'native' and origin != 'resume':
                 con.execute('UPDATE codex_sessions SET cli_pid=? WHERE socket=? AND pane=? AND pid=?',(cli_pid,sock,pane,pane_pid))
             else:
                 con.execute('''INSERT INTO codex_sessions(socket,pane,pid,cli_pid,thread_id,rollout_path,origin)
                     VALUES(?,?,?,?,?,?,?) ON CONFLICT(socket,pane,pid) DO UPDATE SET
                     cli_pid=excluded.cli_pid,thread_id=excluded.thread_id,rollout_path=excluded.rollout_path,origin=excluded.origin''', (sock,pane,pane_pid,cli_pid,thread,path,origin))
+                if latest:
+                    current = con.execute('SELECT agent FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pane_pid)).fetchone()
+                    if current and current['agent'] == 'codex':
+                        state,stamp,turn = latest
+                        # Only a changed, verified mapping permits discarding the
+                        # incompatible root's timestamp. Subsequent scans retain
+                        # ordinary freshness and acknowledgement checks.
+                        record(con,sock,pane,pane_pid,'codex',*state,event_time=stamp,event_key=turn,replace_identity=True)
 
 
 def retire_mapping(con,mapping):

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
-from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor
+from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover
 
 class ObserverTests(unittest.TestCase):
  def test_cursor_footer_lifecycle_and_acknowledgement(self):
@@ -54,6 +54,12 @@ class ObserverTests(unittest.TestCase):
     con.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('root',str(path),'/project',None,'My task'))
    screen='GPT medium · /project · My task\n← for agents · ? for shortcuts'
    self.assertEqual(resumed_match(database,'/project',screen),('root',str(path)))
+   self.assertEqual(resumed_match(database,'/project','GPT medium · /project · My task        Goal achieved (1h 2m)\n← for agents'),('root',str(path)))
+   with closing(sqlite3.connect(database)) as con,con:
+    con.execute("UPDATE threads SET name='My  task'")
+   self.assertEqual(resumed_match(database,'/project','GPT medium · /project · My  task        Goal achieved (1h 2m)'),('root',str(path)))
+   with closing(sqlite3.connect(database)) as con,con:
+    con.execute("UPDATE threads SET name='My task'")
    self.assertIsNone(resumed_match(database,'/other',screen))
    self.assertIsNone(resumed_match(database,'/project','My task\nGPT medium · /project · Other task'))
    other=root/'other.jsonl';header['payload']['id']='other';other.write_text(json.dumps(header)+'\n')
@@ -154,6 +160,47 @@ class ObserverTests(unittest.TestCase):
    finally:a.STATE=previous
 
 class RepairTests(unittest.TestCase):
+ def test_resumed_foreground_repairs_same_pid_native_root_once(self):
+  with tempfile.TemporaryDirectory() as directory:
+   home=Path(directory);(home/'.codex').mkdir()
+   database=home/'.codex/state_5.sqlite';rollout=home/'root.jsonl'
+   rollout.write_text(json.dumps({'type':'session_meta','payload':{'id':'actual','originator':'codex-tui','cwd':'/project','source':'vscode'}})+'\n'+json.dumps({'type':'event_msg','timestamp':'2026-10-03T07:00:00Z','payload':{'type':'task_started','turn_id':'actual-turn'}})+'\n')
+   with closing(sqlite3.connect(database)) as source,source:
+    source.execute('CREATE TABLE threads(id,rollout_path,cwd,agent_path,name)')
+    source.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('actual',str(rollout),'/project',None,'My task'))
+   previous=a.STATE;a.STATE=home/'inbox'
+   try:
+    with closing(a.db()) as con:
+     con.execute("INSERT INTO codex_sessions(socket,pane,pid,cli_pid,thread_id,rollout_path,origin) VALUES('sock','%1','123',456,'wrong','wrong-path','native')")
+     a.record(con,'sock','%1','123','codex','IDLE','Unrelated completed response',True,event_time=2000000000,event_key='wrong-turn')
+     table={123:(1,'zsh'),456:(123,'/vendor/bin/codex resume')}
+     live={('%1','123'):{'path':'/project'}}
+     screen='GPT medium · /project · My task        Goal achieved (1h 2m)\n← for agents'
+     def scan():
+      with patch('codex_observer.Path.home',return_value=home),patch('codex_observer.process_cwd',return_value='/project'),patch('codex_observer.tmux',return_value=screen):
+       discover(con,'sock',live,table,{456:float('inf')})
+     scan()
+     mapping=con.execute('SELECT * FROM codex_sessions').fetchone()
+     self.assertEqual((mapping['thread_id'],mapping['rollout_path'],mapping['origin']),('actual',str(rollout),'resume'))
+     row=dict(con.execute('SELECT * FROM panes').fetchone())
+     self.assertEqual((row['state'],row['event_key'],row['needs_review']),('RUNNING','actual-turn',0))
+     self.assertLess(row['last_event_time'],2000000000)
+     a.acknowledge(con,row)
+     row=dict(con.execute('SELECT * FROM panes').fetchone())
+     scan()
+     self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),row)
+     # A duplicate exact title is ambiguous; never choose newest-by-cwd or
+     # override the mapping using a startup guess.
+     second=home/'second.jsonl'
+     second.write_text(json.dumps({'type':'session_meta','payload':{'id':'second','originator':'codex-tui','cwd':'/project','source':'vscode'}})+'\n')
+     with closing(sqlite3.connect(database)) as source,source:
+      source.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('second',str(second),'/project',None,'My task'))
+     con.execute("UPDATE codex_sessions SET thread_id='wrong',rollout_path='wrong-path',origin='native'");con.commit()
+     scan()
+     self.assertEqual(con.execute('SELECT thread_id FROM codex_sessions').fetchone()[0],'wrong')
+     self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),row)
+   finally:a.STATE=previous
+
  def test_child_completion_cannot_block_root_recovery(self):
   with tempfile.TemporaryDirectory() as directory:
    previous=a.STATE;a.STATE=Path(directory)
