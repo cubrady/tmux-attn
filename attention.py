@@ -87,6 +87,13 @@ def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event
 
 
 def classify(agent, event, data):
+    if agent == 'cursor':
+        event = {'sessionStart':'SessionStart', 'sessionEnd':'SessionEnd',
+                 'postToolUse':'PostToolUse', 'beforeSubmitPrompt':'UserPromptSubmit', 'stop':'Stop'}.get(event,event)
+        if event == 'Stop' and data.get('status') == 'aborted':
+            return 'IDLE', 'Interrupted; review current work', True
+        if event == 'Stop' and data.get('status') == 'error':
+            return 'IDLE', 'Agent stopped with an error; review needed', True
     if event in ('SessionStart', 'session_start'):
         return 'IDLE', 'Registered; no new work yet'
     if event in ('SessionEnd', 'session_shutdown'):
@@ -210,6 +217,9 @@ def event_command(agent, event):
     # Hooks must never approve, block or fail the agent's own work.
     try:
         data = json.load(sys.stdin)
+        # Cursor imports Claude hooks; retain the identity of the actual caller.
+        if agent == 'claude' and (os.environ.get('CURSOR_VERSION') or data.get('cursor_version')):
+            agent = 'cursor'
         # Child transcripts share the parent's session_id but have their own id.
         # Their completion/tool hooks must never replace the visible parent's state.
         if agent == 'codex' and codex_child_hook(data):
@@ -238,15 +248,15 @@ def event_command(agent, event):
                     register_codex_session(con,sock,pane,pid,data)
                 # Reattaching/restarting must not discard an unread completion.
                 existing = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock,pane,pid)).fetchone()
-                if event in ('SessionEnd','session_shutdown') and existing:
+                if event in ('SessionEnd','session_shutdown','sessionEnd') and existing:
                     if existing['needs_review']:
                         # Keep an unread completed response after the agent exits.
                         state = None
                     if existing['state'] in ('RUNNING','WAIT'):
                         state = ('IDLE', 'Agent exited; review current work', True)
-                if event not in ('SessionStart','session_start') or not existing:
+                if event not in ('SessionStart','session_start','sessionStart') or not existing:
                     if state:
-                        record(con, sock, pane, pid, agent, *state,event_key=data.get('turn_id',''))
+                        record(con, sock, pane, pid, agent, *state,event_key=(data.get('generation_id','') if agent == 'cursor' else data.get('turn_id','')))
     except Exception as exc:
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (STATE / 'hook-errors.log').open('a') as f:

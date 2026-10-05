@@ -64,6 +64,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.rows(),[])
 
     def test_classifiers(self):
+        self.assertEqual(a.classify('cursor','stop',{'status':'completed'})[0],'IDLE')
+        self.assertEqual(a.classify('cursor','stop',{'status':'aborted'})[0],'IDLE')
+        self.assertIn('error',a.classify('cursor','stop',{'status':'error'})[1])
         self.assertIsNone(a.classify('claude','Notification',{'notification_type':'idle_prompt'}))
         stopped=a.classify('claude','Stop',{'background_tasks':[{'status':'running'}]})
         self.assertEqual((stopped[0],stopped[2]),('IDLE',True))
@@ -74,6 +77,21 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(a.classify('pi','agent_settled',{})[0],'IDLE')
         self.assertEqual(a.classify('claude','Stop',{'last_assistant_message':'你希望採用哪個方案？'})[0],'WAIT')
         self.assertEqual(a.classify('codex','Stop',{'last_assistant_message':'All done.'})[0],'IDLE')
+
+    def test_cursor_fast_completion_and_inherited_identity(self):
+        def hook(agent,event,data):
+            with patch.object(a.sys,'stdin',io.StringIO(json.dumps(data))), patch.object(a.sys,'stdout',io.StringIO()) as out, patch.object(a,'hook_target',return_value=('socket','%1','123')):
+                a.event_command(agent,event)
+                self.assertEqual(json.loads(out.getvalue()),{})
+        hook('claude','PostToolUse',{'cursor_version':'2026.10.01'})
+        self.assertEqual(self.con.execute('SELECT agent FROM panes').fetchone()[0],'cursor')
+        hook('cursor','stop',{'status':'completed','generation_id':'one'})
+        row=self.con.execute('SELECT * FROM panes').fetchone()
+        a.acknowledge(self.con,row)
+        hook('cursor','stop',{'status':'completed','generation_id':'one'})
+        self.assertEqual(self.rows(),[])
+        hook('cursor','stop',{'status':'completed','generation_id':'two'})
+        self.assertEqual(len(self.rows()),1)
 
     def test_project_aliases_path_overrides_and_collisions(self):
         paths=['/a/web-app-minday','/a/a-long-new-project','/b/a-long-new-platform','/a/minday-api','/a/minday-web','/a/shared','/b/shared']
@@ -133,6 +151,9 @@ class IntegrationTests(unittest.TestCase):
                 (home/'.claude').mkdir()
                 old=json.dumps({'hooks':{'Stop':[{'hooks':[{'type':'command','command':'echo unrelated'}]}]}})
                 (home/'.claude/settings.json').write_text(old)
+                (home/'.cursor').mkdir()
+                cursor_old=json.dumps({'version':1,'hooks':{'stop':[{'command':'echo unrelated-cursor'}]}})
+                (home/'.cursor/hooks.json').write_text(cursor_old)
                 result=subprocess.check_output([sys.executable,'install.py','--sidebar'],env=env,text=True)
                 backup=json.loads(result)['backup']
                 app=home/'.local/share/tmux-attn/attention.py'
@@ -156,6 +177,11 @@ class IntegrationTests(unittest.TestCase):
                     wait(lambda:result.exists() and result.read_text().strip()=='{}')
                     self.assertEqual(json.loads(result.read_text()),{})
                     result.unlink()
+                cursor_config=json.loads((home/'.cursor/hooks.json').read_text())
+                self.assertIn({'command':'echo unrelated-cursor'},cursor_config['hooks']['stop'])
+                self.assertIn('postToolUse',cursor_config['hooks'])
+                event('postToolUse',agent='cursor'); event('stop',{'status':'completed'},agent='cursor')
+                wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 event('UserPromptSubmit'); event('PermissionRequest',{'tool_input':{'description':'Approve test action'}})
                 wait(lambda:'🙋 1' in run('capture-pane','-p','-t',sidebar))
                 subprocess.check_output([sys.executable,str(app),'status'],env=env,text=True)
