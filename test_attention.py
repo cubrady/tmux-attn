@@ -63,6 +63,48 @@ class StoreTests(unittest.TestCase):
         a.acknowledge(self.con,old,10)
         self.assertEqual(self.rows(),[])
 
+    def test_status_cycle_wraparound_changes_and_client_isolation(self):
+        self.live[('%1','123')]['window_id']='@1'
+        self.live[('%2','456')]={'pane':'%2','pid':'456','session':'second','window_id':'@2','path':'/second'}
+        self.write('WAIT','Answer')
+        a.record(self.con,'socket','%2','456','claude','WAIT','Answer')
+        before=[dict(row) for row in self.con.execute('SELECT * FROM panes ORDER BY pane')]
+        with patch.object(a,'live_panes',return_value=self.live),patch.object(a,'jump',return_value=True) as jump:
+            for expected in ['%1','%2','%1']:
+                a.cycle_category(self.con,'socket','client-a','wait')
+                self.assertEqual(jump.call_args.args[0]['pane'],expected)
+            a.cycle_category(self.con,'socket','client-b','wait')
+            self.assertEqual(jump.call_args.args[0]['pane'],'%1')
+            jump.reset_mock()
+            a.cycle_category(self.con,'socket','client-a','review')
+            jump.assert_not_called()
+            self.assertEqual(before,[dict(row) for row in self.con.execute('SELECT * FROM panes ORDER BY pane')])
+            # Departing pane and changing category cannot leave a stale target.
+            self.write('RUNNING','Working')
+            a.cycle_category(self.con,'socket','client-a','wait')
+            self.assertEqual(jump.call_args.args[0]['pane'],'%2')
+            del self.live[('%2','456')]
+            jump.reset_mock()
+            a.cycle_category(self.con,'socket','client-a','wait')
+            jump.assert_not_called()
+        self.write('IDLE','Completed',True)
+        rows,_=a.items(self.con,'socket',self.live,True,now=time.time()+3)
+        groups=a.status_groups(rows)
+        self.assertEqual(a.status_text(groups),'🙋 0 · 👀 1 · 🏃 0 · 💤 0')
+        self.assertIn('#[range=control|1]👀 1#[norange]',a.status_text(groups,True))
+        a.acknowledge(self.con,rows[0])
+        rows,_=a.items(self.con,'socket',self.live,True,now=time.time()+3)
+        self.assertEqual(a.status_text(a.status_groups(rows)),'🙋 0 · 👀 0 · 🏃 0 · 💤 1')
+
+    def test_verified_identity_replacement_is_new_unread_even_for_same_state(self):
+        a.record(self.con,'socket','%1','123','codex','WAIT','Answer needed',event_time=2000000000)
+        old=self.con.execute('SELECT * FROM panes').fetchone()
+        a.acknowledge(self.con,old)
+        a.record(self.con,'socket','%1','123','codex','WAIT','Answer needed',event_time=1000000000,replace_identity=True)
+        current=self.con.execute('SELECT * FROM panes').fetchone()
+        self.assertGreater(current['revision'],current['acknowledged'])
+        self.assertEqual(current['updated'],1000000000)
+
     def test_classifiers(self):
         self.assertEqual(a.classify('cursor','stop',{'status':'completed'})[0],'IDLE')
         self.assertEqual(a.classify('cursor','stop',{'status':'aborted'})[0],'IDLE')

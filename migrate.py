@@ -12,6 +12,7 @@ FILES = [
     'rollback.py', 'attention.py', 'codex_observer.py', 'pi-attention.ts',
     'tmux-attn', 'tmux.conf.snippet', 'project-aliases.example.json',
     'test_attention.py', 'test_codex_observer.py', 'test_migration.py', 'tests/popup_roundtrip.py',
+    'tests/status_click_roundtrip.py',
 ]
 
 

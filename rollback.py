@@ -39,6 +39,14 @@ for key in ['a','N']:
     subprocess.run(['tmux','unbind-key',key],check=False)
     path = backup/f'key-{key}.conf'
     if path.read_text().strip(): subprocess.run(['tmux','source-file',str(path)],check=True)
+for index in range(4):
+    for event in ['MouseDown1','SecondClick1','TripleClick1','DoubleClick1']:
+        key = f'{event}Control{index}'
+        path = backup/f'key-root-{key}.conf'
+        # Older backups predate the clickable status feature.
+        if path.exists():
+            subprocess.run(['tmux','unbind-key','-T','root',key],check=False)
+            if path.read_text().strip(): subprocess.run(['tmux','source-file',str(path)],check=True)
 for k,v in json.loads((backup/'runtime.json').read_text()).items():
     subprocess.run(['tmux','set-option','-gw' if k.startswith('window-status-') else '-g',k,v],check=True)
 for line in subprocess.check_output(['tmux','list-panes','-a','-F','#{pane_id}\t#{@tmux_attn_sidebar}'],text=True).splitlines():

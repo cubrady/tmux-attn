@@ -63,7 +63,10 @@ for name in ['.claude/settings.json', '.codex/hooks.json', '.cursor/hooks.json']
 # Confirm server access and save runtime before any live-file mutation.
 def tmux(*args):
     return subprocess.check_output(['tmux',*args],text=True).strip()
-runtime = {k: tmux('show-options','-gv',k) for k in ['status-interval','status-right-length','status-right']}
+version = re.search(r'(\d+)\.(\d+)',tmux('-V'))
+if not version or tuple(map(int,version.groups())) < (3,7):
+    raise SystemExit('Clickable attention counts require tmux 3.7 or newer.')
+runtime = {k: tmux('show-options','-gv',k) for k in ['status-interval','status-right-length','status-right','mouse']}
 for key in ['window-status-format', 'window-status-current-format']:
     runtime[key] = tmux('show-options', '-gwv', key)
 for name in ['after-new-window','session-created','client-attached','pane-exited','after-kill-pane']:
@@ -91,9 +94,21 @@ for name in ['after-new-window','session-created','client-attached','pane-exited
     line = result.stdout.strip()
     prior_hooks[name] = line.split(' ',1)[1] if ' ' in line else None
 (BACKUP/'runtime-hooks.json').write_text(json.dumps(prior_hooks,indent=2))
+prefix_bindings = {}
+for line in tmux('list-keys','-T','prefix').splitlines():
+    parts = shlex.split(line)
+    prefix_bindings[parts[parts.index('-T')+2]] = line+'\n'
 for key in ['a','N']:
-    result = subprocess.run(['tmux','list-keys','-T','prefix',key],capture_output=True,text=True)
-    (BACKUP/f'key-{key}.conf').write_text(result.stdout)
+    (BACKUP/f'key-{key}.conf').write_text(prefix_bindings.get(key,''))
+root_bindings = {}
+for line in tmux('list-keys','-T','root').splitlines():
+    parts = shlex.split(line)
+    root_bindings[parts[parts.index('-T')+2]] = line+'\n'
+for index in range(4):
+    for event in ['MouseDown1','SecondClick1','TripleClick1','DoubleClick1']:
+        key = f'{event}Control{index}'
+        # Mouse keys are not reliably returned by list-keys' positional filter.
+        (BACKUP/f'key-root-{key}.conf').write_text(root_bindings.get(key,''))
 shutil.copy2(ROOT/'attention.py', app)
 if new_codex_text is not None:
     codex_path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,12 +155,17 @@ launch = shlex.join(['env', 'TMUX_ATTN_STATE_DIR='+str(HOME/'.local/state/tmux-a
 config.parent.mkdir(parents=True, exist_ok=True)
 alias_config.write_text(json.dumps(alias_data, ensure_ascii=False, indent=2)+'\n')
 base = f'''# Managed tmux attention inbox.
+set -g mouse on
 set -g status-interval 2
 set -g status-right-length 110
-set -g status-right '#({launch} status) | %H:%M'
+set -g status-right '#({launch} status-clickable) | %H:%M'
 bind-key N run-shell -b "{launch} next '#{{client_name}}'"
 run-shell -b '{launch} observe'
 '''
+for index,category in enumerate(['wait','review','running','idle']):
+    base += f'unbind-key -T root DoubleClick1Control{index}\n'
+    for event in ['MouseDown1','SecondClick1','TripleClick1']:
+        base += f'''bind-key -T root {event}Control{index} run-shell -b "{launch} cycle {category} '#{{client_name}}'"\n'''
 for key in ['window-status-format', 'window-status-current-format']:
     value = runtime[key]
     if '@tmux_attn_project' not in value:

@@ -61,6 +61,9 @@ def db():
         socket TEXT, pane TEXT, pid TEXT, cli_pid INTEGER DEFAULT 0,
         thread_id TEXT, rollout_path TEXT, origin TEXT,
         PRIMARY KEY(socket,pane,pid))''')
+    con.execute('''CREATE TABLE IF NOT EXISTS cycle_cursors (
+        socket TEXT, client TEXT, category TEXT, pane TEXT, pid TEXT,
+        PRIMARY KEY(socket,client,category))''')
     return con
 
 
@@ -68,14 +71,14 @@ def clean(value, limit=240):
     return ''.join(c for c in str(value) if c.isprintable())[:limit]
 
 
-def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event_time=None, event_key=""):
+def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event_time=None, event_key="", replace_identity=False):
     reason = clean(reason)
     with con:
         old = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
         stamp = event_time if event_time is not None else time.time()
-        if old and event_time is not None and max(old['updated'],old['last_event_time']) > event_time:
+        if old and not replace_identity and event_time is not None and max(old['updated'],old['last_event_time']) > event_time:
             return
-        if old and not (needs_review and event_key and event_key != old['event_key']) and (old['state'], old['reason'], old['agent'], bool(old['needs_review'])) == (state, reason, agent, needs_review):
+        if old and not replace_identity and not (needs_review and event_key and event_key != old['event_key']) and (old['state'], old['reason'], old['agent'], bool(old['needs_review'])) == (state, reason, agent, needs_review):
             con.execute("UPDATE panes SET last_event_time=?,event_key=CASE WHEN ?<>'' THEN ? ELSE event_key END WHERE socket=? AND pane=? AND pid=?",
                         (stamp,event_key,event_key,sock,pane,pid))
             return
@@ -305,6 +308,54 @@ def acknowledge(con, item, seconds=0):
                         (item['revision'], item['socket'], item['pane'], item['pid']))
 
 
+STATUS_GROUPS = [('wait','🙋'),('review','👀'),('running','🏃'),('idle','💤')]
+
+
+def status_groups(rows):
+    groups = {key:[] for key,_ in STATUS_GROUPS}
+    for row in rows:
+        category = ('wait' if row['state'] == 'WAIT' else
+                    'running' if row['state'] == 'RUNNING' else
+                    'review' if row['pending'] else 'idle')
+        groups[category].append(row)
+    for group in groups.values():
+        # State timestamps change while agents work; navigation order must not.
+        group.sort(key=lambda row:(row['session'],int(row['window_id'][1:]),int(row['pane'][1:])))
+    return groups
+
+
+def status_text(groups, clickable=False):
+    labels = []
+    for index,(key,emoji) in enumerate(STATUS_GROUPS):
+        label = f'{emoji} {len(groups[key])}'
+        if clickable:
+            label = f'#[range=control|{index}]'+label+'#[norange]'
+        labels.append(label)
+    return ' · '.join(labels)
+
+
+def cycle_category(con, sock, client, category):
+    if category not in dict(STATUS_GROUPS) or not client:
+        return
+    # Serialize rapid clicks, keeping every client's four cursors separate.
+    with con:
+        con.execute('BEGIN IMMEDIATE')
+        registered,_ = items(con,sock,live_panes(),True)
+        group = status_groups(registered)[category]
+        if not group:
+            return
+        cursor = con.execute('SELECT pane,pid FROM cycle_cursors WHERE socket=? AND client=? AND category=?',
+                             (sock,client,category)).fetchone()
+        identities = [(row['pane'],row['pid']) for row in group]
+        previous = tuple(cursor) if cursor else None
+        index = (identities.index(previous)+1)%len(group) if previous in identities else 0
+        target = group[index]
+        if jump(target,client):
+            con.execute('''INSERT INTO cycle_cursors(socket,client,category,pane,pid) VALUES(?,?,?,?,?)
+                ON CONFLICT(socket,client,category) DO UPDATE SET pane=excluded.pane,pid=excluded.pid''',
+                (sock,client,category,target['pane'],target['pid']))
+
+
 def window_badge(rows):
     if any(x['state'] == 'WAIT' for x in rows):
         return '🙋'
@@ -385,11 +436,12 @@ def jump(item, client=None):
     # Verify pane PID as well: an old row must never target a reused pane.
     pid = tmux('display-message', '-p', '-t', item['pane'], '#{pane_pid}', check=False)
     if pid != item['pid']:
-        return
+        return False
     tmux('select-pane', '-t', item['pane'])
     tmux('select-window', '-t', item['pane'])
     if client:
         tmux('switch-client', '-c', client, '-t', item['pane'])
+    return True
 
 
 def age(stamp):
@@ -570,7 +622,7 @@ def ensure_sidebars(target=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox'])
+    parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox','status-clickable','cycle'])
     parser.add_argument('args', nargs='*')
     args = parser.parse_args()
     if args.command == 'event':
@@ -585,6 +637,10 @@ def main():
         curses.wrapper(sidebar)
     elif args.command == 'ensure':
         ensure_sidebars(args.args[0] if args.args else None)
+    elif args.command == 'cycle':
+        if len(args.args) == 2:
+            with closing(db()) as con:
+                cycle_category(con,socket(),args.args[1],args.args[0])
     elif args.command == 'observe':
         from codex_observer import observe
         observe()
@@ -600,12 +656,10 @@ def main():
         with closing(db()) as con:
             live = live_panes()
             rows, running = items(con, socket(), live, args.command == 'dump')
-            if args.command == 'status':
+            if args.command in ('status','status-clickable'):
                 registered, _ = items(con, socket(), live, True)
                 update_window_badges(registered, live)
-                review = sum(x['state']=='IDLE' for x in rows)
-                idle = sum(x['state']=='IDLE' for x in registered) - review
-                print(f'🙋 {sum(x["state"]=="WAIT" for x in registered)} · 👀 {review} · 🏃 {running} · 💤 {idle}')
+                print(status_text(status_groups(registered),args.command == 'status-clickable'))
             elif args.command == 'dump':
                 print(json.dumps(rows, ensure_ascii=False, indent=2))
             elif rows:

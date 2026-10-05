@@ -44,7 +44,7 @@ minday 🏃    wallet 👀    lending 🙋
 ### 前置需求
 
 - Python **3.11 或更新版本**。
-- 支援 `display-popup`、`split-window -e` 和 hooks 的 tmux，已在 **tmux 3.7b** 驗證。
+- tmux **3.7 或更新版本**（可點擊狀態使用 control ranges），已在 **tmux 3.7b** 驗證。
 - 已安裝並登入你要使用的 agent CLI。
 - clone 本 private repo 所需的 GitHub 存取權限。
 
@@ -63,7 +63,7 @@ sh bootstrap.sh
 Bootstrap 會檢查 Python／tmux，並在尚無 tmux session 時建立 `work` session。安裝程式會：
 
 - 安裝 popup、底部圖示及專案別名。
-- 合併 Claude／Codex hooks，加入 Pi extension。
+- 合併 Claude／Codex／Cursor hooks，加入 Pi extension。
 - 啟用 Codex 的 `[features] hooks = true`。
 - 備份原設定，保留其他 hooks 與目的機已有的別名。
 - 依新機器的使用者目錄和 Python 位置產生路徑。
@@ -155,7 +155,7 @@ python3 rollback.py /path/to/printed/backup
 
 `🏃` 表示主回合正在工作。主回覆完成後，即使背景 shell／dev server 還在執行，也會顯示 `👀`；背景工作的存在會另外顯示在 popup 說明中。
 
-同一 CLI 程序內切換 `/new` 或 `/resume`、且未發出可定位的原生 hooks 時，追蹤可能無法跟上；請重新載入 hooks，或重新啟動並 resume。Codex 相容監控依賴本機資料格式，無法確認的對應不會猜測。
+對以 `resume` 啟動的 Codex CLI，相容監控會用前景程序的工作目錄與完整對話名稱核對既有綁定；右側額外資訊不會視為名稱的一部分。若同一 CLI 切換對話後，名稱被截斷或對應不唯一，仍需重新載入 hooks。監控依賴本機資料格式，無法確認的對應不會猜測。
 
 ## 檔案與檢查
 
@@ -187,3 +187,7 @@ python3 tests/popup_roundtrip.py
 Repo 追蹤程式、測試、文件及預設別名；本機狀態、匯出檔和個人紀錄由 `.gitignore` 排除。原始 polling starter 保留在 `legacy/` 作為歷史參考。
 
 Cursor CLI 使用原生 `~/.cursor/hooks.json` 的完成事件，並辨識繼承的 Claude hooks 為 Cursor。已開啟的互動 CLI 另以程序與畫面確認狀態：`ctrl+c to stop` 表示工作中，完成後切成 👀；若回答以問號結尾則顯示 🙋。核准對話框優先顯示 🙋。此畫面補充辨識已在 Cursor CLI 2026.10.01 驗證，未知畫面不猜測。
+
+點擊底列右側的 🙋／👀／🏃／💤 圖示或數字，可循環巡覽該狀態的 agent，直接定位到對應 session、window 與 pane。四組各自記住位置，依 session 名稱、window 建立順序與 pane 編號巡覽；走到最後後回到第一個。數量為零時不切換。點擊不會標記已查看，仍需在清單按 `d`。每個連線 client 的巡覽位置分開記錄，原有底列 session 點擊保留。安裝會開啟 tmux mouse；回復腳本會還原原本設定與按鍵。
+
+滑鼠互動驗證：`python3 tests/status_click_roundtrip.py`（獨立 tmux 環境）。
