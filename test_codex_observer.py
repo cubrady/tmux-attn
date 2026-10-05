@@ -4,11 +4,46 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
-from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping
+from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor
 
 class ObserverTests(unittest.TestCase):
+ def test_cursor_footer_lifecycle_and_acknowledgement(self):
+  def screen(body,active=False):
+   return body+'\n\n → Add a follow-up'+('    ctrl+c to stop' if active else '')+'\n\n Auto · 16.6%    Run Everything\n /project · main\n'
+  self.assertEqual(cursor_screen(screen('Done.'),'/project'),('IDLE','Response finished; review needed',True))
+  self.assertEqual(cursor_screen(screen('Pick one？'),'/project')[0],'WAIT')
+  self.assertEqual(cursor_screen(screen('Done.',True),'/project')[0],'RUNNING')
+  self.assertIsNone(cursor_screen(screen('Done.'),'/other'))
+  self.assertIsNone(cursor_screen('Done.\nAdd a follow-up\n/project · main','/project'))
+  approval=screen('Run this command?\nRun (once) (y)\nSkip & tell the agent what to do instead (esc or n)',True)
+  self.assertEqual(cursor_screen(approval,'/project')[0],'WAIT')
+  self.assertEqual(cursor_screen(screen('Delete this file?\nDelete (y)\nKeep (n)',True),'/project')[0],'WAIT')
+  table={123:(1,'zsh'),456:(123,'/bin/agent --use-system-ca /home/.local/share/cursor-agent/versions/test/index.js'),789:(123,'node other.js')}
+  self.assertEqual(native_cursor_pids('123',table),[456])
+  self.assertEqual(native_cursor_pids('789',table),[])
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     live={('%1','123'):{'path':'/project'}}
+     a.record(con,'sock','%1','123','claude','RUNNING','Working')
+     def scan(text):
+      with patch('codex_observer.tmux',return_value=text):observe_cursor(con,'sock',live,table)
+     scan(screen('Done.'))
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['agent'],row['state']),('cursor','IDLE'))
+     a.acknowledge(con,row)
+     scan(screen('Done.'));scan(screen('Done.'))
+     row2=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual(row2['revision'],row2['acknowledged'])
+     scan(screen('Working',True));scan(screen('New completion.'))
+     row3=con.execute('SELECT * FROM panes').fetchone()
+     self.assertGreater(row3['revision'],row3['acknowledged'])
+   finally:a.STATE=previous
+
  def test_resume_matching_requires_exact_footer_unique_name_and_root(self):
   with tempfile.TemporaryDirectory() as directory:
    root=Path(directory);database=root/'state.sqlite';path=root/'root.jsonl'

@@ -42,6 +42,54 @@ def native_codex_pids(pane_pid, table):
     return result
 
 
+def native_cursor_pids(pane_pid, table):
+    descendants = {int(pane_pid)}
+    for _ in range(30):
+        more = {pid for pid,(parent,_) in table.items() if parent in descendants}
+        if more.issubset(descendants):
+            break
+        descendants |= more
+    return [pid for pid in descendants
+            if '/cursor-agent/versions/' in table.get(pid,(0,''))[1]
+            and '/index.js' in table[pid][1]]
+
+
+def cursor_screen(screen, cwd):
+    """Only the native Cursor prompt/footer, after verified CLI ancestry."""
+    lines = screen.rstrip().splitlines()
+    if not cwd or not any(line.strip().startswith(cwd+' · ') for line in lines[-4:]):
+        return None
+    tail = '\n'.join(lines[-20:])
+    if (re.search(r'(?:Run this command(?: outside the sandbox)?|Run this MCP tool|Delete this file|Write to this file|Read this file|Allow this web search|Allow this web fetch)\?',tail)
+        and re.search(r'(?:Run .*\(y\)|Proceed \(y\)|Delete \(y\)|Allow once \(y\)|Allow search \(y\)|Fetch \(y\)|Reject & propose changes|Skip \(esc or n\))',tail)):
+        return 'WAIT','Approval dialog visible',False
+    prompts = [i for i,line in enumerate(lines[-9:]) if re.match(r'^\s*→ Add a follow-up',line)]
+    if not prompts:
+        return None
+    index = len(lines)-min(len(lines),9)+prompts[-1]
+    if 'ctrl+c to stop' in lines[index]:
+        return 'RUNNING','Working',False
+    body = '\n'.join(lines[:index]).rstrip()
+    if not body:
+        return 'IDLE','Waiting for next task',False
+    classified = classify('cursor','Stop',{'last_assistant_message':body})
+    return (*classified,False) if len(classified) == 2 else classified
+
+
+def observe_cursor(con, sock, live, table):
+    for (pane,pid),meta in live.items():
+        if len(native_cursor_pids(pid,table)) != 1:
+            continue
+        screen = tmux('capture-pane','-p','-J','-t',pane,check=False)
+        state = cursor_screen(screen,meta['path'])
+        if state:
+            current = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
+            # Preserve native hook error/interruption reasons and acknowledged results.
+            if current and current['agent'] == 'cursor' and current['state'] == state[0]:
+                continue
+            record(con,sock,pane,pid,'cursor',*state)
+
+
 def process_start(pid):
     p = subprocess.run(['ps','-p',str(pid),'-o','lstart='],env=os.environ|{'TZ':'UTC','LC_ALL':'C'},capture_output=True,text=True,timeout=4)
     return int(datetime.strptime(p.stdout.strip(),'%a %b %d %H:%M:%S %Y').replace(tzinfo=timezone.utc).timestamp())
@@ -246,6 +294,7 @@ def observe():
                 if time.monotonic()-refreshed > 10:
                     table = processes(); refreshed = time.monotonic()
                     discover(con,sock,live,table,attempted)
+                observe_cursor(con,sock,live,table)
                 for mapping in con.execute('SELECT * FROM codex_sessions WHERE socket=?',(sock,)).fetchall():
                     pane,pid = mapping['pane'],mapping['pid']
                     if (pane,pid) not in live:

@@ -54,7 +54,7 @@ for data in [alias_data, existing_alias_data]:
     if not isinstance(data, dict) or not isinstance(data.get('aliases'), dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in data['aliases'].items()):
         raise SystemExit('Project aliases must contain an aliases object with string keys/values.')
 alias_data = existing_alias_data | {'aliases':alias_data['aliases'] | existing_alias_data['aliases']}
-for name in ['.claude/settings.json', '.codex/hooks.json']:
+for name in ['.claude/settings.json', '.codex/hooks.json', '.cursor/hooks.json']:
     path = HOME/name
     if path.exists():
         data = json.loads(path.read_text())
@@ -77,6 +77,7 @@ app = DEST / 'attention.py'
 config = HOME / '.config/tmux-attn/sidebar.conf'
 paths = [HOME/'.tmux.conf', HOME/'.claude/settings.json', HOME/'.codex/hooks.json', HOME/'.codex/config.toml', HOME/'.pi/agent/extensions/tmux-attention.ts', config, HOME/'.local/bin/tmux-attn', app, DEST/'codex_observer.py']
 paths.append(alias_config)
+paths.append(HOME/'.cursor/hooks.json')
 manifest = []
 for i, p in enumerate(paths):
     copy = BACKUP / str(i)
@@ -122,6 +123,18 @@ for agent, path in [('claude', paths[1]), ('codex', paths[2])]:
         hooks.setdefault(event, []).append(group)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2)+'\n')
+
+# Native Cursor stop is required: its CLI does not invoke inherited Claude Stop
+# unless a native stop handler exists. Use observational hooks only.
+cursor_path = paths[10]
+cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {'version':1}
+cursor_hooks = cursor.setdefault('hooks', {})
+for event, handlers in cursor_hooks.items():
+    cursor_hooks[event] = [h for h in handlers if str(app) not in h.get('command','')]
+for event in ['sessionStart', 'beforeSubmitPrompt', 'postToolUse', 'stop', 'sessionEnd']:
+    cursor_hooks.setdefault(event, []).append({'command':shlex.join([python,str(app),'event','cursor',event])})
+cursor_path.parent.mkdir(parents=True, exist_ok=True)
+cursor_path.write_text(json.dumps(cursor,indent=2)+'\n')
 
 launch = shlex.join(['env', 'TMUX_ATTN_STATE_DIR='+str(HOME/'.local/state/tmux-attn'), python,str(app)])
 config.parent.mkdir(parents=True, exist_ok=True)

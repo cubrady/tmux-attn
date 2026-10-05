@@ -2,7 +2,7 @@
 
 在 tmux 裡同時使用多個 coding agent 時，讓你一眼看到**哪些正在工作、哪些需要回覆、哪些已完成但尚未查看**，減少來回巡查視窗。
 
-支援 Claude Code、Codex CLI 和 Pi。適合在 Mac 工作機上執行 agent，再從 Ghostty 透過 SSH 連線使用；設定應安裝在執行 tmux／agent 的工作機上。
+支援 Claude Code、Codex CLI、Cursor CLI（`agent`）和 Pi。適合在 Mac 工作機上執行 agent，再從 Ghostty 透過 SSH 連線使用；設定應安裝在執行 tmux／agent 的工作機上。
 
 ## 畫面與操作
 
@@ -185,3 +185,5 @@ python3 tests/popup_roundtrip.py
 ```
 
 Repo 追蹤程式、測試、文件及預設別名；本機狀態、匯出檔和個人紀錄由 `.gitignore` 排除。原始 polling starter 保留在 `legacy/` 作為歷史參考。
+
+Cursor CLI 使用原生 `~/.cursor/hooks.json` 的完成事件，並辨識繼承的 Claude hooks 為 Cursor。已開啟的互動 CLI 另以程序與畫面確認狀態：`ctrl+c to stop` 表示工作中，完成後切成 👀；若回答以問號結尾則顯示 🙋。核准對話框優先顯示 🙋。此畫面補充辨識已在 Cursor CLI 2026.10.01 驗證，未知畫面不猜測。
