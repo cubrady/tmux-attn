@@ -454,6 +454,9 @@ def grouped_rows(rows):
 
 
 def display_reason(item, reviewed):
+    if item['state'] == 'WAIT' and item['reason'].startswith('Queued follow-up questions: '):
+        count = item['reason'].split(': ',1)[1]
+        return f'有 {count} 個問題等你回答（agent 仍可繼續工作）'
     if item['state'] == 'IDLE':
         background = '（背景工作仍在運行）' if 'background tasks still running' in item['reason'] else ''
         if reviewed:
