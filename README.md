@@ -191,3 +191,5 @@ Cursor CLI 使用原生 `~/.cursor/hooks.json` 的完成事件，並辨識繼承
 點擊底列右側的 🙋／👀／🏃／💤 圖示或數字，可循環巡覽該狀態的 agent，直接定位到對應 session、window 與 pane。四組各自記住位置，依 session 名稱、window 建立順序與 pane 編號巡覽；走到最後後回到第一個。數量為零時不切換。點擊不會標記已查看，仍需在清單按 `d`。每個連線 client 的巡覽位置分開記錄，原有底列 session 點擊保留。安裝會開啟 tmux mouse；回復腳本會還原原本設定與按鍵。
 
 滑鼠互動驗證：`python3 tests/status_click_roundtrip.py`（獨立 tmux 環境）。
+
+Codex 的非同步提問（`Queued follow-up inputs`）即使 agent 繼續工作，也會優先顯示 🙋。清單會顯示待回答問題數；回答後回到目前的工作／完成狀態。

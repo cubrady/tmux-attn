@@ -270,6 +270,35 @@ def approval_screen(text):
             and bool(re.search(r'\b(?:No|deny|reject)\b',tail,re.I)))
 
 
+def queued_questions_screen(text):
+    """Require Codex's actual queued-question footer, not prose or tool args."""
+    tail = '\n'.join(text.rstrip().splitlines()[-18:])
+    if not re.search(r'^\s*• Queued follow-up inputs\s*$',tail,re.M):
+        return 0
+    count = re.search(r'^\s*\?\s+(\d+) questions?\s*$',tail,re.M)
+    if not count or not re.search(r'^\s*⇧← to answer\s*$',tail,re.M):
+        return 0
+    return int(count[1])
+
+
+def sync_attention_overlay(con, sock, pane, pid, key, screen, previous, overlays):
+    questions = queued_questions_screen(screen)
+    reason = ('Approval dialog visible' if approval_screen(screen) else
+              f'Queued follow-up questions: {questions}' if questions else None)
+    if reason:
+        overlays[key] = reason
+        record(con,sock,pane,pid,'codex','WAIT',reason)
+    else:
+        old_reason = overlays.pop(key,None)
+        current = con.execute('SELECT state,reason FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
+        # Recover our persisted screen state after an observer restart, too.
+        if not old_reason and current and (current['reason'] == 'Approval dialog visible' or current['reason'].startswith('Queued follow-up questions: ')):
+            old_reason = current['reason']
+        if previous and current and tuple(current) == ('WAIT',old_reason):
+            state,_,turn = previous
+            record(con,sock,pane,pid,'codex',*state,event_key=turn)
+
+
 def discover(con, sock, live, table, attempted):
     state_db = Path.home()/'.codex/state_5.sqlite'
     for (pane,pane_pid),meta in live.items():
@@ -373,7 +402,7 @@ def observe():
         signal.signal(signal.SIGTERM,stop)
         signal.signal(signal.SIGINT,stop)
         con = db()
-        cursors, attempted, overlays = {},{},set()
+        cursors, attempted, overlays = {},{},{}
         table = {}; refreshed = 0
         while not stopping and tmux('list-sessions',check=False):
             try:
@@ -403,17 +432,9 @@ def observe():
                         if event:
                             state,stamp,turn = event
                             record(con,sock,pane,pid,'codex',*state,event_time=stamp,event_key=turn)
-                    # Existing older CLIs have no pending-approval event in their rollouts.
+                    # The UI can await human input while the main turn keeps running.
                     screen = tmux('capture-pane','-p','-t',pane,'-S','-35',check=False)
-                    if approval_screen(screen):
-                        overlays.add(key)
-                        record(con,sock,pane,pid,'codex','WAIT','Approval dialog visible')
-                    elif key in overlays:
-                        overlays.remove(key)
-                        current = con.execute('SELECT state,reason FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
-                        if previous and current and tuple(current) == ('WAIT','Approval dialog visible'):
-                            state,_,turn = previous
-                            record(con,sock,pane,pid,'codex',*state,event_key=turn)
+                    sync_attention_overlay(con,sock,pane,pid,key,screen,previous,overlays)
             except Exception as exc:
                 with (STATE/'observer-errors.log').open('a') as log:
                     log.write(f'{time.time():.0f} {type(exc).__name__}: {exc}\n')

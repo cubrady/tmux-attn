@@ -8,8 +8,49 @@ from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
 from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude
+from codex_observer import queued_questions_screen,sync_attention_overlay
 
 class ObserverTests(unittest.TestCase):
+ def test_queued_questions_override_running_and_clear_to_latest_lifecycle(self):
+  screen='• Working (58m 18s • esc to interrupt)\n• Queued follow-up inputs\n  ? 1 question\n    ⇧← to answer\n\n› Ask Codex to do anything\nGPT high · /project · task\n← for agents'
+  self.assertEqual(queued_questions_screen(screen),1)
+  self.assertEqual(queued_questions_screen(screen.replace('1 question','2 questions')),2)
+  self.assertEqual(queued_questions_screen('Explain Queued follow-up inputs and request_user_input_async'),0)
+  self.assertEqual(queued_questions_screen(screen.replace('⇧← to answer','question text')),0)
+  self.assertEqual(queued_questions_screen(screen.replace('• Queued follow-up inputs','Quoted: Queued follow-up inputs')),0)
+  with tempfile.TemporaryDirectory() as directory:
+   previous_state=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     key=('%1','123','root','path');overlays={}
+     previous=(('RUNNING','Working',False),1,'turn')
+     a.record(con,'sock','%1','123','codex',*previous[0])
+     def scan(text,latest=previous):sync_attention_overlay(con,'sock','%1','123',key,text,latest,overlays)
+     scan(screen)
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual(row['state'],'WAIT')
+     self.assertIn('1 個問題等你回答',a.display_reason(dict(row),False))
+     a.acknowledge(con,row)
+     acknowledged=dict(con.execute('SELECT * FROM panes').fetchone())
+     scan(screen)
+     current=dict(con.execute('SELECT * FROM panes').fetchone())
+     self.assertEqual(current['revision'],acknowledged['revision'])
+     self.assertEqual(current['acknowledged'],acknowledged['acknowledged'])
+     scan(screen.replace('1 question','2 questions'))
+     self.assertGreater(con.execute('SELECT revision FROM panes').fetchone()[0],current['revision'])
+     overlays.clear()  # Observer restarted while the question was visible.
+     scan('• Working (esc to interrupt)')
+     self.assertEqual(con.execute('SELECT state FROM panes').fetchone()[0],'RUNNING')
+     scan(screen)
+     scan('',(('IDLE','Response finished; review needed',True),2,'turn'))
+     self.assertEqual(con.execute('SELECT state FROM panes').fetchone()[0],'IDLE')
+     # Removing the HUD must not erase a newer native approval/input event.
+     scan(screen)
+     a.record(con,'sock','%1','123','codex','WAIT','New native approval')
+     scan('')
+     self.assertEqual(con.execute('SELECT reason FROM panes').fetchone()[0],'New native approval')
+   finally:a.STATE=previous_state
+
  def test_claude_stale_permission_recovers_without_overriding_dialog_or_ack(self):
   busy='✢ Scurrying… (running PostToolUse hooks… 3/8 · 7m 38s)\n────\n❯\n────\n⏵⏵ auto mode on · esc to interrupt'
   done='⏺ Finished the update.\n✻ Sautéed for 7m 58s · done 下午2:46\n────\n❯\n────\n⏵⏵ auto mode on'
