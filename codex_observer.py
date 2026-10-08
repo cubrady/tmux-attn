@@ -90,6 +90,68 @@ def observe_cursor(con, sock, live, table):
             record(con,sock,pane,pid,'cursor',*state)
 
 
+def native_claude_pids(pane_pid, table):
+    descendants = {int(pane_pid)}
+    for _ in range(30):
+        more = {pid for pid,(parent,_) in table.items() if parent in descendants}
+        if more.issubset(descendants):
+            break
+        descendants |= more
+    candidates = set()
+    for pid in descendants:
+        args = table.get(pid,(0,''))[1]
+        executable = args.split(None,1)[0] if args else ''
+        if (Path(executable).name == 'claude' or '/claude/versions/' in executable):
+            if not any(flag in args.split() for flag in ('daemon','bg-pty-host','bg-spare','--bg-spare','--bg-pty-host')):
+                candidates.add(pid)
+    # An inner Claude subprocess is not the visible terminal's primary agent.
+    roots = []
+    for pid in candidates:
+        parent = table[pid][0]
+        for _ in range(30):
+            if parent in candidates:
+                break
+            if parent not in descendants or parent not in table:
+                roots.append(pid)
+                break
+            parent = table[parent][0]
+    return roots
+
+
+def claude_screen(screen):
+    lines = screen.rstrip().splitlines()
+    tail = '\n'.join(lines[-35:])
+    # Permission and question menus may be drawn over earlier activity output.
+    if re.search(r'(?:Do you want to proceed\?|needs your approval|Enter to (?:select|confirm|continue|submit)|Session paused|Esc to cancel|Submit answers|❯\s*\d+\.\s*(?:Yes|Allow|No|Deny|Reject))',tail,re.I):
+        return None
+    for index in range(len(lines)-1,max(-1,len(lines)-35),-1):
+        line = lines[index].strip()
+        if not re.match(r'^[·✢✳✶✻✽]\s',line):
+            continue
+        if re.match(r'^[·✢✳✶✻✽]\s+Waiting for \d+ background agents? to finish\s*$',line):
+            return 'RUNNING','Working',False
+        if re.search(r'…\s*\(',line) and 'esc to interrupt' in tail.lower():
+            return 'RUNNING','Working',False
+        if re.search(r'\bfor\s+\d+[hms](?:\s|\b)',line) and 'esc to interrupt' not in tail.lower():
+            body = '\n'.join(lines[:index]).rstrip()
+            classified = classify('claude','Stop',{'last_assistant_message':body})
+            return (*classified,False) if len(classified) == 2 else classified
+    return None
+
+
+def observe_claude(con, sock, live, table):
+    for (pane,pid) in live:
+        current = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
+        if not current or current['agent'] != 'claude' or len(native_claude_pids(pid,table)) != 1:
+            continue
+        screen = tmux('capture-pane','-p','-J','-t',pane,check=False)
+        state = claude_screen(screen)
+        # Let a freshly emitted native permission/stop event settle before a
+        # screen update can replace it. Delayed old notifications still recover.
+        if state and current['state'] != state[0] and time.time()-max(current['updated'],current['last_event_time']) >= 2:
+            record(con,sock,pane,pid,'claude',*state)
+
+
 def process_start(pid):
     p = subprocess.run(['ps','-p',str(pid),'-o','lstart='],env=os.environ|{'TZ':'UTC','LC_ALL':'C'},capture_output=True,text=True,timeout=4)
     return int(datetime.strptime(p.stdout.strip(),'%a %b %d %H:%M:%S %Y').replace(tzinfo=timezone.utc).timestamp())
@@ -320,6 +382,7 @@ def observe():
                     table = processes(); refreshed = time.monotonic()
                     discover(con,sock,live,table,attempted)
                 observe_cursor(con,sock,live,table)
+                observe_claude(con,sock,live,table)
                 for mapping in con.execute('SELECT * FROM codex_sessions WHERE socket=?',(sock,)).fetchall():
                     pane,pid = mapping['pane'],mapping['pid']
                     if (pane,pid) not in live:

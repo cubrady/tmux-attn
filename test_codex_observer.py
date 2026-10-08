@@ -7,9 +7,48 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
-from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover
+from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude
 
 class ObserverTests(unittest.TestCase):
+ def test_claude_stale_permission_recovers_without_overriding_dialog_or_ack(self):
+  busy='✢ Scurrying… (running PostToolUse hooks… 3/8 · 7m 38s)\n────\n❯\n────\n⏵⏵ auto mode on · esc to interrupt'
+  done='⏺ Finished the update.\n✻ Sautéed for 7m 58s · done 下午2:46\n────\n❯\n────\n⏵⏵ auto mode on'
+  self.assertEqual(claude_screen(busy),('RUNNING','Working',False))
+  waiting='✻ Waiting for 5 background agents to finish\n'+('\n'.join(['agents panel']*20))
+  self.assertEqual(claude_screen(waiting),('RUNNING','Working',False))
+  self.assertEqual(claude_screen(waiting+'\n'+done)[0],'IDLE')
+  self.assertEqual(claude_screen(done)[0],'IDLE')
+  self.assertEqual(claude_screen(done.replace('Finished the update.','Which option？'))[0],'WAIT')
+  for modal in ['Do you want to proceed?\n❯ 1. Yes\n2. No', 'Claude Code needs your approval for the plan', 'Enter to select · Esc to cancel','Submit answers','Press Enter to continue','Session paused']:
+   self.assertIsNone(claude_screen(modal+'\n'+busy))
+   self.assertIsNone(claude_screen(modal+'\n'+done))
+  self.assertIsNone(claude_screen('Quoted: '+busy))
+  self.assertIsNone(claude_screen('❯\n⏵⏵ auto mode on'))
+  table={123:(1,'zsh'),456:(123,'claude --resume root'),500:(456,'claude daemon run'),501:(500,'claude bg-pty-host --bg-pty-host socket'),502:(501,'claude bg-spare --bg-spare socket'),600:(456,'claude -p child')}
+  self.assertEqual(native_claude_pids('123',table),[456])
+  self.assertEqual(native_claude_pids('502',table),[])
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     live={('%1','123'):{'path':'/project'}}
+     a.record(con,'sock','%1','123','claude','WAIT','Claude needs your permission',event_time=1000000000)
+     def scan(screen):
+      with patch('codex_observer.tmux',return_value=screen):observe_claude(con,'sock',live,table)
+     before=dict(con.execute('SELECT * FROM panes').fetchone())
+     scan('Do you want to proceed?\n'+busy)
+     self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),before)
+     scan(busy)
+     self.assertEqual(con.execute('SELECT state FROM panes').fetchone()[0],'RUNNING')
+     with patch('codex_observer.time.time',return_value=2000000000):scan(done)
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['state'],row['needs_review']),('IDLE',1))
+     a.acknowledge(con,row)
+     before=dict(con.execute('SELECT * FROM panes').fetchone())
+     scan(done)
+     self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),before)
+   finally:a.STATE=previous
+
  def test_cursor_footer_lifecycle_and_acknowledgement(self):
   def screen(body,active=False):
    return body+'\n\n → Add a follow-up'+('    ctrl+c to stop' if active else '')+'\n\n Auto · 16.6%    Run Everything\n /project · main\n'
