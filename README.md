@@ -14,15 +14,15 @@
 GitHub 點 **Copy**。只有兩種：`solo`（單機）或 `multi`（一台 server + 若干 client）。
 
 ```text
-Install tmux-attn on THIS machine. Tailscale/LAN only; never expose :7788 publicly. Never guess IPs/SSH.
+Install tmux-attn on THIS machine. Tailscale/LAN only; never expose :7788 publicly. Never guess IPs.
 
 Ask: SETUP=solo|multi
-  solo → git clone git@github.com:cubrady/tmux-attn.git && cd tmux-attn && sh install.sh --solo
-  multi client → need PEER_NAME, LOCAL_FEED_URL (this host http://…:7788), optional SERVER_SSH=user@host
-       git clone … && cd tmux-attn
-       PEER_NAME='…' LOCAL_FEED_URL='http://…:7788' SERVER_SSH='…' sh install.sh
-Follow script NEXT STEPS (start ~/.local/bin/tmux-attn web, curl health, reload hooks).
-Server (once): peers.json lists clients + tmux-attn web. Phone opens server:7788.
+  solo → clone git@github.com:cubrady/tmux-attn.git && cd tmux-attn && sh install.sh --solo
+  multi client → PEER_NAME, LOCAL_FEED_URL=http://$(tailscale ip -4):7788, SERVER_URL=http://<server>:7788
+       clone … && cd tmux-attn
+       PEER_NAME='…' LOCAL_FEED_URL='…' SERVER_URL='…' sh install.sh
+Follow NEXT STEPS (start ~/.local/bin/tmux-attn web, curl health, reload hooks).
+Join uses POST SERVER_URL/api/peers (no SSH required). Phone opens server:7788.
 Report install/web/health/peers status.
 ```
 
@@ -30,9 +30,9 @@ Report install/web/health/peers status.
 
 | 情境 | 給什麼 |
 | --- | --- |
-| **Solo** | 說 `SETUP=solo` 即可 |
-| **Multi · client** | `PEER_NAME`、本機 `LOCAL_FEED_URL`；若要代改 server peers 再加 `SERVER_SSH`（如 `dev@100.116.100.59`） |
-| **Multi · server** | 本機跑 web；用 client 的 name/url 執行 `PEER_NAME=… LOCAL_FEED_URL=… python3 join_peer.py --apply` |
+| **Solo** | `SETUP=solo` |
+| **Multi · client** | `PEER_NAME`；`LOCAL_FEED_URL` 用**本機** `tailscale ip -4`；`SERVER_URL`（server 的 `http://…:7788`，走 `/api/peers`，**不必 SSH**） |
+| **Multi · server** | 常駐 `tmux-attn web`；也可本機 `join_peer.py --apply` |
 
 ---
 

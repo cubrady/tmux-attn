@@ -969,6 +969,56 @@ def load_peers():
     return result
 
 
+def upsert_peer(name, url):
+    """Add or update a peer in peers.json. Returns (ok, detail)."""
+    name = clean(name or '')
+    url = clean(url or '').rstrip('/')
+    if not name or not url.startswith(('http://', 'https://')):
+        return False, 'name and http(s) url required'
+    path = peers_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data = {'peers': []}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text() or '{}')
+            if isinstance(loaded, dict):
+                data = loaded
+        except ValueError:
+            return False, 'peers.json is not valid JSON'
+    peers = list(data.get('peers') or [])
+    action = 'added'
+    for row in peers:
+        if isinstance(row, dict) and clean(row.get('name') or '') == name:
+            row['url'] = url
+            action = 'updated'
+            break
+    else:
+        peers.append({'name': name, 'url': url})
+    data['peers'] = peers
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+    return True, action
+
+
+def kill_pane(pane, pid, sock=None):
+    """Kill a live pane after verifying pane_pid. Returns None on success."""
+    pane = clean(pane or '')
+    pid = clean(str(pid or ''))
+    if not pane or not pid:
+        return 'pane and pid required'
+    live = live_panes(sock)
+    meta = next((row for row in live.values() if row['pane'] == pane and row['pid'] == str(pid)), None)
+    if not meta:
+        return 'pane not found or pid mismatch'
+    actual = tmux('display-message', '-p', '-t', pane, '#{pane_pid}', check=False, sock=sock)
+    if actual != str(pid):
+        return 'pane pid changed'
+    try:
+        tmux('kill-pane', '-t', pane, sock=sock)
+    except RuntimeError as exc:
+        return f'kill failed: {exc}'
+    return None
+
+
 def fetch_peer_agents(url, timeout=1.5):
     """Pull a machine-local /api/agents document. Never call /api/fleet here."""
     request = Request(url.rstrip('/') + '/api/agents', headers={'Accept': 'application/json'})
@@ -1389,6 +1439,51 @@ def dispatch_send(payload):
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local}
 
 
+def dispatch_kill(payload):
+    """Kill a local pane or forward kill to a named peer."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    pane = clean(payload.get('pane') or '')
+    pid = clean(str(payload.get('pid') or ''))
+    host = clean(payload.get('host') or '')
+    if not pane or not pid:
+        return 400, {'ok': False, 'error': 'pane and pid are required'}
+    local = local_host_name()
+    if host and host != local and not payload.get('_local_only'):
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, {'ok': False, 'error': f'unknown host {host}'}
+        try:
+            body = json.dumps({'pane': pane, 'pid': pid, '_local_only': True}).encode()
+            request = Request(
+                peer['url'].rstrip('/') + '/api/kill',
+                data=body,
+                headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=3) as response:
+                data = json.loads(response.read().decode())
+            return (200 if data.get('ok') else 502), data
+        except Exception as exc:
+            return 502, {'ok': False, 'error': f'peer kill failed: {type(exc).__name__}'}
+    error = kill_pane(pane, pid)
+    if error:
+        return 409, {'ok': False, 'error': error}
+    return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, 'killed': True}
+
+
+def dispatch_peer_register(payload):
+    """Upsert a client feed into this server's peers.json."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    name = payload.get('name')
+    url = payload.get('url')
+    ok, detail = upsert_peer(name, url)
+    if not ok:
+        return 400, {'ok': False, 'error': detail}
+    return 200, {'ok': True, 'action': detail, 'peer': {'name': clean(name), 'url': clean(url).rstrip('/')}}
+
+
 def make_web_handler(fleet_only=False):
     index = web_index_path()
     if not index.is_file():
@@ -1450,9 +1545,6 @@ def make_web_handler(fleet_only=False):
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path != '/api/send':
-                self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
-                return
             length = int(self.headers.get('Content-Length') or 0)
             raw = self.rfile.read(length) if length > 0 else b'{}'
             try:
@@ -1465,12 +1557,27 @@ def make_web_handler(fleet_only=False):
                 return
             # Only peer-forwarded server requests may set _local_only.
             payload.pop('_local_only', None)
-            if fleet_only and not payload.get('host'):
-                self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
-                           'application/json; charset=utf-8')
+            if path == '/api/peers':
+                code, body = dispatch_peer_register(payload)
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
-            code, body = dispatch_send(payload)
-            self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+            if path == '/api/kill':
+                if fleet_only and not payload.get('host'):
+                    self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
+                               'application/json; charset=utf-8')
+                    return
+                code, body = dispatch_kill(payload)
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
+            if path == '/api/send':
+                if fleet_only and not payload.get('host'):
+                    self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
+                               'application/json; charset=utf-8')
+                    return
+                code, body = dispatch_send(payload)
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
+            self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
 
     return Handler
 

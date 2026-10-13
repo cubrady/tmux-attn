@@ -7,10 +7,10 @@
 #
 # Multi client:
 #   PEER_NAME=brad-cicd-2 LOCAL_FEED_URL=http://100.x:7788 \
-#     SERVER_SSH=dev@100.116.100.59 sh install.sh
+#     SERVER_URL=http://100.116.100.59:7788 sh install.sh
 #
-# Env: SETUP=solo|multi (default: multi if PEER_NAME set, else solo tips)
-#      PEER_NAME, LOCAL_FEED_URL, SERVER_SSH (or AGGREGATOR_SSH), TMUX_ATTN_DIR, TMUX_ATTN_REPO
+# Env: SETUP=solo|multi
+#      PEER_NAME, LOCAL_FEED_URL, SERVER_URL (preferred), SERVER_SSH (optional fallback)
 # Flags: --sidebar  --no-clone  --join-only  --check  --solo
 set -eu
 
@@ -74,11 +74,12 @@ run_join() {
   if [ -z "${PEER_NAME:-}" ] || [ -z "${LOCAL_FEED_URL:-}" ]; then
     echo ""
     echo "Solo?  python3 $root/join_peer.py --solo"
-    echo "Multi client? set PEER_NAME + LOCAL_FEED_URL (+ optional SERVER_SSH=user@host), then:"
-    echo "  PEER_NAME=… LOCAL_FEED_URL=http://…:7788 sh install.sh --join-only"
+    echo "Multi client? set PEER_NAME + LOCAL_FEED_URL + SERVER_URL, then:"
+    echo "  PEER_NAME=… LOCAL_FEED_URL=http://…:7788 SERVER_URL=http://server:7788 sh install.sh --join-only"
     return 0
   fi
   export PEER_NAME LOCAL_FEED_URL
+  [ -n "${SERVER_URL:-}" ] && export SERVER_URL
   [ -n "${SERVER_SSH:-}" ] && export SERVER_SSH
   [ -n "${AGGREGATOR_SSH:-}" ] && export AGGREGATOR_SSH
   [ -n "${PEERS_PATH:-}" ] && export PEERS_PATH
