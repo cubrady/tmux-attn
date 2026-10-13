@@ -87,7 +87,7 @@ def observe_cursor(con, sock, live, table):
             # Preserve native hook error/interruption reasons and acknowledged results.
             if current and current['agent'] == 'cursor' and current['state'] == state[0]:
                 continue
-            record(con,sock,pane,pid,'cursor',*state)
+            record(con,sock,pane,pid,'cursor',*state,source='observer')
 
 
 def native_claude_pids(pane_pid, table):
@@ -149,7 +149,7 @@ def observe_claude(con, sock, live, table):
         # Let a freshly emitted native permission/stop event settle before a
         # screen update can replace it. Delayed old notifications still recover.
         if state and current['state'] != state[0] and time.time()-max(current['updated'],current['last_event_time']) >= 2:
-            record(con,sock,pane,pid,'claude',*state)
+            record(con,sock,pane,pid,'claude',*state,source='observer')
 
 
 def process_start(pid):
@@ -287,7 +287,7 @@ def sync_attention_overlay(con, sock, pane, pid, key, screen, previous, overlays
               f'Queued follow-up questions: {questions}' if questions else None)
     if reason:
         overlays[key] = reason
-        record(con,sock,pane,pid,'codex','WAIT',reason)
+        record(con,sock,pane,pid,'codex','WAIT',reason,source='observer')
     else:
         old_reason = overlays.pop(key,None)
         current = con.execute('SELECT state,reason FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
@@ -296,7 +296,7 @@ def sync_attention_overlay(con, sock, pane, pid, key, screen, previous, overlays
             old_reason = current['reason']
         if previous and current and tuple(current) == ('WAIT',old_reason):
             state,_,turn = previous
-            record(con,sock,pane,pid,'codex',*state,event_key=turn)
+            record(con,sock,pane,pid,'codex',*state,event_key=turn,source='observer')
 
 
 def discover(con, sock, live, table, attempted):
@@ -350,7 +350,7 @@ def discover(con, sock, live, table, attempted):
                         # Only a changed, verified mapping permits discarding the
                         # incompatible root's timestamp. Subsequent scans retain
                         # ordinary freshness and acknowledgement checks.
-                        record(con,sock,pane,pane_pid,'codex',*state,event_time=stamp,event_key=turn,replace_identity=True)
+                        record(con,sock,pane,pane_pid,'codex',*state,event_time=stamp,event_key=turn,replace_identity=True,source='observer')
 
 
 def retire_mapping(con,mapping):
@@ -358,7 +358,7 @@ def retire_mapping(con,mapping):
                           (mapping['socket'],mapping['pane'],mapping['pid'])).fetchone()
     if current and current['agent'] == 'codex' and current['state'] in ('RUNNING','WAIT'):
         record(con,mapping['socket'],mapping['pane'],mapping['pid'],'codex','IDLE',
-               'Agent exited; review current work',True,event_key='exit:'+str(mapping['cli_pid']))
+               'Agent exited; review current work',True,event_key='exit:'+str(mapping['cli_pid']),source='observer')
 
 
 def repair_mapping(con, mapping, state_db):
@@ -381,7 +381,7 @@ def repair_mapping(con, mapping, state_db):
             state, _, turn = event
             # A child may have stamped its completion later than root task_started.
             # Recovery bypasses that invalid freshness stamp exactly once.
-            record(con,mapping['socket'],mapping['pane'],mapping['pid'],'codex',*state,event_key=turn)
+            record(con,mapping['socket'],mapping['pane'],mapping['pid'],'codex',*state,event_key=turn,source='observer')
     return True
 
 
@@ -431,7 +431,7 @@ def observe():
                         cursors[key] = (offset,previous)
                         if event:
                             state,stamp,turn = event
-                            record(con,sock,pane,pid,'codex',*state,event_time=stamp,event_key=turn)
+                            record(con,sock,pane,pid,'codex',*state,event_time=stamp,event_key=turn,source='observer')
                     # The UI can await human input while the main turn keeps running.
                     screen = tmux('capture-pane','-p','-t',pane,'-S','-35',check=False)
                     sync_attention_overlay(con,sock,pane,pid,key,screen,previous,overlays)
