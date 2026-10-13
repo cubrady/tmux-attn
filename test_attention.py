@@ -233,9 +233,10 @@ class StoreTests(unittest.TestCase):
 
 
     def test_conversation_preview_clip_and_parse(self):
-        self.assertEqual(a.clip_preview('x' * 100), 'x' * 100)
-        self.assertTrue(a.clip_preview('x' * 101).endswith('…'))
-        self.assertEqual(len(a.clip_preview('x' * 101)), 100)
+        self.assertEqual(a.clip_preview('x' * a.PREVIEW_CHARS), 'x' * a.PREVIEW_CHARS)
+        self.assertTrue(a.clip_preview('x' * (a.PREVIEW_CHARS + 1)).endswith('…'))
+        self.assertEqual(len(a.clip_preview('x' * (a.PREVIEW_CHARS + 1))), a.PREVIEW_CHARS)
+        self.assertEqual(len(a.clip_preview('y' * 500, a.PREVIEW_CHARS_FULL)), 500)
         self.assertTrue(a.user_text_is_noise('<environment_context>\n  <cwd>/tmp</cwd>'))
         self.assertFalse(a.user_text_is_noise('修好登入流程'))
         claude = Path(self.tmp.name) / 'claude.jsonl'
@@ -317,6 +318,69 @@ class StoreTests(unittest.TestCase):
         preview = payload['agents'][0]['preview']
         self.assertEqual(preview['users'], ['修好 OAuth'])
         self.assertIn('redirect URI', preview['agent'])
+
+    def test_agent_sort_key_newest_pending_first(self):
+        older = {'tracked': True, 'state': 'IDLE', 'pending': True, 'updated': 100, 'host': 'a', 'pane': '%1'}
+        newer = {'tracked': True, 'state': 'IDLE', 'pending': True, 'updated': 200, 'host': 'a', 'pane': '%2'}
+        wait = {'tracked': True, 'state': 'WAIT', 'pending': True, 'updated': 50, 'host': 'a', 'pane': '%3'}
+        rows = [older, newer, wait]
+        rows.sort(key=a.agent_sort_key)
+        self.assertEqual([row['pane'] for row in rows], ['%3', '%2', '%1'])
+
+
+    def test_full_preview_refreshes_stale_short_cache(self):
+        long_agent = '完整回覆：' + ('內容' * 120)
+        transcript = Path(self.tmp.name) / 'claude.jsonl'
+        transcript.write_text(json.dumps({
+            'type': 'assistant',
+            'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': long_agent}]},
+        }) + '\n')
+        self.live = {
+            ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'},
+        }
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Response finished; review needed', True)
+        short = a.clip_preview(long_agent, 100)
+        with self.con:
+            self.con.execute(
+                'UPDATE panes SET preview_agent=?, preview_users=?, preview_mtime=?, transcript_path=? WHERE pane=? AND pid=?',
+                (short, '[]', transcript.stat().st_mtime, str(transcript), '%1', '123'),
+            )
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        with patch.object(a, 'resolve_transcript_path', return_value=str(transcript)):
+            full = a.pane_conversation_preview(self.con, row, self.live[('%1', '123')], limit=a.PREVIEW_CHARS_FULL)
+        self.assertGreater(len(full['agent']), len(short))
+        self.assertIn('完整回覆', full['agent'])
+
+    def test_pane_preview_card_short_sheet_long(self):
+        long_agent = '完成。' + ('細節' * 200)
+        self.live = {
+            ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'},
+        }
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Response finished; review needed', True)
+        a.remember_preview(self.con, 'socket', '%1', '123', user='長任務說明', agent=long_agent)
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        card = a.pane_conversation_preview(self.con, row, self.live[('%1', '123')], limit=a.PREVIEW_CHARS)
+        full = a.pane_conversation_preview(self.con, row, self.live[('%1', '123')], limit=a.PREVIEW_CHARS_FULL)
+        self.assertLessEqual(len(card['agent']), a.PREVIEW_CHARS)
+        self.assertTrue(card['agent'].endswith('…'))
+        self.assertGreater(len(full['agent']), len(card['agent']))
+        self.assertIn('完成。', full['agent'])
+
+
+    def test_dispatch_preview_requires_live_tracked_pane(self):
+        code, body = a.dispatch_preview({'pane': '%1', 'pid': '123'})
+        self.assertEqual(code, 409)
+        self.assertFalse(body['ok'])
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'urlopen') as urlopen_mock:
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = json.dumps({
+                'ok': True, 'preview': {'users': ['hi'], 'agent': 'there'},
+            }).encode()
+            code, body = a.dispatch_preview({'host': 'lab', 'pane': '%9', 'pid': '999'})
+        self.assertEqual(code, 200)
+        self.assertEqual(body['preview']['agent'], 'there')
+        self.assertEqual(urlopen_mock.call_args.args[0].full_url, 'http://lab:7788/api/preview')
 
     def test_maybe_notify_wait_posts_when_enabled(self):
 
@@ -435,6 +499,9 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(fleet['agents'][0]['host'], a.local_host_name())
             self.assertIn('/api/fleet', page)
             self.assertIn('/api/send', page)
+            self.assertIn('/api/preview', page)
+            self.assertIn('id="group-${key}"', page)
+            self.assertIn('jumpToGroup', page)
             self.assertIn('等待回覆', page)
             self.assertIn('sheet-form', page)
             self.assertIn('sheet-mic', page)

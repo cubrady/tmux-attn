@@ -109,7 +109,8 @@ def clean(value, limit=240):
     return ''.join(c for c in str(value) if c.isprintable())[:limit]
 
 
-PREVIEW_CHARS = 100
+PREVIEW_CHARS = 160
+PREVIEW_CHARS_FULL = 4000
 PREVIEW_USERS = 3
 
 
@@ -292,7 +293,7 @@ def parse_cursor_transcript(path):
     return users, agent
 
 
-def conversation_preview(path, agent=''):
+def conversation_preview(path, agent='', limit=PREVIEW_CHARS_FULL):
     """Last user intents + latest agent text from a transcript. Empty if unreadable."""
     path = Path(path) if path else None
     if not path or not path.is_file():
@@ -308,8 +309,8 @@ def conversation_preview(path, agent=''):
             users, agent_text = parse_claude_style_transcript(path)
     except OSError:
         return {'users': [], 'agent': ''}
-    users = [clip_preview(text) for text in users[-PREVIEW_USERS:]]
-    return {'users': users, 'agent': clip_preview(agent_text) if agent_text else ''}
+    users = [clip_preview(text, limit) for text in users[-PREVIEW_USERS:]]
+    return {'users': users, 'agent': clip_preview(agent_text, limit) if agent_text else ''}
 
 
 def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_path=None):
@@ -322,10 +323,13 @@ def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_
     except (TypeError, ValueError):
         users = []
     if user and not user_text_is_noise(user):
-        clipped = clip_preview(user)
+        clipped = clip_preview(user, PREVIEW_CHARS_FULL)
         if not users or users[-1] != clipped:
             users = (users + [clipped])[-PREVIEW_USERS:]
-    agent_text = clip_preview(agent) if agent and str(agent).strip() else (row['preview_agent'] if 'preview_agent' in row.keys() else '')
+    agent_text = (
+        clip_preview(agent, PREVIEW_CHARS_FULL) if agent and str(agent).strip()
+        else (row['preview_agent'] if 'preview_agent' in row.keys() else '')
+    )
     path = clean(transcript_path or '', 500) if transcript_path else (row['transcript_path'] if 'transcript_path' in row.keys() else '')
     with con:
         con.execute(
@@ -361,8 +365,11 @@ def resolve_transcript_path(con, row, meta):
     return path if path and Path(path).is_file() else ''
 
 
-def pane_conversation_preview(con, row, meta=None):
-    """Cached preview, refreshed from transcript when the file changes."""
+def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS):
+    """Cached preview, refreshed from transcript when the file changes.
+
+    Store a long cache; callers choose card (short) vs sheet (full) clip length.
+    """
     users = []
     try:
         users = list(json.loads(row['preview_users'] if 'preview_users' in row.keys() else '[]') or [])
@@ -376,8 +383,14 @@ def pane_conversation_preview(con, row, meta=None):
             mtime = Path(path).stat().st_mtime
         except OSError:
             mtime = 0
-        if mtime and (mtime != cached_mtime or not (users or agent_text)):
-            parsed = conversation_preview(path, row.get('agent') or '')
+        # Sheet asks for a long limit; old installs may also have short clipped cache.
+        force_full = limit > PREVIEW_CHARS
+        stale_clip = any(
+            str(text).endswith('…') and len(str(text)) <= PREVIEW_CHARS
+            for text in list(users) + ([agent_text] if agent_text else [])
+        )
+        if mtime and (force_full or stale_clip or mtime != cached_mtime or not (users or agent_text)):
+            parsed = conversation_preview(path, row.get('agent') or '', limit=PREVIEW_CHARS_FULL)
             if parsed['users'] or parsed['agent']:
                 users, agent_text = parsed['users'], parsed['agent']
                 with con:
@@ -389,9 +402,26 @@ def pane_conversation_preview(con, row, meta=None):
                          row['socket'], row['pane'], row['pid']),
                     )
     return {
-        'users': [clip_preview(text) for text in users[-PREVIEW_USERS:] if str(text).strip()],
-        'agent': clip_preview(agent_text) if agent_text else '',
+        'users': [clip_preview(text, limit) for text in users[-PREVIEW_USERS:] if str(text).strip()],
+        'agent': clip_preview(agent_text, limit) if agent_text else '',
     }
+
+
+def local_preview_for_pane(con, pane, pid, limit=PREVIEW_CHARS_FULL):
+    """Resolve a live tracked pane and return a (longer) conversation preview."""
+    sock = resolve_socket()
+    live = live_panes(sock)
+    meta = live.get((pane, pid))
+    if not meta:
+        return None, 'pane is not live'
+    row = con.execute(
+        'SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',
+        (sock, pane, pid),
+    ).fetchone()
+    if not row:
+        return None, 'pane is not tracked'
+    item = dict(row) | meta
+    return pane_conversation_preview(con, item, meta, limit=limit), None
 
 
 def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event_time=None, event_key="", replace_identity=False, source='hook'):
@@ -952,16 +982,19 @@ def command_cli(command):
 
 
 def agent_sort_key(row):
+    """Band by attention need; within a band, newest activity first."""
     host = row.get('host') or ''
     if not row.get('tracked', True):
         return (4, host, row.get('session', ''), row.get('window_id', ''), row['pane'])
+    # Negate updated so the most recently completed / active pane floats up.
+    fresh = -float(row.get('updated') or 0)
     if row['state'] == 'WAIT':
-        return (0, host, row['updated'], row['pane'])
+        return (0, fresh, host, row['pane'])
     if row.get('pending'):
-        return (1, host, row['updated'], row['pane'])
+        return (1, fresh, host, row['pane'])
     if row['state'] == 'RUNNING':
-        return (2, host, row['updated'], row['pane'])
-    return (3, host, row['updated'], row['pane'])
+        return (2, fresh, host, row['pane'])
+    return (3, fresh, host, row['pane'])
 
 
 def local_host_name():
@@ -1493,6 +1526,43 @@ def dispatch_kill(payload):
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, 'killed': True}
 
 
+def dispatch_preview(payload):
+    """Return a longer conversation preview for the sheet, local or via peer."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    pane = clean(payload.get('pane') or '')
+    pid = clean(str(payload.get('pid') or ''))
+    host = clean(payload.get('host') or '')
+    if not pane or not pid:
+        return 400, {'ok': False, 'error': 'pane and pid are required'}
+    local = local_host_name()
+    if host and host != local and not payload.get('_local_only'):
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, {'ok': False, 'error': f'unknown host {host}'}
+        try:
+            body = json.dumps({'pane': pane, 'pid': pid, '_local_only': True}).encode()
+            request = Request(
+                peer['url'].rstrip('/') + '/api/preview',
+                data=body,
+                headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=3) as response:
+                data = json.loads(response.read().decode())
+            return (200 if data.get('ok') else 502), data
+        except Exception as exc:
+            return 502, {'ok': False, 'error': f'peer preview failed: {type(exc).__name__}'}
+    try:
+        with closing(db()) as con:
+            preview, error = local_preview_for_pane(con, pane, pid)
+    except Exception as exc:
+        return 500, {'ok': False, 'error': f'{type(exc).__name__}'}
+    if error:
+        return 409, {'ok': False, 'error': error}
+    return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, 'preview': preview}
+
+
 def dispatch_peer_register(payload):
     """Upsert a client feed into this server's peers.json."""
     if not isinstance(payload, dict):
@@ -1596,6 +1666,14 @@ def make_web_handler(fleet_only=False):
                                'application/json; charset=utf-8')
                     return
                 code, body = dispatch_send(payload)
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
+            if path == '/api/preview':
+                if fleet_only and not payload.get('host'):
+                    self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
+                               'application/json; charset=utf-8')
+                    return
+                code, body = dispatch_preview(payload)
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
