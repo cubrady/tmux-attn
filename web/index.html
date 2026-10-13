@@ -148,22 +148,58 @@
       flex-wrap: wrap;
       gap: 6px;
       margin-top: 10px;
+      align-items: center;
     }
     .host-pill {
+      appearance: none;
       font-family: var(--mono);
       font-size: 0.68rem;
-      font-weight: 500;
-      padding: 3px 7px;
+      font-weight: 600;
+      padding: 4px 8px;
       border-radius: 6px;
-      background: var(--bg-elevated);
-      color: var(--muted);
       border: 1px solid var(--line);
+      cursor: pointer;
+      line-height: 1.2;
+      color: var(--host-fg, var(--muted));
+      background: var(--host-bg, var(--bg-elevated));
+      border-color: var(--host-bd, var(--line));
     }
-    .host-pill.ok { color: var(--running); border-color: color-mix(in srgb, var(--running) 35%, var(--line)); }
+    .host-pill:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .host-pill.all {
+      --host-fg: var(--muted);
+      --host-bg: var(--bg-elevated);
+      --host-bd: var(--line);
+      font-weight: 500;
+    }
+    .host-pill.tone-0 { --host-fg: #0f766e; --host-bg: #ccfbf1; --host-bd: #5eead4; }
+    .host-pill.tone-1 { --host-fg: #b45309; --host-bg: #ffedd5; --host-bd: #fdba74; }
+    .host-pill.tone-2 { --host-fg: #1d4ed8; --host-bg: #dbeafe; --host-bd: #93c5fd; }
+    .host-pill.tone-3 { --host-fg: #be123c; --host-bg: #ffe4e6; --host-bd: #fda4af; }
+    .host-pill.tone-4 { --host-fg: #3f6212; --host-bg: #ecfccb; --host-bd: #bef264; }
+    .host-pill.tone-5 { --host-fg: #0e7490; --host-bg: #cffafe; --host-bd: #67e8f9; }
+    .host-pill.tone-6 { --host-fg: #a16207; --host-bg: #fef9c3; --host-bd: #fde047; }
+    .host-pill.tone-7 { --host-fg: #9a3412; --host-bg: #ffedd5; --host-bd: #fb923c; }
     .host-pill.bad {
-      color: var(--danger);
-      background: var(--danger-bg);
-      border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+      opacity: 0.72;
+      text-decoration: line-through;
+      text-decoration-thickness: 1px;
+    }
+    .host-pill.active {
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--host-fg, var(--accent)) 55%, transparent);
+      filter: saturate(1.15);
+    }
+    @media (prefers-color-scheme: dark) {
+      .host-pill.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
+      .host-pill.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
+      .host-pill.tone-2 { --host-fg: #93c5fd; --host-bg: #172554; --host-bd: #1d4ed8; }
+      .host-pill.tone-3 { --host-fg: #fda4af; --host-bg: #4c0519; --host-bd: #be123c; }
+      .host-pill.tone-4 { --host-fg: #bef264; --host-bg: #1a2e05; --host-bd: #4d7c0f; }
+      .host-pill.tone-5 { --host-fg: #67e8f9; --host-bg: #083344; --host-bd: #0e7490; }
+      .host-pill.tone-6 { --host-fg: #fde047; --host-bg: #422006; --host-bd: #a16207; }
+      .host-pill.tone-7 { --host-fg: #fb923c; --host-bg: #431407; --host-bd: #c2410c; }
     }
     main.list {
       display: flex;
@@ -240,12 +276,30 @@
     .host {
       font-family: var(--mono);
       font-size: 0.65rem;
-      font-weight: 500;
+      font-weight: 600;
       padding: 2px 6px;
       border-radius: 5px;
-      background: var(--bg);
-      border: 1px solid var(--line);
-      color: var(--muted);
+      color: var(--host-fg, var(--muted));
+      background: var(--host-bg, var(--bg));
+      border: 1px solid var(--host-bd, var(--line));
+    }
+    .host.tone-0 { --host-fg: #0f766e; --host-bg: #ccfbf1; --host-bd: #5eead4; }
+    .host.tone-1 { --host-fg: #b45309; --host-bg: #ffedd5; --host-bd: #fdba74; }
+    .host.tone-2 { --host-fg: #1d4ed8; --host-bg: #dbeafe; --host-bd: #93c5fd; }
+    .host.tone-3 { --host-fg: #be123c; --host-bg: #ffe4e6; --host-bd: #fda4af; }
+    .host.tone-4 { --host-fg: #3f6212; --host-bg: #ecfccb; --host-bd: #bef264; }
+    .host.tone-5 { --host-fg: #0e7490; --host-bg: #cffafe; --host-bd: #67e8f9; }
+    .host.tone-6 { --host-fg: #a16207; --host-bg: #fef9c3; --host-bd: #fde047; }
+    .host.tone-7 { --host-fg: #9a3412; --host-bg: #ffedd5; --host-bd: #fb923c; }
+    @media (prefers-color-scheme: dark) {
+      .host.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
+      .host.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
+      .host.tone-2 { --host-fg: #93c5fd; --host-bg: #172554; --host-bd: #1d4ed8; }
+      .host.tone-3 { --host-fg: #fda4af; --host-bg: #4c0519; --host-bd: #be123c; }
+      .host.tone-4 { --host-fg: #bef264; --host-bg: #1a2e05; --host-bd: #4d7c0f; }
+      .host.tone-5 { --host-fg: #67e8f9; --host-bg: #083344; --host-bd: #0e7490; }
+      .host.tone-6 { --host-fg: #fde047; --host-bg: #422006; --host-bd: #a16207; }
+      .host.tone-7 { --host-fg: #fb923c; --host-bg: #431407; --host-bd: #c2410c; }
     }
     .cli {
       display: inline-flex;
@@ -625,6 +679,9 @@
     const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
     let selectedKey = '';
     let latestAgents = [];
+    let latestHosts = [];
+    let latestPayload = null;
+    let hostFilter = '';
     let sheetOpen = false;
     let recognition = null;
     let listening = false;
@@ -632,6 +689,19 @@
 
     function agentKey(a) {
       return [a.host || '', a.pane || '', a.pid || ''].join('|');
+    }
+    function hostTone(name) {
+      const text = String(name || '');
+      let hash = 0;
+      for (let i = 0; i < text.length; i++) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+      return Math.abs(hash) % 8;
+    }
+    function agentHostName(a) {
+      return a.host || latestHosts.find(h => h.source === 'local')?.name || 'local';
+    }
+    function visibleAgents() {
+      if (!hostFilter) return latestAgents;
+      return latestAgents.filter(a => agentHostName(a) === hostFilter);
     }
     function category(agent) {
       if (!agent.tracked || agent.state === 'SHELL') return 'shell';
@@ -686,7 +756,9 @@
     function cardHtml(a) {
       const cat = category(a);
       const cli = (a.cli || a.agent || a.command || 'shell').toLowerCase();
-      const host = a.host ? `<span class="host">${escapeHtml(a.host)}</span>` : '';
+      const hostName = agentHostName(a);
+      const tone = hostTone(hostName);
+      const host = `<span class="host tone-${tone}">${escapeHtml(hostName)}</span>`;
       const errorClass = a.severity === 'error' ? ' error' : '';
       const selected = agentKey(a) === selectedKey ? ' selected' : '';
       const selectable = a.tracked ? ' tabindex="0" role="button"' : '';
@@ -781,6 +853,7 @@
       fillSheet(agent);
     }
     function render(data) {
+      latestPayload = data;
       const s = data.summary || {};
       document.getElementById('summary').innerHTML = [
         ['🙋', s.wait || 0, '等待'],
@@ -791,19 +864,37 @@
         `<div class="stat"><div class="n">${e} ${n}</div><div class="l">${l}</div></div>`
       ).join('');
       const hosts = data.hosts || [];
+      latestHosts = hosts;
+      if (hostFilter && !hosts.some(h => h.name === hostFilter)) hostFilter = '';
       const okHosts = hosts.filter(h => h.ok).length;
+      const filterNote = hostFilter ? `，篩選 ${hostFilter}` : '';
       document.getElementById('meta').textContent =
         `追蹤 ${s.tracked || 0}，其他 ${s.untracked || 0}` +
         (hosts.length ? `，主機 ${okHosts}/${hosts.length}` : '') +
+        filterNote +
         '，約 2 秒更新';
-      document.getElementById('hosts').innerHTML = hosts.map(h =>
-        `<span class="host-pill ${h.ok ? 'ok' : 'bad'}" title="${escapeHtml(h.error || h.url || h.source || '')}">${escapeHtml(h.name)}${h.ok ? '' : ' offline'}</span>`
-      ).join('');
+      const hostButtons = [];
+      if (hosts.length > 1) {
+        hostButtons.push(
+          `<button type="button" class="host-pill all${hostFilter ? '' : ' active'}" data-host="" aria-pressed="${hostFilter ? 'false' : 'true'}">全部</button>`
+        );
+      }
+      for (const row of hosts) {
+        const tone = hostTone(row.name);
+        const active = hostFilter === row.name ? ' active' : '';
+        const offline = row.ok ? '' : ' bad';
+        const label = escapeHtml(row.name) + (row.ok ? '' : ' offline');
+        hostButtons.push(
+          `<button type="button" class="host-pill tone-${tone}${offline}${active}" data-host="${escapeHtml(row.name)}" title="${escapeHtml(row.error || row.url || row.source || '')}" aria-pressed="${hostFilter === row.name ? 'true' : 'false'}">${label}</button>`
+        );
+      }
+      document.getElementById('hosts').innerHTML = hostButtons.join('');
       const list = document.getElementById('list');
       const empty = document.getElementById('empty');
       const err = document.getElementById('error');
       err.hidden = true;
       latestAgents = data.agents || [];
+      const shown = visibleAgents();
       if (!latestAgents.length) {
         list.innerHTML = '';
         empty.hidden = false;
@@ -813,9 +904,16 @@
         if (sheetOpen) closeSheet();
         return;
       }
+      if (!shown.length) {
+        list.innerHTML = '';
+        empty.hidden = false;
+        empty.textContent = `沒有 ${hostFilter} 的 pane。點「全部」或其它主機。`;
+        if (sheetOpen) closeSheet();
+        return;
+      }
       empty.hidden = true;
       const grouped = Object.fromEntries(SECTIONS.map(([key]) => [key, []]));
-      for (const a of latestAgents) grouped[category(a)].push(a);
+      for (const a of shown) grouped[category(a)].push(a);
       list.innerHTML = SECTIONS.map(([key, title]) => {
         const rows = grouped[key];
         if (!rows.length) return '';
@@ -868,6 +966,13 @@
         if (!speechBase.endsWith(' ') && speechBase) speechBase += ' ';
       };
     }
+    document.getElementById('hosts').addEventListener('click', (event) => {
+      const pill = event.target.closest('.host-pill[data-host]');
+      if (!pill) return;
+      const name = pill.dataset.host || '';
+      hostFilter = (!name || hostFilter === name) ? '' : name;
+      if (latestPayload) render(latestPayload);
+    });
     document.getElementById('list').addEventListener('click', (event) => {
       const card = event.target.closest('.card[data-key]');
       if (!card) return;
