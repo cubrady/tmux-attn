@@ -11,22 +11,28 @@
 
 ## Copy-paste：Agent install prompt
 
-GitHub 點 **Copy**，貼給 agent。細節由腳本印出的 `NEXT STEPS` 執行。
+GitHub 點 **Copy**。只有兩種：`solo`（單機）或 `multi`（一台 server + 若干 client）。
 
 ```text
-Install tmux-attn on THIS machine (tmux status + hooks), start local web feed, join Attention Server.
+Install tmux-attn on THIS machine. Tailscale/LAN only; never expose :7788 publicly. Never guess IPs/SSH.
 
-Ask user if missing (STOP; never guess): PEER_NAME, LOCAL_FEED_URL (this host http://…:7788), AGGREGATOR=A|B|C
-  A=user edits server peers  B=this machine is aggregator  C=remote (need AGGREGATOR_SSH)
-Rules: Tailscale/LAN only; no public :7788; this host only serves /api/agents; no mutual --fleet loops.
-
-Run:
-  git clone git@github.com:cubrady/tmux-attn.git && cd tmux-attn
-  PEER_NAME='…' LOCAL_FEED_URL='http://…:7788' AGGREGATOR=A sh install.sh
-Then follow the script's NEXT STEPS (start `~/.local/bin/tmux-attn web`, curl health, reload hooks).
-Mode B/C: install.sh → join_peer.py upserts or prints remote hint. Re-run join only: sh install.sh --join-only
-Report: install OK, how web stays up, health OK, peers done or JSON given to user.
+Ask: SETUP=solo|multi
+  solo → git clone git@github.com:cubrady/tmux-attn.git && cd tmux-attn && sh install.sh --solo
+  multi client → need PEER_NAME, LOCAL_FEED_URL (this host http://…:7788), optional SERVER_SSH=user@host
+       git clone … && cd tmux-attn
+       PEER_NAME='…' LOCAL_FEED_URL='http://…:7788' SERVER_SSH='…' sh install.sh
+Follow script NEXT STEPS (start ~/.local/bin/tmux-attn web, curl health, reload hooks).
+Server (once): peers.json lists clients + tmux-attn web. Phone opens server:7788.
+Report install/web/health/peers status.
 ```
+
+### 你要給 agent 的資訊
+
+| 情境 | 給什麼 |
+| --- | --- |
+| **Solo** | 說 `SETUP=solo` 即可 |
+| **Multi · client** | `PEER_NAME`、本機 `LOCAL_FEED_URL`；若要代改 server peers 再加 `SERVER_SSH`（如 `dev@100.64.0.11`） |
+| **Multi · server** | 本機跑 web；用 client 的 name/url 執行 `PEER_NAME=… LOCAL_FEED_URL=… python3 join_peer.py --apply` |
 
 ---
 
@@ -112,21 +118,23 @@ sampleapp 🏃    wallet 👀    lending 🙋
 
 ---
 
-## 架構：工作機 vs Attention Server
+## 架構：solo 或 multi
+
+**Solo（單機）**：一台機器 `tmux-attn web`，瀏覽器開它的 `:7788`。不用 `peers.json`。
+
+**Multi（多機）**：若干 **client**（各跑 agent＋本機 web）＋一台 **server**（讀 `peers.json`、給手機開）。
 
 ```text
-工作機 A ── /api/agents ──┐
-工作機 B ── /api/agents ──┼──▶ 聚合機（Attention Server）/api/fleet ──▶ 手機瀏覽器
-工作機 C ── /api/agents ──┘
+client A ── /api/agents ──┐
+client B ── /api/agents ──┼──▶ server /api/fleet ──▶ 手機
 ```
 
 | 角色 | 跑什麼 | 誰開瀏覽器 |
 | --- | --- | --- |
-| **工作機** | `bootstrap`＋常駐 `tmux-attn web` | 可選；通常給聚合器刮 |
-| **聚合機** | `peers.json`＋`tmux-attn web` 或 `--fleet` | 手機／別台開這台的 `:7788` |
+| **Client** | `install`＋常駐 `tmux-attn web`（`/api/agents`） | 通常不開 |
+| **Server** | `peers.json`＋`tmux-attn web` | 手機開 server `:7788` |
 
-- Peer **只**提供本機 `/api/agents`，**不要**互刮 `/api/fleet`（避免迴圈）。
-- 單機也可直接開工作機 `:7788/`（fleet = 本機＋可選 peers）。
+Client 不要互刮 `/api/fleet`。Server 也可同時是其中一台 client（本機＋peers）。
 
 ---
 
