@@ -1,4 +1,5 @@
 import json
+import io
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -20,6 +21,30 @@ class ObserverTests(unittest.TestCase):
    self.assertTrue(is_native_codex_cli(456, table[456][1]))
    self.assertFalse(is_native_codex_cli(789, table[789][1]))
    self.assertEqual(native_codex_pids(123, table), [456])
+
+ def test_standalone_discovery_routes_detached_hook_by_verified_session(self):
+  with tempfile.TemporaryDirectory() as directory:
+   home=Path(directory);(home/'.codex').mkdir()
+   database=home/'.codex/state_5.sqlite';rollout=home/'root.jsonl'
+   rollout.write_text(json.dumps({'type':'session_meta','payload':{'id':'root','originator':'codex-tui','cwd':'/project','source':'vscode'}})+'\n')
+   with closing(sqlite3.connect(database)) as source,source:
+    source.execute('CREATE TABLE threads(id,rollout_path,cwd,agent_path,name)')
+    source.execute('INSERT INTO threads VALUES(?,?,?,?,?)',('root',str(rollout),'/project',None,'My task'))
+   with patch.object(a,'STATE',home/'inbox'),closing(a.db()) as con:
+    table={123:(1,'zsh'),456:(123,'codex --sandbox danger-full-access resume')}
+    live={('%1','123'):{'path':'/project'}}
+    screen='GPT medium · /project · My task\n← for agents'
+    standalone=str(home/'.codex/packages/standalone/releases/version/bin/codex')
+    executable=lambda pid,args='': standalone if pid == 456 else (args.split(None,1)[0] if args else '')
+    with patch('codex_observer.Path.home',return_value=home),patch('codex_observer.process_cwd',return_value='/project'),patch('codex_observer._process_exe',side_effect=executable),patch('codex_observer.tmux',return_value=screen):
+     discover(con,'sock',live,table,{})
+    mapping=con.execute('SELECT * FROM codex_sessions').fetchone()
+    self.assertEqual((mapping['thread_id'],mapping['pane'],mapping['pid'],mapping['cli_pid'],mapping['origin']),('root','%1','123',456,'resume'))
+    data={'session_id':'root','transcript_path':str(rollout)}
+    with patch.object(a.sys,'stdin',io.StringIO(json.dumps(data))),patch.object(a.sys,'stdout',io.StringIO()),patch.object(a,'hook_target',return_value=None),patch.object(a,'tmux',return_value='%1 123'):
+     a.event_command('codex','UserPromptSubmit')
+    row=con.execute('SELECT * FROM panes').fetchone()
+    self.assertEqual((row['socket'],row['pane'],row['pid'],row['state'],row['source']),('sock','%1','123','RUNNING','hook'))
 
  def test_queued_questions_override_running_and_clear_to_latest_lifecycle(self):
   screen='• Working (58m 18s • esc to interrupt)\n• Queued follow-up inputs\n  ? 1 question\n    ⇧← to answer\n\n› Ask Codex to do anything\nGPT high · /project · task\n← for agents'
