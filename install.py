@@ -78,9 +78,11 @@ DEST.mkdir(parents=True, exist_ok=True)
 python = sys.executable
 app = DEST / 'attention.py'
 config = HOME / '.config/tmux-attn/sidebar.conf'
+web_index = DEST / 'web' / 'index.html'
 paths = [HOME/'.tmux.conf', HOME/'.claude/settings.json', HOME/'.codex/hooks.json', HOME/'.codex/config.toml', HOME/'.pi/agent/extensions/tmux-attention.ts', config, HOME/'.local/bin/tmux-attn', app, DEST/'codex_observer.py']
 paths.append(alias_config)
 paths.append(HOME/'.cursor/hooks.json')
+paths.append(web_index)
 manifest = []
 for i, p in enumerate(paths):
     copy = BACKUP / str(i)
@@ -114,6 +116,14 @@ if new_codex_text is not None:
     codex_path.parent.mkdir(parents=True, exist_ok=True)
     codex_path.write_text(new_codex_text)
 shutil.copy2(ROOT/'codex_observer.py', DEST/'codex_observer.py')
+web_index.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(ROOT/'web'/'index.html', web_index)
+icons_src = ROOT/'web'/'icons'
+icons_dest = DEST/'web'/'icons'
+if icons_src.is_dir():
+    if icons_dest.exists():
+        shutil.rmtree(icons_dest)
+    shutil.copytree(icons_src, icons_dest)
 paths[6].parent.mkdir(parents=True, exist_ok=True)
 paths[6].write_text('#!/bin/sh\nif [ "$#" -eq 0 ]; then set -- popup; fi\nexec '+shlex.join([python,str(app)])+' "$@"\n')
 paths[6].chmod(0o755)

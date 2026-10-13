@@ -4,16 +4,21 @@ from __future__ import annotations
 import argparse
 import curses
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import shlex
+import socket as socket_mod
 import sqlite3
 import stat
 import subprocess
 import sys
 import time
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 STATE = Path(os.environ.get('TMUX_ATTN_STATE_DIR', Path.home() / '.local/state/tmux-attn'))
@@ -29,6 +34,20 @@ def tmux(*args, check=True, sock=None):
 
 def socket():
     return os.environ.get('TMUX', '').split(',')[0] or tmux('display-message', '-p', '#{socket_path}')
+
+
+def resolve_socket():
+    """Socket for long-lived commands that may run outside a tmux client."""
+    for key in ('TMUX', 'TMUX_ATTN_SOCKET'):
+        value = os.environ.get(key, '')
+        if key == 'TMUX':
+            value = value.split(',')[0]
+        if value:
+            return value
+    listed = tmux('list-sessions', '-F', '#{socket_path}', check=False)
+    if listed:
+        return listed.splitlines()[0]
+    return socket()
 
 
 def db():
@@ -268,13 +287,16 @@ def event_command(agent, event):
     print('{}')
 
 
-def live_panes():
-    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}'
+def live_panes(sock=None):
+    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}\t#{pane_current_command}'
     result = {}
-    for line in tmux('list-panes', '-a', '-F', fmt, check=False).splitlines():
+    for line in tmux('list-panes', '-a', '-F', fmt, check=False, sock=sock).splitlines():
         parts = line.split('\t')
-        if len(parts) == 7 and parts[5] != '1':
-            result[(parts[0], parts[1])] = dict(pane=parts[0], pid=parts[1], session=parts[2], window=clean(parts[3]), path=parts[4], window_id=parts[6])
+        if len(parts) >= 7 and parts[5] != '1':
+            result[(parts[0], parts[1])] = dict(
+                pane=parts[0], pid=parts[1], session=parts[2], window=clean(parts[3]),
+                path=parts[4], window_id=parts[6], command=clean(parts[7] if len(parts) > 7 else ''),
+            )
     return result
 
 
@@ -449,6 +471,247 @@ def age(stamp):
     return f'{seconds//3600}h' if seconds >= 3600 else f'{seconds//60}m' if seconds >= 60 else f'{seconds}s'
 
 
+def agent_emoji(row):
+    if row['state'] == 'WAIT':
+        return '🙋'
+    if row['state'] == 'RUNNING':
+        return '🏃'
+    if row.get('pending'):
+        return '👀'
+    return '💤'
+
+
+def agent_severity(row):
+    reason = row.get('reason') or ''
+    if 'error' in reason.lower():
+        return 'error'
+    if 'Interrupted' in reason:
+        return 'interrupt'
+    return ''
+
+
+KNOWN_CLI_ICONS = ('claude', 'codex', 'agent', 'pi')
+
+
+def cli_label(agent):
+    """Human-facing CLI name for the web panel."""
+    key = clean(agent).lower()
+    return {
+        'claude': 'claude',
+        'codex': 'codex',
+        'cursor': 'agent',
+        'pi': 'pi',
+    }.get(key, key or 'unknown')
+
+
+def command_cli(command):
+    """Map tmux pane_current_command to a display cli label when possible."""
+    raw = clean(command).strip()
+    if not raw:
+        return 'shell'
+    key = Path(raw).name.lower()
+    if key in ('claude', 'claude-code'):
+        return 'claude'
+    if key in ('codex',):
+        return 'codex'
+    if key in ('agent', 'cursor'):
+        return 'agent'
+    if key in ('pi',):
+        return 'pi'
+    # Claude Code sometimes surfaces as a version-looking binary name.
+    if key.replace('.', '').isdigit() and key.count('.') >= 2:
+        return 'claude'
+    return key[:24]
+
+
+def agent_sort_key(row):
+    host = row.get('host') or ''
+    if not row.get('tracked', True):
+        return (4, host, row.get('session', ''), row.get('window_id', ''), row['pane'])
+    if row['state'] == 'WAIT':
+        return (0, host, row['updated'], row['pane'])
+    if row.get('pending'):
+        return (1, host, row['updated'], row['pane'])
+    if row['state'] == 'RUNNING':
+        return (2, host, row['updated'], row['pane'])
+    return (3, host, row['updated'], row['pane'])
+
+
+def local_host_name():
+    return clean(os.environ.get('TMUX_ATTN_HOST') or socket_mod.gethostname().split('.')[0]) or 'local'
+
+
+def peers_config_path():
+    return Path(os.environ.get('TMUX_ATTN_PEERS', Path.home() / '.config/tmux-attn/peers.json'))
+
+
+def load_peers():
+    path = peers_config_path()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    peers = data.get('peers', []) if isinstance(data, dict) else []
+    result = []
+    for peer in peers:
+        if not isinstance(peer, dict):
+            continue
+        name = clean(peer.get('name') or '')
+        url = clean(peer.get('url') or '').rstrip('/')
+        if name and url.startswith(('http://', 'https://')):
+            result.append({'name': name, 'url': url})
+    return result
+
+
+def fetch_peer_agents(url, timeout=1.5):
+    """Pull a machine-local /api/agents document. Never call /api/fleet here."""
+    request = Request(url.rstrip('/') + '/api/agents', headers={'Accept': 'application/json'})
+    with urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode())
+    if not isinstance(data, dict) or not data.get('ok'):
+        raise RuntimeError(data.get('error') if isinstance(data, dict) else 'invalid peer payload')
+    return data
+
+
+def empty_summary():
+    return {'wait': 0, 'review': 0, 'running': 0, 'idle': 0, 'tracked': 0, 'untracked': 0}
+
+
+def merge_summaries(parts):
+    summary = empty_summary()
+    for part in parts:
+        for key in summary:
+            summary[key] += int(part.get(key) or 0)
+    return summary
+
+
+def tag_host(payload, host):
+    agents = []
+    for row in payload.get('agents') or []:
+        item = dict(row)
+        item['host'] = host
+        agents.append(item)
+    return agents, payload.get('summary') or empty_summary()
+
+
+def fleet_payload(include_local=True, peer_timeout=1.5):
+    """Aggregate local and/or Tailscale/LAN peer /api/agents feeds."""
+    agents = []
+    summaries = []
+    hosts = []
+    if include_local:
+        host = local_host_name()
+        try:
+            with closing(db()) as con:
+                local = agents_payload(con)
+            tagged, summary = tag_host(local, host)
+            agents.extend(tagged)
+            summaries.append(summary)
+            hosts.append({'name': host, 'ok': True, 'source': 'local'})
+        except Exception as exc:
+            hosts.append({'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'})
+    peers = load_peers()
+    if peers:
+        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+            futures = {pool.submit(fetch_peer_agents, peer['url'], peer_timeout): peer for peer in peers}
+            for future in as_completed(futures):
+                peer = futures[future]
+                try:
+                    payload = future.result()
+                    tagged, summary = tag_host(payload, peer['name'])
+                    agents.extend(tagged)
+                    summaries.append(summary)
+                    hosts.append({'name': peer['name'], 'ok': True, 'source': 'peer', 'url': peer['url']})
+                except Exception as exc:
+                    hosts.append({
+                        'name': peer['name'], 'ok': False, 'source': 'peer', 'url': peer['url'],
+                        'error': f'{type(exc).__name__}',
+                    })
+    agents.sort(key=agent_sort_key)
+    hosts.sort(key=lambda row: (0 if row.get('ok') else 1, row.get('name') or ''))
+    return {
+        'ok': True,
+        'summary': merge_summaries(summaries) if summaries else empty_summary(),
+        'agents': agents,
+        'hosts': hosts,
+    }
+
+
+def agents_payload(con, sock=None, live=None, now=None):
+    """JSON-ready status for the mobile web panel and future clients."""
+    now = time.time() if now is None else now
+    sock = resolve_socket() if sock is None else sock
+    live = live_panes(sock) if live is None else live
+    rows, _ = items(con, sock, live, True, now=now)
+    groups = status_groups(rows)
+    tracked_keys = {(row['pane'], row['pid']) for row in rows}
+    paths = [row['path'] for row in rows if row.get('path')]
+    paths += [meta['path'] for key, meta in live.items() if key not in tracked_keys and meta.get('path')]
+    labels = project_labels(paths, load_project_aliases())
+    agents = []
+    for row in rows:
+        reviewed = row['revision'] <= row['acknowledged'] and (row['state'] == 'WAIT' or row['needs_review'])
+        command = row.get('command') or ''
+        agents.append({
+            'pane': row['pane'],
+            'pid': row['pid'],
+            'session': row['session'],
+            'window': row['window'],
+            'window_id': row.get('window_id', ''),
+            'agent': row['agent'],
+            'cli': cli_label(row['agent']),
+            'command': command,
+            'tracked': True,
+            'project': labels.get(row['path'], Path(row['path']).name if row.get('path') else ''),
+            'path': row.get('path', ''),
+            'state': row['state'],
+            'pending': bool(row['pending']),
+            'emoji': agent_emoji(row),
+            'severity': agent_severity(row),
+            'reason': display_reason(row, reviewed),
+            'updated': row['updated'],
+            'age': age(row['updated']),
+        })
+    for key, meta in live.items():
+        if key in tracked_keys:
+            continue
+        command = meta.get('command') or ''
+        cli = command_cli(command)
+        agents.append({
+            'pane': meta['pane'],
+            'pid': meta['pid'],
+            'session': meta['session'],
+            'window': meta['window'],
+            'window_id': meta.get('window_id', ''),
+            'agent': '',
+            'cli': cli,
+            'command': command,
+            'tracked': False,
+            'project': labels.get(meta['path'], Path(meta['path']).name if meta.get('path') else ''),
+            'path': meta.get('path', ''),
+            'state': 'SHELL',
+            'pending': False,
+            'emoji': '💻',
+            'severity': '',
+            'reason': f'未追蹤 · 前景 {command or "shell"}',
+            'updated': 0,
+            'age': '',
+        })
+    agents.sort(key=agent_sort_key)
+    return {
+        'ok': True,
+        'summary': {
+            'wait': len(groups['wait']),
+            'review': len(groups['review']),
+            'running': len(groups['running']),
+            'idle': len(groups['idle']),
+            'tracked': len(rows),
+            'untracked': max(0, len(live) - len(rows)),
+        },
+        'agents': agents,
+    }
+
+
 def grouped_rows(rows):
     return sorted(rows, key=lambda x: (('WAIT', 'IDLE', 'RUNNING').index(x['state']), not x['pending'], x['updated'], x['pane']))
 
@@ -599,6 +862,97 @@ def prune_sidebars():
                 tmux('kill-pane','-t',line.split()[0],check=False)
 
 
+def web_index_path():
+    return ROOT / 'web' / 'index.html'
+
+
+def web_icon_path(name):
+    safe = Path(name).name
+    if not safe.endswith('.svg') or safe != name:
+        return None
+    path = ROOT / 'web' / 'icons' / safe
+    return path if path.is_file() else None
+
+
+def make_web_handler(fleet_only=False):
+    index = web_index_path()
+    if not index.is_file():
+        raise SystemExit(f'Missing web UI: {index}')
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
+
+        def _send(self, code, body, content_type):
+            payload = body if isinstance(body, bytes) else body.encode()
+            self.send_response(code)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(payload)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            path = urlparse(self.path).path
+            if path == '/api/health':
+                self._send(200, json.dumps({
+                    'ok': True,
+                    'fleet_only': fleet_only,
+                    'peers': len(load_peers()),
+                }), 'application/json; charset=utf-8')
+                return
+            if path == '/api/agents':
+                # Machine-local feed only — peer scrapers must use this path.
+                try:
+                    with closing(db()) as con:
+                        payload = agents_payload(con)
+                    self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/agents: {type(exc).__name__}: {exc}\n')
+                    self._send(500, json.dumps({'ok': False, 'error': 'failed to load agents'}),
+                               'application/json; charset=utf-8')
+                return
+            if path == '/api/fleet':
+                try:
+                    payload = fleet_payload(include_local=not fleet_only)
+                    self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/fleet: {type(exc).__name__}: {exc}\n')
+                    self._send(500, json.dumps({'ok': False, 'error': 'failed to load fleet'}),
+                               'application/json; charset=utf-8')
+                return
+            if path.startswith('/icons/'):
+                icon = web_icon_path(path[len('/icons/'):])
+                if icon:
+                    self._send(200, icon.read_bytes(), 'image/svg+xml')
+                    return
+                self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
+                return
+            if path in ('/', '/index.html'):
+                self._send(200, index.read_bytes(), 'text/html; charset=utf-8')
+                return
+            self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
+
+    return Handler
+
+
+def serve_web(host='0.0.0.0', port=7788, fleet_only=False):
+    server = ThreadingHTTPServer((host, port), make_web_handler(fleet_only=fleet_only))
+    print(json.dumps({
+        'web': f'http://{host}:{port}/',
+        'bind': host,
+        'port': port,
+        'fleet_only': fleet_only,
+        'peers': len(load_peers()),
+    }, ensure_ascii=False), flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
 def ensure_sidebars(target=None):
     windows = [target] if target else tmux('list-windows', '-a', '-F', '#{window_id}').splitlines()
     for window in windows:
@@ -625,7 +979,7 @@ def ensure_sidebars(target=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox','status-clickable','cycle'])
+    parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox','status-clickable','cycle','web'])
     parser.add_argument('args', nargs='*')
     args = parser.parse_args()
     if args.command == 'event':
@@ -649,6 +1003,22 @@ def main():
         observe()
     elif args.command == 'prune':
         prune_sidebars()
+    elif args.command == 'web':
+        host = '0.0.0.0'
+        port = 7788
+        fleet_only = False
+        rest = list(args.args)
+        if rest and rest[0] == '--fleet':
+            fleet_only = True
+            rest = rest[1:]
+        if rest:
+            if len(rest) == 1 and rest[0].isdigit():
+                port = int(rest[0])
+            else:
+                host = rest[0]
+                if len(rest) >= 2:
+                    port = int(rest[1])
+        serve_web(host, port, fleet_only=fleet_only)
     elif args.command == 'focus':
         window = args.args[0] if args.args else tmux('display-message','-p','#{window_id}')
         ensure_sidebars(window)

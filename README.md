@@ -55,8 +55,8 @@ sampleapp 🏃    wallet 👀    lending 🙋
 先取得專案，再執行 bootstrap：
 
 ```sh
-git clone git@github.com:cubrady/tmux-attention.git
-cd tmux-attention
+git clone git@github.com:cubrady/tmux-attn.git
+cd tmux-attn
 sh bootstrap.sh
 ```
 
@@ -157,12 +157,46 @@ python3 rollback.py /path/to/printed/backup
 
 對以 `resume` 啟動的 Codex CLI，相容監控會用前景程序的工作目錄與完整對話名稱核對既有綁定；右側額外資訊不會視為名稱的一部分。若同一 CLI 切換對話後，名稱被截斷或對應不唯一，仍需重新載入 hooks。監控依賴本機資料格式，無法確認的對應不會猜測。
 
+## 手機／遠端只讀面板（MVP）
+
+在跑 agent 的工作機上啟動網頁服務；預設綁定 `0.0.0.0:7788`，同一 Tailscale／LAN 內可直接開啟。目前為**只讀**。不需要 `tailscale serve`，也無內建 auth（請只暴露在私有網）。
+
+頁面依**注意力分組**：🙋 等待 → 👀 待看 → 🏃 進行中 → 💤 閒置 → 💻 其他 pane。
+
+```sh
+# 每台工作機
+~/.local/bin/tmux-attn web
+# 預設埠 7788；也可 `tmux-attn web 7789`
+```
+
+### 多機聚合（VPS 或任一台）
+
+每台工作機提供本機 feed：`GET /api/agents`。聚合器讀 `~/.config/tmux-attn/peers.json`（範例見 [peers.example.json](peers.example.json)），合併為 `GET /api/fleet`；瀏覽器只打 fleet，避免互相聚合造成迴圈。
+
+```sh
+mkdir -p ~/.config/tmux-attn
+cp peers.example.json ~/.config/tmux-attn/peers.json
+# 編輯 name / url（Tailscale IP 或 MagicDNS:7788）
+
+# VPS：只聚合 peers、不讀本機 tmux
+~/.local/bin/tmux-attn web --fleet
+```
+
+手機開聚合機：
+
+```text
+http://<vps-或聚合機 Tailscale 名或 100.x>:7788/
+```
+
+單機也可直接開工作機的 `:7788/`（fleet = 本機 + 可選 peers）。工作機休眠則該 host 顯示離線；整頁其餘 host 仍可用。
+
 ## 檔案與檢查
 
 | 位置 | 用途 |
 | --- | --- |
 | `~/.local/bin/tmux-attn` | 開啟 popup 或查詢狀態 |
 | `~/.local/share/tmux-attn/` | 安裝後的程式 |
+| `~/.local/share/tmux-attn/web/` | 手機只讀面板靜態頁 |
 | `~/.config/tmux-attn/sidebar.conf` | tmux 顯示及快捷鍵設定 |
 | `~/.config/tmux-attn/project-aliases.json` | 個人別名 |
 | `~/.local/state/tmux-attn/inbox.sqlite3` | 狀態及已查看標記 |
@@ -173,6 +207,7 @@ python3 rollback.py /path/to/printed/backup
 ```sh
 ~/.local/bin/tmux-attn status
 ~/.local/bin/tmux-attn dump
+~/.local/bin/tmux-attn web
 ```
 
 Hooks／監控錯誤會記錄在 state 目錄中的 `hook-errors.log`／`observer-errors.log`。
