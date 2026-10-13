@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="tmux attention — multi-host agent status">
+  <title>Attention</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #eef1f4;
+      --bg-elevated: #f7f8fa;
+      --fg: #1c2430;
+      --muted: #5c6b7a;
+      --line: #d0d7e0;
+      --card: #ffffff;
+      --accent: #3a5f7a;
+      --wait: #b85c38;
+      --review: #3d6f8c;
+      --running: #3d6b52;
+      --idle: #6a7380;
+      --danger: #b33a3a;
+      --danger-bg: color-mix(in srgb, var(--danger) 8%, var(--card));
+      --shadow: 0 1px 0 rgba(28, 36, 48, 0.04), 0 8px 24px -12px rgba(28, 36, 48, 0.18);
+      --radius: 12px;
+      --font: "IBM Plex Sans", "PingFang TC", "Noto Sans TC", sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --max: 44rem;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12161c;
+        --bg-elevated: #171c24;
+        --fg: #e8edf2;
+        --muted: #93a0ae;
+        --line: #2a3340;
+        --card: #1a212b;
+        --accent: #7ea0b8;
+        --wait: #d4845c;
+        --review: #6e9bb5;
+        --running: #6f9f82;
+        --idle: #8b95a3;
+        --danger: #d45a5a;
+        --danger-bg: color-mix(in srgb, var(--danger) 12%, var(--card));
+        --shadow: 0 1px 0 rgba(0, 0, 0, 0.25), 0 12px 28px -14px rgba(0, 0, 0, 0.55);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { color-scheme: light dark; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      font: 15px/1.45 var(--font);
+      color: var(--fg);
+      background:
+        radial-gradient(1200px 500px at 10% -10%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
+        var(--bg);
+      padding: 20px 16px calc(28px + env(safe-area-inset-bottom));
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.035;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      z-index: 0;
+    }
+    .wrap {
+      position: relative;
+      z-index: 1;
+      width: min(100%, var(--max));
+      margin: 0 auto;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      margin: -8px -4px 0;
+      padding: 12px 4px 14px;
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      backdrop-filter: blur(14px) saturate(1.1);
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+    }
+    .brand {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      text-wrap: balance;
+    }
+    .live {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 0.84rem;
+      font-weight: 450;
+      margin-bottom: 14px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .stat {
+      background: var(--card);
+      box-shadow: var(--shadow);
+      border-radius: 10px;
+      padding: 12px 8px 10px;
+      text-align: center;
+    }
+    .stat .n {
+      font-family: var(--mono);
+      font-size: 1.2rem;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+    }
+    .stat .l {
+      margin-top: 4px;
+      font-size: 0.68rem;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .hosts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+    }
+    .host-pill {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 500;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+    .host-pill.ok { color: var(--running); }
+    .host-pill.bad {
+      color: var(--danger);
+      background: var(--danger-bg);
+      border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+    }
+    main.list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .section {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 10px 2px 2px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .section .count {
+      font-family: var(--mono);
+      font-weight: 500;
+      letter-spacing: 0;
+      opacity: 0.85;
+    }
+    .card {
+      background: var(--card);
+      box-shadow: var(--shadow);
+      border-radius: var(--radius);
+      padding: 14px 14px 13px;
+      border: 1px solid transparent;
+      border-left: 3px solid var(--idle);
+      transition: transform 180ms ease, box-shadow 180ms ease;
+    }
+    .card:active { transform: scale(0.99); }
+    .card.wait { border-left-color: var(--wait); }
+    .card.review { border-left-color: var(--review); }
+    .card.running { border-left-color: var(--running); }
+    .card.idle { border-left-color: var(--idle); }
+    .card.shell {
+      border-left-color: color-mix(in srgb, var(--muted) 55%, var(--line));
+      background: color-mix(in srgb, var(--card) 88%, var(--bg));
+    }
+    .card.error {
+      border: 1.5px solid var(--danger);
+      border-left-width: 3px;
+      border-left-color: var(--danger);
+      background: var(--danger-bg);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 12%, transparent), var(--shadow);
+    }
+    .row1 {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      justify-content: space-between;
+    }
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-weight: 600;
+      font-size: 1.02rem;
+      letter-spacing: -0.01em;
+      min-width: 0;
+    }
+    .emoji { font-size: 1.15rem; line-height: 1; }
+    .project { min-width: 0; overflow-wrap: anywhere; }
+    .host {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      font-weight: 500;
+      padding: 3px 7px;
+      border-radius: 5px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .cli {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--bg-elevated);
+      flex: 0 0 auto;
+    }
+    .cli img { width: 22px; height: 22px; display: block; }
+    .cli .cli-text {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      font-weight: 500;
+      max-width: 30px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding: 0 2px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .cli.agent img { filter: invert(1); }
+    }
+    .age {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
+      white-space: nowrap;
+      padding-top: 2px;
+    }
+    .sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    .reason {
+      margin-top: 8px;
+      font-size: 0.92rem;
+      color: color-mix(in srgb, var(--fg) 88%, var(--muted));
+      text-wrap: pretty;
+    }
+    .card.error .reason {
+      color: var(--danger);
+      font-weight: 500;
+    }
+    .empty, .banner-error {
+      margin-top: 28px;
+      text-align: center;
+      color: var(--muted);
+      padding: 28px 16px;
+      background: var(--card);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .banner-error {
+      color: var(--danger);
+      background: var(--danger-bg);
+      border: 1.5px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <h1>Attention</h1>
+        <div class="live" id="clock">live</div>
+      </div>
+      <div class="meta" id="meta">載入中…</div>
+      <div class="summary" id="summary" aria-live="polite"></div>
+      <div class="hosts" id="hosts"></div>
+    </header>
+    <main class="list" id="list"></main>
+    <div class="empty" id="empty" hidden></div>
+    <div class="banner-error" id="error" hidden></div>
+  </div>
+  <script>
+    const SECTIONS = [
+      ['wait', '等待回覆'],
+      ['review', '待查看'],
+      ['running', '進行中'],
+      ['idle', '閒置'],
+      ['shell', '其他 pane'],
+    ];
+    const SECTION_EMOJI = { wait: '🙋', review: '👀', running: '🏃', idle: '💤', shell: '💻' };
+    function category(agent) {
+      if (!agent.tracked || agent.state === 'SHELL') return 'shell';
+      if (agent.state === 'WAIT') return 'wait';
+      if (agent.state === 'RUNNING') return 'running';
+      if (agent.pending) return 'review';
+      return 'idle';
+    }
+    function cliBadge(cli) {
+      const known = new Set(['claude', 'codex', 'agent', 'pi']);
+      const name = (cli || 'shell').toLowerCase();
+      if (known.has(name)) {
+        return `<span class="cli ${escapeHtml(name)}" title="${escapeHtml(name)}"><img src="/icons/${escapeHtml(name)}.svg" alt="${escapeHtml(name)}"></span>`;
+      }
+      const short = name.length > 6 ? name.slice(0, 5) + '…' : name;
+      return `<span class="cli" title="${escapeHtml(name)}"><span class="cli-text">${escapeHtml(short)}</span></span>`;
+    }
+    function cardHtml(a) {
+      const cat = category(a);
+      const cli = (a.cli || a.agent || a.command || 'shell').toLowerCase();
+      const host = a.host ? `<span class="host">${escapeHtml(a.host)}</span>` : '';
+      const errorClass = a.severity === 'error' ? ' error' : '';
+      return `<article class="card ${cat}${errorClass}">
+        <div class="row1">
+          <div class="title">
+            <span class="emoji" aria-hidden="true">${a.emoji}</span>
+            <span class="project">${escapeHtml(a.project || a.window || a.pane)}</span>
+            ${cliBadge(cli)}
+            ${host}
+          </div>
+          <div class="age">${escapeHtml(a.age)}</div>
+        </div>
+        <div class="sub">${escapeHtml(cli)}${a.command && a.command !== cli ? ' · ' + escapeHtml(a.command) : ''} · ${escapeHtml(a.session)} / ${escapeHtml(a.window)}</div>
+        <div class="reason">${escapeHtml(a.reason)}</div>
+      </article>`;
+    }
+    function render(data) {
+      const s = data.summary || {};
+      document.getElementById('summary').innerHTML = [
+        ['🙋', s.wait || 0, '等待'],
+        ['👀', s.review || 0, '待看'],
+        ['🏃', s.running || 0, '進行中'],
+        ['💤', s.idle || 0, '閒置'],
+      ].map(([e, n, l]) =>
+        `<div class="stat"><div class="n">${e} ${n}</div><div class="l">${l}</div></div>`
+      ).join('');
+      const hosts = data.hosts || [];
+      const okHosts = hosts.filter(h => h.ok).length;
+      document.getElementById('meta').textContent =
+        `追蹤 ${s.tracked || 0} · 其他 ${s.untracked || 0}` +
+        (hosts.length ? ` · 主機 ${okHosts}/${hosts.length}` : '') +
+        ' · 約 2 秒更新';
+      document.getElementById('hosts').innerHTML = hosts.map(h =>
+        `<span class="host-pill ${h.ok ? 'ok' : 'bad'}" title="${escapeHtml(h.error || h.url || h.source || '')}">${escapeHtml(h.name)}${h.ok ? '' : ' offline'}</span>`
+      ).join('');
+      const list = document.getElementById('list');
+      const empty = document.getElementById('empty');
+      const err = document.getElementById('error');
+      err.hidden = true;
+      const agents = data.agents || [];
+      if (!agents.length) {
+        list.innerHTML = '';
+        empty.hidden = false;
+        empty.textContent = hosts.some(h => !h.ok)
+          ? '尚無資料。檢查 peers 是否在線，或本機 tmux／hooks。'
+          : '沒有 live pane。確認工作機上的 tmux 有在跑。';
+        return;
+      }
+      empty.hidden = true;
+      const grouped = Object.fromEntries(SECTIONS.map(([key]) => [key, []]));
+      for (const a of agents) grouped[category(a)].push(a);
+      list.innerHTML = SECTIONS.map(([key, title]) => {
+        const rows = grouped[key];
+        if (!rows.length) return '';
+        return `<div class="section"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>` + rows.map(cardHtml).join('');
+      }).join('');
+    }
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+    async function refresh() {
+      try {
+        const res = await fetch('/api/fleet', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'payload error');
+        render(data);
+        document.getElementById('clock').textContent = 'live';
+      } catch (e) {
+        document.getElementById('error').hidden = false;
+        document.getElementById('error').textContent = '無法讀取狀態：' + e.message;
+        document.getElementById('clock').textContent = 'offline';
+      }
+    }
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

@@ -6,11 +6,13 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
 import io
 from concurrent.futures import ThreadPoolExecutor
+from urllib.request import urlopen
 
 spec = importlib.util.spec_from_file_location('attention', Path(__file__).with_name('attention.py'))
 a = importlib.util.module_from_spec(spec)
@@ -170,6 +172,109 @@ class StoreTests(unittest.TestCase):
         hook('Stop',root)
         row=self.con.execute('SELECT * FROM panes').fetchone()
         self.assertEqual((row['state'],row['needs_review']),('IDLE',1))
+
+    def test_agents_payload_sorting_counts_and_aliases(self):
+        self.live = {
+            ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/llm-wallet-gateway'},
+            ('%2', '456'): {'pane': '%2', 'pid': '456', 'session': 'work', 'window': 'two', 'window_id': '@2', 'path': '/proj/web-app-minday'},
+            ('%3', '789'): {'pane': '%3', 'pid': '789', 'session': 'work', 'window': 'three', 'window_id': '@3', 'path': '/proj/lending'},
+            ('%4', '101'): {'pane': '%4', 'pid': '101', 'session': 'work', 'window': 'four', 'window_id': '@4', 'path': '/proj/idle-box'},
+            ('%5', '202'): {'pane': '%5', 'pid': '202', 'session': 'work', 'window': 'shell', 'window_id': '@5', 'path': '/proj/shell-only', 'command': 'python'},
+        }
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
+        a.record(self.con, 'socket', '%2', '456', 'codex', 'IDLE', 'Response finished; review needed', True)
+        a.record(self.con, 'socket', '%3', '789', 'cursor', 'RUNNING', 'Working')
+        a.record(self.con, 'socket', '%4', '101', 'pi', 'IDLE', 'Waiting for next task')
+        with patch.object(a, 'load_project_aliases', return_value={'llm-wallet-gateway': 'wallet', 'web-app-minday': 'minday'}):
+            payload = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['summary'], {
+            'wait': 1, 'review': 1, 'running': 1, 'idle': 1, 'tracked': 4, 'untracked': 1,
+        })
+        emojis = [row['emoji'] for row in payload['agents'] if row['tracked']]
+        self.assertEqual(emojis, ['🙋', '👀', '🏃', '💤'])
+        self.assertEqual([row['project'] for row in payload['agents'] if row['tracked']], ['wallet', 'minday', 'lending', 'idle-box'])
+        self.assertEqual([row['cli'] for row in payload['agents'] if row['tracked']], ['claude', 'codex', 'agent', 'pi'])
+        self.assertEqual(payload['agents'][0]['pane'], '%1')
+        self.assertIn('pane', payload['agents'][0])
+        self.assertIn('pid', payload['agents'][0])
+        self.assertIn('需要批准', payload['agents'][0]['reason'])
+        self.assertEqual(a.cli_label('cursor'), 'agent')
+        self.assertTrue(any(not row['tracked'] and row['cli'] == 'python' for row in payload['agents']))
+        self.assertEqual(payload['summary']['untracked'], 1)
+        self.assertEqual(a.agent_severity({'reason': 'Agent stopped with an error; review needed'}), 'error')
+        self.assertEqual(a.agent_severity({'reason': 'Interrupted; review current work'}), 'interrupt')
+        self.assertEqual(a.agent_severity({'reason': 'Working'}), '')
+
+    def test_web_api_smoke(self):
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'}}
+        handler = a.make_web_handler()
+
+        class Quiet(handler):
+            def log_message(self, format, *args):
+                pass
+
+        server = a.ThreadingHTTPServer(('127.0.0.1', 0), Quiet)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            with patch.object(a, 'resolve_socket', return_value='socket'), patch.object(a, 'live_panes', return_value=live), patch.object(a, 'load_peers', return_value=[]):
+                health = json.loads(urlopen(f'http://127.0.0.1:{port}/api/health', timeout=2).read())
+                agents = json.loads(urlopen(f'http://127.0.0.1:{port}/api/agents', timeout=2).read())
+                fleet = json.loads(urlopen(f'http://127.0.0.1:{port}/api/fleet', timeout=2).read())
+                page = urlopen(f'http://127.0.0.1:{port}/', timeout=2).read().decode()
+            self.assertTrue(health['ok'])
+            self.assertTrue(agents['ok'])
+            self.assertEqual(agents['summary']['wait'], 1)
+            self.assertEqual(agents['agents'][0]['emoji'], '🙋')
+            self.assertTrue(fleet['ok'])
+            self.assertEqual(fleet['agents'][0]['host'], a.local_host_name())
+            self.assertIn('/api/fleet', page)
+            self.assertIn('🙋 等待回覆', page)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_fleet_merges_peer_and_marks_offline(self):
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo', 'command': 'claude'}}
+        peer_payload = {
+            'ok': True,
+            'summary': {'wait': 0, 'review': 0, 'running': 1, 'idle': 0, 'tracked': 1, 'untracked': 0},
+            'agents': [{
+                'pane': '%9', 'pid': '999', 'session': 'x', 'window': 'y', 'window_id': '@9',
+                'agent': 'codex', 'cli': 'codex', 'command': 'codex', 'tracked': True,
+                'project': 'other', 'path': '/other', 'state': 'RUNNING', 'pending': False,
+                'emoji': '🏃', 'reason': '正在工作', 'updated': time.time(), 'age': '1s',
+            }],
+        }
+        with patch.object(a, 'resolve_socket', return_value='socket'), \
+             patch.object(a, 'live_panes', return_value=live), \
+             patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[
+                 {'name': 'lab', 'url': 'http://lab:7788'},
+                 {'name': 'down', 'url': 'http://down:7788'},
+             ]), \
+             patch.object(a, 'fetch_peer_agents', side_effect=lambda url, timeout=1.5: peer_payload if 'lab' in url else (_ for _ in ()).throw(RuntimeError('down'))):
+            fleet = a.fleet_payload(include_local=True)
+        self.assertEqual(fleet['summary']['wait'], 1)
+        self.assertEqual(fleet['summary']['running'], 1)
+        self.assertEqual({row['host'] for row in fleet['agents']}, {'home', 'lab'})
+        self.assertEqual(fleet['agents'][0]['emoji'], '🙋')
+        self.assertEqual(fleet['agents'][0]['host'], 'home')
+        status = {row['name']: row['ok'] for row in fleet['hosts']}
+        self.assertEqual(status, {'home': True, 'lab': True, 'down': False})
+
+    def test_agents_payload_uses_resolved_socket_for_live_panes(self):
+        a.record(self.con, '/tmp/custom.sock', '%1', '123', 'claude', 'WAIT', 'Approval needed')
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'}}
+        with patch.object(a, 'live_panes', return_value=live) as live_mock:
+            payload = a.agents_payload(self.con, '/tmp/custom.sock', now=time.time()+3)
+        live_mock.assert_called_once_with('/tmp/custom.sock')
+        self.assertEqual(payload['summary']['wait'], 1)
+        self.assertEqual(payload['agents'][0]['pane'], '%1')
 
 class IntegrationTests(unittest.TestCase):
     def test_install_live_hooks_sidebars_navigation_and_rollback(self):

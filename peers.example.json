@@ -1,0 +1,12 @@
+{
+  "peers": [
+    {
+      "name": "work-mac",
+      "url": "http://100.x.x.x:7788"
+    },
+    {
+      "name": "laptop",
+      "url": "http://hostname.tailnet.ts.net:7788"
+    }
+  ]
+}
