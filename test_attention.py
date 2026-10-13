@@ -259,7 +259,55 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(preview['users'], ['請檢查捐款錯誤'])
         self.assertEqual(preview['agent'], '根因是 JSON parse')
 
+        cursor = Path(self.tmp.name) / 'cursor.jsonl'
+        cursor.write_text('\n'.join([
+            json.dumps({'role': 'user', 'message': {'content': [{'type': 'text', 'text': '請修 Cursor 預覽'}]}}),
+            json.dumps({'role': 'assistant', 'message': {'content': [{'type': 'text', 'text': '已接上 agent-transcripts'}]}}),
+        ]) + '\n')
+        preview = a.conversation_preview(cursor, 'cursor')
+        self.assertEqual(preview['users'], ['請修 Cursor 預覽'])
+        self.assertIn('agent-transcripts', preview['agent'])
+        with patch.object(a, 'latest_cursor_transcript', return_value=str(cursor)):
+            self.assertEqual(a.latest_cursor_transcript('/x'), str(cursor))
+
+
+    def test_git_workdir_info_and_payload_env(self):
+        a._GIT_ENV_CACHE.clear()
+        with patch.object(a.subprocess, 'run') as run:
+            run.return_value = type('R', (), {
+                'returncode': 0,
+                'stdout': '## feat/demo...origin/feat/demo\n M attention.py\n',
+                'stderr': '',
+            })()
+            info = a.git_workdir_info('/proj/web-app-sampleapp')
+        self.assertEqual(info['repo'], 'web-app-sampleapp')
+        self.assertEqual(info['branch'], 'feat/demo')
+        self.assertTrue(info['dirty'])
+        a._GIT_ENV_CACHE.clear()
+        with patch.object(a.subprocess, 'run') as run:
+            run.return_value = type('R', (), {
+                'returncode': 0,
+                'stdout': '## No commits yet on main\n',
+                'stderr': '',
+            })()
+            empty = a.git_workdir_info('/proj/new-repo')
+        self.assertEqual(empty['branch'], 'main')
+        self.assertFalse(empty['dirty'])
+        self.live = {
+            ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/web-app-sampleapp'},
+        }
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Waiting for next task')
+        with patch.object(a, 'git_workdir_info', return_value={'repo': 'web-app-sampleapp', 'branch': 'feat/demo', 'dirty': True}), \
+             patch.object(a, 'load_project_aliases', return_value={'web-app-sampleapp': 'sampleapp'}):
+            payload = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)
+        row = payload['agents'][0]
+        self.assertEqual(row['project'], 'sampleapp')
+        self.assertEqual(row['repo'], 'web-app-sampleapp')
+        self.assertEqual(row['branch'], 'feat/demo')
+        self.assertTrue(row['dirty'])
+
     def test_agents_payload_includes_preview(self):
+
         self.live = {
             ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'},
         }
@@ -355,7 +403,8 @@ class StoreTests(unittest.TestCase):
             self.assertIn('/api/fleet', page)
             self.assertIn('/api/send', page)
             self.assertIn('等待回覆', page)
-            self.assertIn('composer', page)
+            self.assertIn('sheet-form', page)
+            self.assertIn('sheet-mic', page)
         finally:
             server.shutdown()
             server.server_close()

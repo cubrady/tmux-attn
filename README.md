@@ -1,12 +1,68 @@
 # tmux Attention
 
-在 tmux 裡同時使用多個 coding agent 時，讓你一眼看到**哪些正在工作、哪些需要回覆、哪些已完成但尚未查看**，減少來回巡查視窗。
+在 tmux 裡同時跑多個 coding agent 時，一眼看到**誰在工作、誰在等你、誰做完還沒看**，並可從手機／另一台機器的網頁面板監看與貼上簡易回覆。
 
-支援 Claude Code、Codex CLI、Cursor CLI（`agent`）和 Pi。適合在 Mac 工作機上執行 agent，再從 Ghostty 透過 SSH 連線使用；設定應安裝在執行 tmux／agent 的工作機上。
+支援 **Claude Code**、**Codex CLI**、**Cursor CLI（`agent`）**、**Pi**。設定裝在執行 tmux／agent 的工作機上；適合本機跑 agent，再經 Ghostty／SSH 使用。
 
-## 畫面與操作
+開源 repo：`git@github.com:cubrady/tmux-attn.git`
 
-底部視窗列以「專案別名＋圖示」顯示狀態，左側選單不常駐：
+**別台機器／請 agent 代勞安裝：** 見 [docs/agent-join-prompt.md](docs/agent-join-prompt.md)（需使用者提供 Attention Server 資訊）。  
+快速安裝腳本：[install.sh](install.sh)（`git clone` 後執行；可印出 peer JSON）。多機接入也可對照本機 `~/cicd-shared/tmux-attn-join.md`（若有）。
+
+---
+
+## 功能總覽
+
+### tmux 底列與清單
+
+| 功能 | 說明 |
+| --- | --- |
+| 狀態圖示 | 🙋 等待介入 · 🏃 工作中 · 👀 完成待看 · 💤 閒置無待看 |
+| 專案別名 | 底列顯示短名（可設定）；多 pane 同專案共用別名 |
+| 右側計數 | 例如 `🙋 1 · 👀 2 · 🏃 4 · 💤 1`，約每 2 秒刷新 |
+| Popup 清單 | Prefix → `a` 分群列出已追蹤 agent；可預覽 pane、標記已看、暫緩 |
+| 底列點擊巡覽 | 點 🙋／👀／🏃／💤 圖示或數字，循環跳到該狀態 pane（每 client 獨立游標） |
+| 優先序 | 同窗多 agent：等待 → 待看 → 工作中 → 閒置 |
+
+### 狀態來源與判斷
+
+| 功能 | 說明 |
+| --- | --- |
+| Hooks 為主 | Claude／Codex／Cursor／Pi 事件寫入本機 SQLite；無額外 LLM 呼叫 |
+| Observer 補強 | Codex／Claude／Cursor 唯讀交叉驗證程序與明確畫面；未知畫面不猜測 |
+| Soft `?` | 回覆結尾 `?`／`？` → soft 👀（建議查看），**不**硬標 🙋；真正等待來自批准／AskUserQuestion／Permission 等 |
+| `source` | 狀態來源標為 `hook`／`observer`／`shell`（可解釋、調試用） |
+| Codex 非同步提問 | `Queued follow-up inputs` 優先 🙋；答完回到當時工作／完成態 |
+| Cursor | 原生 `~/.cursor/hooks.json`；繼承的 Claude hooks 辨為 Cursor；畫面補強已驗證於 Cursor CLI 2026.10.01 |
+
+### 手機／網頁面板（Attention）
+
+| 功能 | 說明 |
+| --- | --- |
+| 本機 feed | 工作機 `tmux-attn web` → `GET /api/agents`（預設 `0.0.0.0:7788`） |
+| 多機聚合 | 聚合機讀 `peers.json` → `GET /api/fleet`；瀏覽器只打 fleet |
+| 注意力分組 | 🙋 → 👀 → 🏃 → 💤 → 💻 其他 pane |
+| 對話預覽 | 卡片顯示最近 you×3 + agent 摘要（Claude／Codex／Cursor transcript；長度有限） |
+| 環境列 | 專案別名為主；需要時顯示 repo 名、branch、dirty |
+| 回覆 sheet | 點已追蹤卡片 → 底部輸入 → `POST /api/send` 貼到 pane（驗證 `pane_pid`；可轉發 peer）。**是 paste，不是遠端批准** |
+| 語音輸入 | 支援瀏覽器 Web Speech 的裝置可對 sheet 唸稿 |
+| 離線 host | 工作機休眠／web 掛掉時該 host 顯示 offline，其餘仍可用 |
+| 可選 ntfy | 僅在 pane **新進入** 🙋 時推播（見 `notify.example.json`） |
+
+**安全：** 無內建 auth。只暴露在 Tailscale／私有 LAN，勿開公網。
+
+### 安裝與維運
+
+| 功能 | 說明 |
+| --- | --- |
+| 一鍵 bootstrap | hooks、底列、別名、備份、依本機路徑產生設定 |
+| 移植 | `migrate.py export` 帶走別名；目的機別名優先保留 |
+| 還原 | `rollback.py` 還原該次安裝備份 |
+| Agent 代裝 prompt | [docs/agent-join-prompt.md](docs/agent-join-prompt.md) |
+
+---
+
+## 畫面與操作（tmux）
 
 ```text
 sampleapp 🏃    wallet 👀    lending 🙋
@@ -19,220 +75,188 @@ sampleapp 🏃    wallet 👀    lending 🙋
 | 👀 | 閒置，有完成回覆尚未查看 |
 | 💤 | 閒置，沒有待查看回覆 |
 
-底部右側會顯示總數，例如 `🙋 1 · 👀 2 · 🏃 4 · 💤 1`，四個數量分別表示等待介入、回覆待查看、工作中，以及沒有待查看回覆的閒置 agent。底部約每兩秒更新，popup 約每秒更新。
-
-同一個視窗有多個 agent 時，優先顯示：等待回覆 → 尚未查看 → 工作中 → 閒置。尚未建立狀態追蹤的 pane 會先顯示專案名稱，不加狀態圖示。
-
-預設 tmux prefix 為 **Ctrl-b**；若你有自訂 prefix，請使用自己的設定。
+尚未建立狀態追蹤的 pane 只顯示專案名稱。預設 prefix 為 **Ctrl-b**（自訂則用你的）。
 
 | 按鍵 | 功能 |
 | --- | --- |
-| Prefix → `a` | 開啟 popup，分群顯示所有已追蹤 agent |
+| Prefix → `a` | 開啟 popup，分群顯示已追蹤 agent |
 | Prefix → `N` | 跳到第一個待處理 agent（大寫 N） |
-| Popup 中 `j` / `k` 或方向鍵 | 選擇項目 |
-| Enter | 跳到對應 pane 並關閉 popup |
-| `v` | 開啟／關閉所選 pane 的預覽 |
-| `d` | 標記已查看，將 `👀` 改為 `💤` |
-| `1` | 暫緩這一筆待處理項目五分鐘 |
-| `a` | 切換全部 agent／僅待處理項目 |
-| Esc / `q` | 關閉 popup |
+| Popup `j`／`k` 或方向鍵 | 選擇 |
+| Enter | 跳到 pane 並關閉 popup |
+| `v` | 開啟／關閉所選 pane 預覽 |
+| `d` | 標記已查看（👀 → 💤） |
+| `1` | 暫緩該待處理項五分鐘 |
+| `a` | 全部／僅待處理 |
+| Esc／`q` | 關閉 |
 
-跳到 pane 不會自動標記已查看。`d` 只標記你已看過這次回覆，不會代替你批准操作或回覆 agent；下一次完成回覆會再次顯示 `👀`。
+跳到 pane **不會**自動標記已看；`d` 不代替批准或回覆。點擊底列計數巡覽同樣不標記已看。
+
+---
+
+## 架構：工作機 vs Attention Server
+
+```text
+工作機 A ── /api/agents ──┐
+工作機 B ── /api/agents ──┼──▶ 聚合機（Attention Server）/api/fleet ──▶ 手機瀏覽器
+工作機 C ── /api/agents ──┘
+```
+
+| 角色 | 跑什麼 | 誰開瀏覽器 |
+| --- | --- | --- |
+| **工作機** | `bootstrap`＋常駐 `tmux-attn web` | 可選；通常給聚合器刮 |
+| **聚合機** | `peers.json`＋`tmux-attn web` 或 `--fleet` | 手機／別台開這台的 `:7788` |
+
+- Peer **只**提供本機 `/api/agents`，**不要**互刮 `/api/fleet`（避免迴圈）。
+- 單機也可直接開工作機 `:7788/`（fleet = 本機＋可選 peers）。
+
+---
 
 ## 安裝
 
-### 前置需求
+### 前置
 
-- Python **3.11 或更新版本**。
-- tmux **3.7 或更新版本**（可點擊狀態使用 control ranges），已在 **tmux 3.7b** 驗證。
-- 已安裝並登入你要使用的 agent CLI。
-- clone 本 private repo 所需的 GitHub 存取權限。
+- Python **≥ 3.11**
+- tmux **≥ 3.7**（點擊計數需 control ranges；已在 3.7b 驗證）
+- 已安裝並登入要用的 agent CLI
+- 能 clone repo 的 GitHub 權限  
+目前主要在 macOS 驗證。Pi 需支援 `agent_settled`／`ui_prompt_start` 等（已在 Pi 1.0.0 驗證）。
 
-目前主要在 macOS 驗證。Pi 整合需支援 `agent_settled` 與 `ui_prompt_start` 等事件，已在 Pi 1.0.0 驗證。
-
-### 一個指令安裝
-
-先取得專案，再執行 bootstrap：
+### 一鍵安裝
 
 ```sh
 git clone git@github.com:cubrady/tmux-attn.git
 cd tmux-attn
-sh bootstrap.sh
+sh install.sh          # 呼叫 bootstrap.sh；結尾可提示 peer JSON
+# 等同：sh bootstrap.sh
 ```
 
-Bootstrap 會檢查 Python／tmux，並在尚無 tmux session 時建立 `work` session。安裝程式會：
-
-- 安裝 popup、底部圖示及專案別名。
-- 合併 Claude／Codex／Cursor hooks，加入 Pi extension。
-- 啟用 Codex 的 `[features] hooks = true`。
-- 備份原設定，保留其他 hooks 與目的機已有的別名。
-- 依新機器的使用者目錄和 Python 位置產生路徑。
-
-Bootstrap 不會安裝前置軟體或代替 agent 登入。若既有 Codex TOML 使用無法安全編輯的 inline／dotted 寫法，安裝會提示你手動啟用 hooks。
-
-若尚未進入 tmux，可執行：
+若已有 Attention 資訊，可讓結尾直接印出要貼上聚合機的 peer：
 
 ```sh
-tmux attach
+PEER_NAME='brad-mba' LOCAL_FEED_URL='http://100.x.x.x:7788' sh install.sh
 ```
 
-接著按 **Ctrl-b → a** 開啟清單。
-
-### 讓 agent 載入設定
-
-- **Claude Code**：新 session 會使用已安裝的 hooks；舊 session 若沒有更新，請在方便時重新啟動／resume。
-- **Codex**：使用 `/hooks` 檢查並載入 command hooks；首次可能需要信任這些命令。舊 session 若未載入，請重新啟動／resume。
-- **Pi**：舊 session 執行 `/reload`，或重新啟動／resume。
-
-空白 CLI 尚未開始任務時，可能還沒有狀態事件。系統也會唯讀追蹤可確認身分的既有 Codex 對話；名稱被截斷或對應不唯一時，會保留未配對狀態。
-
-### 更新與其他顯示模式
+會安裝到 `~/.local/share/tmux-attn/`、`~/.local/bin/tmux-attn`；合併 Claude／Codex／Cursor hooks、Pi extension；啟用 Codex `[features] hooks = true`；寫入 `sidebar.conf` 並 source 進 `~/.tmux.conf`；備份原設定。常駐左側：`sh install.sh --sidebar`。
 
 ```sh
-git pull --ff-only
-sh bootstrap.sh
+tmux attach          # 若尚未在 tmux
+# Ctrl-b → a         開清單
 ```
 
-每次安裝都會建立新的備份。若偏好常駐左側清單，可改用：
+常駐左側清單：`sh bootstrap.sh --sidebar`。更新：`git pull --ff-only && sh bootstrap.sh`。
+
+### 讓 agent 載入 hooks
+
+| CLI | 建議 |
+| --- | --- |
+| Claude Code | 新 session 即可；舊的重開／resume |
+| Codex | `/hooks` 檢查並信任；舊 session 重開／resume |
+| Cursor `agent` | 確認 `~/.cursor/hooks.json`；舊 session 重開 |
+| Pi | `/reload` 或重開 |
+
+空白 CLI 尚未開工時可能還沒有事件。
+
+### 請 agent 代裝（含上線）
+
+1. 準備好：`PEER_NAME`、本機 Tailscale feed URL（如 `http://100.x.x.x:7788`）、Attention Server 怎麼改 `peers.json`（自己改／本機兼聚合／SSH 改遠端）。
+2. 把 [docs/agent-join-prompt.md](docs/agent-join-prompt.md) 整段 prompt 貼給 agent。
+3. 缺 server 資訊時 agent 應停下詢問，不要猜。
+
+---
+
+## 本機 Web feed 與聚合
+
+### 工作機
 
 ```sh
-sh bootstrap.sh --sidebar
+~/.local/bin/tmux-attn web          # 預設 0.0.0.0:7788；也可 web 7789
+curl -s http://127.0.0.1:7788/api/health
+curl -s http://127.0.0.1:7788/api/agents | head
 ```
+
+可選環境變數：`TMUX_ATTN_HOST`（面板短名）、`TMUX_ATTN_SOCKET`、`TMUX_ATTN_STATE_DIR`、`TMUX_ATTN_NOTIFY`。
+
+長期常駐可用 launchd／systemd／tmux pane（專案尚未內建 service 檔）。
+
+### Attention Server（聚合機）
+
+```sh
+mkdir -p ~/.config/tmux-attn
+cp peers.example.json ~/.config/tmux-attn/peers.json
+# 編輯 name / url（各工作機 web 根網址）
+
+~/.local/bin/tmux-attn web --fleet   # VPS：只聚合、不讀本機 tmux
+# 或在工作機兼聚合：tmux-attn web
+```
+
+手機開：`http://<聚合機 Tailscale IP 或主機名>:7788/`
+
+### 可選 ntfy
+
+僅 **新進入** 🙋 時推送。複製 [notify.example.json](notify.example.json) → `~/.config/tmux-attn/notify.json`，設 `enabled: true` 與私有 topic。
+
+---
 
 ## 專案別名
 
-編輯 `~/.config/tmux-attn/project-aliases.json`，約兩秒內生效：
+編輯 `~/.config/tmux-attn/project-aliases.json`（約兩秒生效）。完整路徑優先，其次資料夾名；未設定則用資料夾名（過長截斷）。範例：[project-aliases.example.json](project-aliases.example.json)。
 
-```json
-{
-  "aliases": {
-    "web-app-sampleapp": "sampleapp",
-    "example-wallet-gateway": "wallet",
-    "/Users/your-name/projects/api": "my-api"
-  }
-}
-```
+---
 
-完整路徑 mapping 優先，其次是資料夾名稱 mapping。沒有設定的新專案會自動顯示資料夾名稱；超過 12 字元時截短並加 `…`。不同專案名稱撞到時，優先加可讀後綴，否則使用穩定的短識別碼。同一專案的多個視窗沿用相同別名。
-
-預設 mapping 參見 [project-aliases.example.json](project-aliases.example.json)。Popup 保留完整專案名稱，不受底部縮寫影響。
-
-## 移植到另一台機器
-
-直接 clone repo 並執行 `sh bootstrap.sh` 即可安裝預設設定。若要一起帶走**目前的個人別名**，在原機器匯出：
+## 移植與還原
 
 ```sh
+# 舊機：帶走個人別名
 python3 migrate.py export dist/tmux-attn-migration.tar.gz
+# 新機解壓後 sh bootstrap.sh
 ```
 
-將壓縮檔複製到新工作機器，再執行：
-
-```sh
-tar -xzf tmux-attn-migration.tar.gz
-cd tmux-attn
-sh bootstrap.sh
-```
-
-匯出檔包含程式、安裝／還原工具、測試及目前別名，不包含 agent 帳號憑證、對話紀錄或執行狀態。目的機已有的別名優先保留，匯入檔只補上缺少項目。
-
-資料夾名稱 mapping 可沿用；完整路徑 mapping 需依新機器調整。重新匯出請換新檔名，工具不會覆蓋同名壓縮檔。
-
-## 還原
-
-安裝完成會輸出 `backup` 路徑。使用該次安裝輸出的完整路徑還原：
+不包含憑證、對話或執行狀態。目的機已有別名優先。
 
 ```sh
 python3 rollback.py /path/to/printed/backup
 ```
 
-還原會恢復備份中的設定和快捷鍵，保留工作 pane。它會還原整份設定檔；若安裝後又做過修改，請先保存那些修改。Agent 也需重新載入還原後的 hooks／extension。
+還原整份備份設定；安裝後若又改過請先另存。Agent 需重載 hooks。
 
-## 運作方式與判斷範圍
+---
 
-狀態主要來自 agent hooks／Pi 事件，保存在本機 SQLite。Codex 相容監控會唯讀讀取本機對話事件及必要的 pane 畫面，交叉驗證主對話身分；子 agent 的事件不會覆蓋主 agent 狀態。Claude 的相容監控也會交叉確認前景程序及明確的工作／完成畫面，修正未更新的舊通知；批准或回答選單會阻止畫面校正。未知畫面保留原事件狀態。這些判斷不需要額外 LLM 呼叫。
-
-一般完成回覆會成為未查看項目。若回覆最後以 `?` 或 `？` 結尾，只當成 soft 👀「建議查看」（`IDLE` + needs_review），**不會**硬標 🙋；明確的批准／AskUserQuestion／Permission／ui_prompt 事件才標記為等待回覆。
-
-`🏃` 表示主回合正在工作。主回覆完成後，即使背景 shell／dev server 還在執行，也會顯示 `👀`；背景工作的存在會另外顯示在 popup 說明中。
-
-對以 `resume` 啟動的 Codex CLI，相容監控會用前景程序的工作目錄與完整對話名稱核對既有綁定；右側額外資訊不會視為名稱的一部分。若同一 CLI 切換對話後，名稱被截斷或對應不唯一，仍需重新載入 hooks。監控依賴本機資料格式，無法確認的對應不會猜測。
-
-## 手機／遠端面板（MVP）
-
-在跑 agent 的工作機上啟動網頁服務；預設綁定 `0.0.0.0:7788`，同一 Tailscale／LAN 內可直接開啟。不需要 `tailscale serve`，也無內建 auth（請只暴露在私有網）。
-
-頁面依**注意力分組**：🙋 等待 → 👀 待看 → 🏃 進行中 → 💤 閒置 → 💻 其他 pane。卡片會標 `source`（`hook`／`observer`／`shell`）。點選已追蹤 agent 可在底部輸入文字，經 `POST /api/send` 貼到該 pane（再確認 `pane_pid`；可轉發 peer）。這是 paste 回覆，不是遠端批准。
-
-```sh
-# 每台工作機
-~/.local/bin/tmux-attn web
-# 預設埠 7788；也可 `tmux-attn web 7789`
-```
-
-### 多機聚合（VPS 或任一台）
-
-每台工作機提供本機 feed：`GET /api/agents`。聚合器讀 `~/.config/tmux-attn/peers.json`（範例見 [peers.example.json](peers.example.json)），合併為 `GET /api/fleet`；瀏覽器只打 fleet，避免互相聚合造成迴圈。
-
-```sh
-mkdir -p ~/.config/tmux-attn
-cp peers.example.json ~/.config/tmux-attn/peers.json
-# 編輯 name / url（Tailscale IP 或 MagicDNS:7788）
-
-# VPS：只聚合 peers、不讀本機 tmux
-~/.local/bin/tmux-attn web --fleet
-```
-
-手機開聚合機：
-
-```text
-http://<vps-或聚合機 Tailscale 名或 100.x>:7788/
-```
-
-單機也可直接開工作機的 `:7788/`（fleet = 本機 + 可選 peers）。工作機休眠則該 host 顯示離線；整頁其餘 host 仍可用。
-
-### 可選推播（ntfy）
-
-僅在 pane **新進入** 🙋（WAIT）時推送。複製 [notify.example.json](notify.example.json) 為 `~/.config/tmux-attn/notify.json`，設 `enabled: true` 與私有 `topic`（可用自架 ntfy／Tailscale）。也可設環境變數 `TMUX_ATTN_NOTIFY` 指向設定檔。失敗寫入 state 目錄的 `notify-errors.log`。
-
-## 檔案與檢查
+## 路徑速查
 
 | 位置 | 用途 |
 | --- | --- |
-| `~/.local/bin/tmux-attn` | 開啟 popup 或查詢狀態 |
-| `~/.local/share/tmux-attn/` | 安裝後的程式 |
-| `~/.local/share/tmux-attn/web/` | 手機面板靜態頁 |
-| `~/.config/tmux-attn/sidebar.conf` | tmux 顯示及快捷鍵設定 |
-| `~/.config/tmux-attn/project-aliases.json` | 個人別名 |
-| `~/.config/tmux-attn/peers.json` | 多機聚合 peers（可選） |
-| `~/.config/tmux-attn/notify.json` | 可選 ntfy 推播（預設關閉） |
-| `~/.local/state/tmux-attn/inbox.sqlite3` | 狀態及已查看標記 |
-| `~/.local/state/tmux-attn/backups/` | 安裝備份 |
-
-查詢狀態與診斷資料：
+| `~/.local/bin/tmux-attn` | CLI |
+| `~/.local/share/tmux-attn/` | 安裝後程式與 `web/` |
+| `~/.config/tmux-attn/sidebar.conf` | 底列／快捷鍵 |
+| `~/.config/tmux-attn/project-aliases.json` | 別名 |
+| `~/.config/tmux-attn/peers.json` | 聚合 peers |
+| `~/.config/tmux-attn/notify.json` | 可選 ntfy |
+| `~/.local/state/tmux-attn/inbox.sqlite3` | 狀態 DB |
+| `~/.local/state/tmux-attn/hook-errors.log` | hook 錯誤 |
+| `~/.local/state/tmux-attn/observer-errors.log` | observer 錯誤 |
 
 ```sh
 ~/.local/bin/tmux-attn status
 ~/.local/bin/tmux-attn dump
-~/.local/bin/tmux-attn web
 ```
 
-Hooks／監控錯誤會記錄在 state 目錄中的 `hook-errors.log`／`observer-errors.log`。
+---
 
-開發驗證使用隔離的 tmux server，涵蓋狀態事件、resume 配對、查看標記、別名、移植及還原：
+## 開發與測試
 
 ```sh
 python3 -m unittest test_attention.py test_codex_observer.py test_migration.py
 python3 tests/popup_roundtrip.py
+python3 tests/status_click_roundtrip.py
 ```
 
-Repo 追蹤程式、測試、文件及預設別名；本機狀態、匯出檔和個人紀錄由 `.gitignore` 排除。原始 polling starter 保留在 `legacy/` 作為歷史參考。
+調研衍生項：[docs/survey-actions.md](docs/survey-actions.md)。原始 polling starter 在 `legacy/`。
 
-Cursor CLI 使用原生 `~/.cursor/hooks.json` 的完成事件，並辨識繼承的 Claude hooks 為 Cursor。已開啟的互動 CLI 另以程序與畫面確認狀態：`ctrl+c to stop` 表示工作中，完成後切成 👀；句尾問號只當 soft 👀，核准對話框仍優先 🙋。此畫面補充辨識已在 Cursor CLI 2026.10.01 驗證，未知畫面不猜測。
+---
 
-調研衍生項目見 [docs/survey-actions.md](docs/survey-actions.md)。
+## 判斷細節（摘要）
 
-點擊底列右側的 🙋／👀／🏃／💤 圖示或數字，可循環巡覽該狀態的 agent，直接定位到對應 session、window 與 pane。四組各自記住位置，依 session 名稱、window 建立順序與 pane 編號巡覽；走到最後後回到第一個。數量為零時不切換。點擊不會標記已查看，仍需在清單按 `d`。每個連線 client 的巡覽位置分開記錄，原有底列 session 點擊保留。安裝會開啟 tmux mouse；回復腳本會還原原本設定與按鍵。
-
-滑鼠互動驗證：`python3 tests/status_click_roundtrip.py`（獨立 tmux 環境）。
-
-Codex 的非同步提問（`Queued follow-up inputs`）即使 agent 繼續工作，也會優先顯示 🙋。清單會顯示待回答問題數；回答後回到目前的工作／完成狀態。
+- 狀態主要來自 hooks；Codex／Claude／Cursor observer 交叉驗證主對話身分與明確畫面。子 agent 事件不覆蓋主狀態。
+- 主回覆完成後即使背景 shell 仍跑，顯示 👀；背景說明可出現在 popup。
+- Codex `resume`：用 cwd 與對話名核對綁定；名稱截斷或不唯一時不猜測。
+- 網頁預覽：Claude（`~/.claude/projects`）、Codex rollout、Cursor（`~/.cursor/projects/…/agent-transcripts`）；純 CLI 且無 transcript／hook 文字時可能仍空白。

@@ -31,7 +31,8 @@
       --max: 42rem;
       --ease: cubic-bezier(0.16, 1, 0.3, 1);
       --header-bg: color-mix(in srgb, var(--bg) 86%, transparent);
-      --composer-bg: color-mix(in srgb, var(--card) 94%, transparent);
+      --sheet-bg: #ffffff;
+      --scrim: rgb(24 24 27 / 0.42);
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -50,7 +51,8 @@
         --danger: #f87171;
         --danger-bg: #450a0a;
         --header-bg: color-mix(in srgb, var(--bg) 88%, transparent);
-        --composer-bg: color-mix(in srgb, var(--card) 92%, transparent);
+        --sheet-bg: #18181b;
+        --scrim: rgb(0 0 0 / 0.55);
       }
     }
     * { box-sizing: border-box; }
@@ -64,6 +66,7 @@
       padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
       -webkit-font-smoothing: antialiased;
     }
+    body.sheet-open { overflow: hidden; }
     .wrap {
       width: min(100%, var(--max));
       margin: 0 auto;
@@ -80,7 +83,7 @@
       border-bottom: 1px solid var(--line);
     }
     @media (prefers-reduced-transparency: reduce) {
-      header, .composer {
+      header {
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
         background: var(--card);
@@ -192,7 +195,9 @@
       border: 1px solid var(--line);
       border-left: 3px solid var(--idle);
       transition: border-color 160ms var(--ease), background 160ms var(--ease);
+      cursor: pointer;
     }
+    .card.shell { cursor: default; }
     @media (prefers-reduced-motion: no-preference) {
       .card { transition: border-color 160ms var(--ease), background 160ms var(--ease), transform 140ms var(--ease); }
       .card:active { transform: scale(0.985); }
@@ -281,16 +286,57 @@
       color: var(--muted);
       font-size: 0.78rem;
     }
+    .env {
+      margin-top: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      align-items: baseline;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: var(--muted);
+      min-width: 0;
+    }
+    .env .repo { color: color-mix(in srgb, var(--fg) 72%, var(--muted)); }
+    .env .branch { color: var(--muted); overflow-wrap: anywhere; }
+    .env .dirty {
+      color: var(--wait);
+      font-size: 0.62rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .sheet-env {
+      margin: 0 0 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--bg);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+    .sheet-env .path {
+      color: color-mix(in srgb, var(--fg) 78%, var(--muted));
+      overflow-wrap: anywhere;
+    }
+    .sheet-env .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      margin-top: 4px;
+      align-items: baseline;
+    }
+    .sheet-env .branch { color: var(--muted); }
+    .sheet-env .dirty { color: var(--wait); }
     .reason {
       margin-top: 7px;
       font-size: 0.88rem;
       color: color-mix(in srgb, var(--fg) 82%, var(--muted));
       text-wrap: pretty;
     }
-    .card.error .reason {
-      color: var(--danger);
-      font-weight: 500;
-    }
+    .card.error .reason { color: var(--danger); font-weight: 500; }
     .preview {
       margin-top: 10px;
       padding-top: 9px;
@@ -343,62 +389,159 @@
       background: var(--danger-bg);
       border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
     }
-    .composer {
-      position: sticky;
-      bottom: 0;
-      margin-top: 14px;
-      padding: 12px;
-      background: var(--composer-bg);
-      backdrop-filter: blur(14px) saturate(1.15);
-      -webkit-backdrop-filter: blur(14px) saturate(1.15);
+
+    /* Reply sheet */
+    .sheet-root[hidden] { display: none !important; }
+    .sheet-root {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+    }
+    .sheet-scrim {
+      position: absolute;
+      inset: 0;
+      background: var(--scrim);
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+    }
+    .sheet {
+      position: relative;
+      z-index: 1;
+      width: min(100%, var(--max));
+      max-height: min(88dvh, 720px);
+      display: flex;
+      flex-direction: column;
+      background: var(--sheet-bg);
       border: 1px solid var(--line);
-      border-radius: var(--radius);
+      border-bottom: 0;
+      border-radius: 16px 16px 0 0;
+      padding: 0 14px calc(12px + env(safe-area-inset-bottom));
+      box-shadow: 0 -12px 40px rgb(0 0 0 / 0.12);
     }
-    .composer[hidden] { display: none !important; }
-    .composer .target {
-      font-size: 0.75rem;
-      color: var(--muted);
+    @media (prefers-reduced-motion: no-preference) {
+      .sheet-scrim { animation: fade-in 180ms var(--ease); }
+      .sheet { animation: sheet-up 220ms var(--ease); }
+    }
+    @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes sheet-up {
+      from { transform: translateY(18px); opacity: 0.85; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .sheet-handle {
+      width: 36px;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--line);
+      margin: 10px auto 8px;
+    }
+    .sheet-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
       margin-bottom: 8px;
-      font-family: var(--mono);
     }
-    .composer textarea {
+    .sheet-title {
+      margin: 0;
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .sheet-sub {
+      margin-top: 3px;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+    .icon-btn {
+      border: 1px solid var(--line);
+      background: var(--bg);
+      color: var(--fg);
+      width: 36px;
+      height: 36px;
+      border-radius: var(--radius);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      flex: 0 0 auto;
+      padding: 0;
+    }
+    .icon-btn svg { width: 18px; height: 18px; display: block; }
+    .icon-btn.listening {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+      background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+      color: var(--accent);
+    }
+    .sheet-reason {
+      font-size: 0.88rem;
+      color: color-mix(in srgb, var(--fg) 82%, var(--muted));
+      margin-bottom: 8px;
+      text-wrap: pretty;
+    }
+    .sheet-preview {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      margin-bottom: 10px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .sheet-preview .preview { margin-top: 0; padding-top: 0; border-top: 0; }
+    .sheet-compose {
+      flex: 0 0 auto;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .sheet-compose textarea {
       width: 100%;
-      min-height: 68px;
+      min-height: 88px;
+      max-height: 28dvh;
       resize: vertical;
       border: 1px solid var(--line);
       border-radius: var(--radius);
       padding: 10px 11px;
-      font: 0.92rem/1.4 var(--font);
+      font: 0.95rem/1.4 var(--font);
       background: var(--bg-elevated);
       color: var(--fg);
       outline: none;
     }
-    .composer textarea:focus {
+    .sheet-compose textarea:focus {
       border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
     }
-    .composer .row {
+    .sheet-actions {
       display: flex;
       gap: 8px;
       align-items: center;
       margin-top: 8px;
     }
-    .composer button {
+    .sheet-actions .send {
       border: 0;
       border-radius: var(--radius);
-      padding: 8px 14px;
-      font: 600 0.84rem var(--font);
+      padding: 9px 16px;
+      font: 600 0.88rem var(--font);
       background: var(--accent);
       color: var(--accent-fg);
       cursor: pointer;
     }
     @media (prefers-reduced-motion: no-preference) {
-      .composer button:active { transform: scale(0.98); }
+      .sheet-actions .send:active,
+      .icon-btn:active { transform: scale(0.97); }
     }
-    .composer button:disabled { opacity: 0.45; cursor: default; }
-    .composer .hint { font-size: 0.72rem; color: var(--muted); }
-    .composer .status { font-size: 0.78rem; margin-left: auto; color: var(--muted); }
-    .composer .status.bad { color: var(--danger); }
-    .composer .status.ok { color: var(--running); }
+    .sheet-actions .send:disabled,
+    .icon-btn:disabled { opacity: 0.45; cursor: default; }
+    .sheet-actions .hint { font-size: 0.72rem; color: var(--muted); }
+    .sheet-actions .status { font-size: 0.78rem; margin-left: auto; color: var(--muted); }
+    .sheet-actions .status.bad { color: var(--danger); }
+    .sheet-actions .status.ok { color: var(--running); }
+    .voice-hint {
+      margin-top: 6px;
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -415,16 +558,43 @@
     <main class="list" id="list"></main>
     <div class="empty" id="empty" hidden></div>
     <div class="banner-error" id="error" hidden></div>
-    <form class="composer" id="composer" hidden>
-      <div class="target" id="composer-target">選一個 agent 以傳送訊息</div>
-      <textarea id="composer-text" placeholder="傳送到選定 pane（貼上並送出 Enter）"></textarea>
-      <div class="row">
-        <button type="submit" id="composer-send">送出</button>
-        <span class="hint">文字 paste，不做批准</span>
-        <span class="status" id="composer-status"></span>
-      </div>
-    </form>
   </div>
+
+  <div class="sheet-root" id="sheet-root" hidden>
+    <button type="button" class="sheet-scrim" id="sheet-scrim" aria-label="關閉"></button>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <div class="sheet-top">
+        <div>
+          <h2 class="sheet-title" id="sheet-title">回覆</h2>
+          <div class="sheet-sub" id="sheet-target"></div>
+        </div>
+        <button type="button" class="icon-btn" id="sheet-close" aria-label="關閉">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="sheet-env" id="sheet-env" hidden></div>
+      <div class="sheet-reason" id="sheet-reason"></div>
+      <div class="sheet-preview" id="sheet-preview"></div>
+      <form class="sheet-compose" id="sheet-form">
+        <textarea id="sheet-text" placeholder="輸入訊息，或按麥克風語音輸入" enterkeyhint="send"></textarea>
+        <div class="sheet-actions">
+          <button type="button" class="icon-btn" id="sheet-mic" aria-label="語音輸入" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3"/>
+              <path d="M5 11a7 7 0 0 0 14 0"/>
+              <path d="M12 18v3"/>
+            </svg>
+          </button>
+          <button type="submit" class="send" id="sheet-send">送出</button>
+          <span class="hint">貼上並 Enter</span>
+          <span class="status" id="sheet-status"></span>
+        </div>
+        <div class="voice-hint" id="voice-hint" hidden></div>
+      </form>
+    </div>
+  </div>
+
   <script>
     const SECTIONS = [
       ['wait', '等待回覆'],
@@ -434,8 +604,14 @@
       ['shell', '其他 pane'],
     ];
     const SECTION_EMOJI = { wait: '🙋', review: '👀', running: '🏃', idle: '💤', shell: '💻' };
+    const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
     let selectedKey = '';
     let latestAgents = [];
+    let sheetOpen = false;
+    let recognition = null;
+    let listening = false;
+    let speechBase = '';
+
     function agentKey(a) {
       return [a.host || '', a.pane || '', a.pid || ''].join('|');
     }
@@ -455,20 +631,47 @@
       const short = name.length > 6 ? name.slice(0, 5) + '…' : name;
       return `<span class="cli" title="${escapeHtml(name)}"><span class="cli-text">${escapeHtml(short)}</span></span>`;
     }
+    function previewHtml(preview) {
+      const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
+      const agentLine = preview?.agent || '';
+      if (!users.length && !agentLine) return '';
+      return `<div class="preview">${
+        users.map(text => `<div class="preview-line user"><span class="who">you</span><span class="text">${escapeHtml(text)}</span></div>`).join('')
+      }${agentLine ? `<div class="preview-line agent"><span class="who">agent</span><span class="text">${escapeHtml(agentLine)}</span></div>` : ''}</div>`;
+    }
+    function clipBranch(branch, limit = 36) {
+      const text = String(branch || '');
+      if (text.length <= limit) return text;
+      return text.slice(0, Math.max(0, limit - 1)) + '…';
+    }
+    function envLineHtml(a) {
+      const project = a.project || '';
+      const repo = a.repo || '';
+      const showRepo = repo && repo !== project;
+      const branch = clipBranch(a.branch || '');
+      const parts = [];
+      if (showRepo) parts.push(`<span class="repo">${escapeHtml(repo)}</span>`);
+      if (branch) parts.push(`<span class="branch">${escapeHtml(branch)}</span>`);
+      if (a.dirty) parts.push('<span class="dirty">dirty</span>');
+      return parts.length ? `<div class="env">${parts.join('')}</div>` : '';
+    }
+    function sheetEnvHtml(a) {
+      const path = a.path || '';
+      const branch = a.branch || '';
+      if (!path && !branch) return '';
+      const bits = [];
+      if (branch) bits.push(`<span class="branch">${escapeHtml(branch)}</span>`);
+      if (a.dirty) bits.push('<span class="dirty">dirty</span>');
+      return `<div class="path">${escapeHtml(path || (a.repo || ''))}</div>` +
+        (bits.length ? `<div class="row">${bits.join('')}</div>` : '');
+    }
     function cardHtml(a) {
       const cat = category(a);
       const cli = (a.cli || a.agent || a.command || 'shell').toLowerCase();
       const host = a.host ? `<span class="host">${escapeHtml(a.host)}</span>` : '';
       const errorClass = a.severity === 'error' ? ' error' : '';
       const selected = agentKey(a) === selectedKey ? ' selected' : '';
-      const source = a.source ? ` / ${escapeHtml(a.source)}` : '';
       const selectable = a.tracked ? ' tabindex="0" role="button"' : '';
-      const preview = a.preview || {};
-      const users = Array.isArray(preview.users) ? preview.users.filter(Boolean) : [];
-      const agentLine = preview.agent || '';
-      const previewHtml = (users.length || agentLine) ? `<div class="preview">${
-        users.map(text => `<div class="preview-line user"><span class="who">you</span><span class="text">${escapeHtml(text)}</span></div>`).join('')
-      }${agentLine ? `<div class="preview-line agent"><span class="who">agent</span><span class="text">${escapeHtml(agentLine)}</span></div>` : ''}</div>` : '';
       return `<article class="card ${cat}${errorClass}${selected}" data-key="${escapeHtml(agentKey(a))}"${selectable}>
         <div class="row1">
           <div class="title">
@@ -479,21 +682,72 @@
           </div>
           <div class="age">${escapeHtml(a.age)}</div>
         </div>
-        <div class="sub">${escapeHtml(cli)}${a.command && a.command !== cli ? ' / ' + escapeHtml(a.command) : ''} / ${escapeHtml(a.session)} / ${escapeHtml(a.window)}${source}</div>
+        ${envLineHtml(a)}
         <div class="reason">${escapeHtml(a.reason)}</div>
-        ${previewHtml}
+        ${previewHtml(a.preview)}
       </article>`;
     }
-    function syncComposer() {
-      const composer = document.getElementById('composer');
-      const target = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
-      if (!target) {
-        composer.hidden = true;
+    function stopListening() {
+      if (recognition && listening) {
+        try { recognition.stop(); } catch (_) {}
+      }
+      listening = false;
+      document.getElementById('sheet-mic').classList.remove('listening');
+      document.getElementById('voice-hint').hidden = true;
+    }
+    function closeSheet() {
+      stopListening();
+      sheetOpen = false;
+      selectedKey = '';
+      document.getElementById('sheet-root').hidden = true;
+      document.body.classList.remove('sheet-open');
+      document.getElementById('sheet-text').value = '';
+      document.getElementById('sheet-status').textContent = '';
+      document.getElementById('sheet-status').className = 'status';
+      document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
+    }
+    function fillSheet(agent) {
+      document.getElementById('sheet-title').textContent =
+        `${agent.emoji || ''} ${agent.project || agent.window || agent.pane}`.trim();
+      document.getElementById('sheet-target').textContent =
+        `${agent.host || 'local'} ${agent.pane} / ${agent.cli || agent.agent} / ${agent.session}`;
+      const env = document.getElementById('sheet-env');
+      const envHtml = sheetEnvHtml(agent);
+      env.hidden = !envHtml;
+      env.innerHTML = envHtml;
+      document.getElementById('sheet-reason').textContent = agent.reason || '';
+      document.getElementById('sheet-preview').innerHTML = previewHtml(agent.preview) ||
+        '<div class="preview-line agent"><span class="who">—</span><span class="text">尚無對話預覽</span></div>';
+    }
+    function openSheet(agent) {
+      selectedKey = agentKey(agent);
+      sheetOpen = true;
+      fillSheet(agent);
+      document.getElementById('sheet-status').textContent = '';
+      document.getElementById('sheet-status').className = 'status';
+      document.getElementById('sheet-root').hidden = false;
+      document.body.classList.add('sheet-open');
+      document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
+      const card = document.querySelector(`.card[data-key="${CSS.escape(selectedKey)}"]`);
+      if (card) card.classList.add('selected');
+      const mic = document.getElementById('sheet-mic');
+      if (SpeechAPI) {
+        mic.hidden = false;
+      } else {
+        mic.hidden = true;
+        document.getElementById('voice-hint').hidden = false;
+        document.getElementById('voice-hint').textContent = '此瀏覽器不支援語音辨識，可用鍵盤內建麥克風。';
+      }
+      requestAnimationFrame(() => document.getElementById('sheet-text').focus());
+    }
+    function syncSheetFromData() {
+      if (!sheetOpen || !selectedKey) return;
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      if (!agent) {
+        closeSheet();
         return;
       }
-      composer.hidden = false;
-      document.getElementById('composer-target').textContent =
-        `${target.host || 'local'} ${target.pane} / ${target.project || target.window} / ${target.cli || target.agent}`;
+      fillSheet(agent);
     }
     function render(data) {
       const s = data.summary || {};
@@ -519,16 +773,13 @@
       const err = document.getElementById('error');
       err.hidden = true;
       latestAgents = data.agents || [];
-      if (selectedKey && !latestAgents.some(a => agentKey(a) === selectedKey && a.tracked)) {
-        selectedKey = '';
-      }
       if (!latestAgents.length) {
         list.innerHTML = '';
         empty.hidden = false;
         empty.textContent = hosts.some(h => !h.ok)
           ? '尚無資料。檢查 peers 是否在線，或本機 tmux／hooks。'
           : '沒有 live pane。確認工作機上的 tmux 有在跑。';
-        syncComposer();
+        if (sheetOpen) closeSheet();
         return;
       }
       empty.hidden = true;
@@ -539,31 +790,87 @@
         if (!rows.length) return '';
         return `<div class="section"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>` + rows.map(cardHtml).join('');
       }).join('');
-      syncComposer();
+      syncSheetFromData();
     }
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       }[c]));
     }
+    function setupSpeech() {
+      if (!SpeechAPI) return;
+      recognition = new SpeechAPI();
+      recognition.lang = (navigator.language || 'zh-TW').startsWith('zh') ? 'zh-TW' : (navigator.language || 'en-US');
+      recognition.interimResults = true;
+      recognition.continuous = false;
+      recognition.onstart = () => {
+        listening = true;
+        document.getElementById('sheet-mic').classList.add('listening');
+        document.getElementById('voice-hint').hidden = false;
+        document.getElementById('voice-hint').textContent = '聆聽中…再點麥克風結束';
+      };
+      recognition.onend = () => {
+        listening = false;
+        document.getElementById('sheet-mic').classList.remove('listening');
+        document.getElementById('voice-hint').hidden = true;
+      };
+      recognition.onerror = (event) => {
+        listening = false;
+        document.getElementById('sheet-mic').classList.remove('listening');
+        const status = document.getElementById('sheet-status');
+        status.className = 'status bad';
+        status.textContent = event.error === 'not-allowed' ? '需要麥克風權限' : ('語音錯誤: ' + event.error);
+        document.getElementById('voice-hint').hidden = true;
+      };
+      recognition.onresult = (event) => {
+        let interim = '';
+        let finalText = '';
+        for (let i = 0; i < event.results.length; i++) {
+          const piece = event.results[i][0].transcript;
+          if (event.results[i].isFinal) finalText += piece;
+          else interim += piece;
+        }
+        const box = document.getElementById('sheet-text');
+        const joined = (speechBase + (finalText || interim)).replace(/\s+/g, ' ').trimStart();
+        box.value = joined;
+        if (finalText) speechBase = (speechBase + finalText).replace(/\s+/g, ' ');
+        if (!speechBase.endsWith(' ') && speechBase) speechBase += ' ';
+      };
+    }
     document.getElementById('list').addEventListener('click', (event) => {
       const card = event.target.closest('.card[data-key]');
       if (!card) return;
       const agent = latestAgents.find(a => agentKey(a) === card.dataset.key);
       if (!agent || !agent.tracked) return;
-      selectedKey = card.dataset.key;
-      document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
-      card.classList.add('selected');
-      syncComposer();
-      document.getElementById('composer-status').textContent = '';
-      document.getElementById('composer-text').focus();
+      openSheet(agent);
     });
-    document.getElementById('composer').addEventListener('submit', async (event) => {
+    document.getElementById('sheet-scrim').addEventListener('click', closeSheet);
+    document.getElementById('sheet-close').addEventListener('click', closeSheet);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && sheetOpen) closeSheet();
+    });
+    document.getElementById('sheet-mic').addEventListener('click', () => {
+      if (!recognition) return;
+      if (listening) {
+        stopListening();
+        return;
+      }
+      speechBase = document.getElementById('sheet-text').value;
+      if (speechBase && !speechBase.endsWith(' ')) speechBase += ' ';
+      try {
+        recognition.start();
+      } catch (e) {
+        document.getElementById('sheet-status').className = 'status bad';
+        document.getElementById('sheet-status').textContent = e.message || '無法開始語音';
+      }
+    });
+    document.getElementById('sheet-form').addEventListener('submit', async (event) => {
       event.preventDefault();
+      stopListening();
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
-      const status = document.getElementById('composer-status');
-      const button = document.getElementById('composer-send');
-      const text = document.getElementById('composer-text').value;
+      const status = document.getElementById('sheet-status');
+      const button = document.getElementById('sheet-send');
+      const text = document.getElementById('sheet-text').value;
       if (!agent) return;
       button.disabled = true;
       status.className = 'status';
@@ -578,7 +885,8 @@
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
         status.className = 'status ok';
         status.textContent = '已貼上';
-        document.getElementById('composer-text').value = '';
+        document.getElementById('sheet-text').value = '';
+        setTimeout(closeSheet, 280);
       } catch (e) {
         status.className = 'status bad';
         status.textContent = e.message;
@@ -603,6 +911,7 @@
         clock.dataset.state = 'offline';
       }
     }
+    setupSpeech();
     refresh();
     setInterval(refresh, 2000);
   </script>
