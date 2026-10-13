@@ -1,81 +1,102 @@
 #!/bin/sh
-# Clone (if needed) + bootstrap local tmux-attn status.
-# Optional: print Attention Server peer JSON when PEER_NAME + LOCAL_FEED_URL are set.
+# Clone (if needed) + bootstrap. Optional join helper via join_peer.py.
 #
-# Typical (fresh machine):
-#   git clone git@github.com:cubrady/tmux-attn.git
-#   cd tmux-attn
-#   sh install.sh
+#   git clone git@github.com:cubrady/tmux-attn.git && cd tmux-attn
+#   PEER_NAME=… LOCAL_FEED_URL=http://…:7788 AGGREGATOR=A sh install.sh
 #
-# One-liner from anywhere:
-#   curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | sh
-#   # or with SSH clone preferred by agents — see docs/agent-join-prompt.md
-#
-# Env (optional):
-#   TMUX_ATTN_DIR     Clone/install checkout path (default: $PWD if already a checkout, else ./tmux-attn)
-#   TMUX_ATTN_REPO    git URL (default: git@github.com:cubrady/tmux-attn.git)
-#   PEER_NAME         Short name for fleet panel
-#   LOCAL_FEED_URL    This machine's web root, e.g. http://100.x.x.x:7788
-#   TMUX_ATTN_HOST    Host label for /api/agents (optional)
-#
-# Flags:
-#   --sidebar         Pass through to bootstrap (persistent left list)
-#   --no-clone        Fail if this script is not run from an existing checkout
-#   --print-peer-only Skip bootstrap; only print peer JSON (needs env)
+# Env: TMUX_ATTN_DIR, TMUX_ATTN_REPO, PEER_NAME, LOCAL_FEED_URL, AGGREGATOR (A|B|C),
+#      AGGREGATOR_SSH, TMUX_ATTN_HOST, PEERS_PATH
+# Flags: --sidebar  --no-clone  --join-only  --check
 set -eu
 
 REPO_DEFAULT='git@github.com:cubrady/tmux-attn.git'
 REPO="${TMUX_ATTN_REPO:-$REPO_DEFAULT}"
 SIDEBAR=0
 NO_CLONE=0
-PRINT_PEER_ONLY=0
+JOIN_ONLY=0
+CHECK_ONLY=0
 
 for arg in "$@"; do
   case "$arg" in
     --sidebar) SIDEBAR=1 ;;
     --no-clone) NO_CLONE=1 ;;
-    --print-peer-only) PRINT_PEER_ONLY=1 ;;
+    --join-only|--print-peer-only) JOIN_ONLY=1 ;;
+    --check) CHECK_ONLY=1 ;;
     -h|--help)
-      sed -n '2,25p' "$0"
+      sed -n '2,12p' "$0"
       exit 0
       ;;
     *)
-      echo "Unknown flag: $arg (supported: --sidebar --no-clone --print-peer-only)" >&2
+      echo "Unknown flag: $arg (supported: --sidebar --no-clone --join-only --check)" >&2
       exit 2
       ;;
   esac
 done
 
-print_peer() {
-  name="${PEER_NAME:-}"
-  url="${LOCAL_FEED_URL:-}"
-  if [ -z "$name" ] || [ -z "$url" ]; then
-    echo ""
-    echo "To join Attention Server, set PEER_NAME and LOCAL_FEED_URL, then rerun:"
-    echo "  PEER_NAME=my-mac LOCAL_FEED_URL=http://100.x.x.x:7788 sh install.sh --print-peer-only"
-    echo "Or ask the user for those values (do not guess)."
-    return 0
-  fi
-  echo ""
-  echo "Add this object to the aggregator's ~/.config/tmux-attn/peers.json → peers[]:"
-  printf '  { "name": "%s", "url": "%s" }\n' "$name" "$url"
-  echo ""
-  echo "Then ensure aggregator runs: tmux-attn web   OR   tmux-attn web --fleet"
-  echo "Phone URL: http://<aggregator-tailscale-host>:7788/"
+is_checkout() {
+  [ -f "$1/bootstrap.sh" ] && [ -f "$1/attention.py" ] && [ -f "$1/install.py" ] && [ -f "$1/join_peer.py" ]
 }
 
-if [ "$PRINT_PEER_ONLY" -eq 1 ]; then
-  print_peer
+check_prereqs() {
+  ok=1
+  if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
+    echo 'Need Python ≥ 3.11' >&2
+    ok=0
+  else
+    echo "python3: $(python3 --version 2>&1)"
+  fi
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo 'Need tmux ≥ 3.7' >&2
+    ok=0
+  else
+    echo "tmux: $(tmux -V 2>&1)"
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    echo 'Need git' >&2
+    ok=0
+  fi
+  [ "$ok" -eq 1 ] || return 1
+  return 0
+}
+
+run_join() {
+  root=$1
+  if [ -z "${PEER_NAME:-}" ] || [ -z "${LOCAL_FEED_URL:-}" ]; then
+    echo ""
+    echo "Join skipped — set PEER_NAME + LOCAL_FEED_URL (+ AGGREGATOR=A|B|C), then:"
+    echo "  PEER_NAME=… LOCAL_FEED_URL=http://…:7788 AGGREGATOR=A python3 $root/join_peer.py"
+    echo "Do not guess those values."
+    return 0
+  fi
+  AGGREGATOR="${AGGREGATOR:-A}"
+  export PEER_NAME LOCAL_FEED_URL AGGREGATOR
+  [ -n "${AGGREGATOR_SSH:-}" ] && export AGGREGATOR_SSH
+  [ -n "${PEERS_PATH:-}" ] && export PEERS_PATH
+  python3 "$root/join_peer.py"
+}
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  check_prereqs
+  exit $?
+fi
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ "$JOIN_ONLY" -eq 1 ]; then
+  if is_checkout "$script_dir"; then
+    run_join "$script_dir"
+  elif [ -n "${TMUX_ATTN_DIR:-}" ] && is_checkout "$TMUX_ATTN_DIR"; then
+    run_join "$TMUX_ATTN_DIR"
+  else
+    echo 'Run from a tmux-attn checkout (need join_peer.py).' >&2
+    exit 1
+  fi
   exit 0
 fi
 
-is_checkout() {
-  [ -f "$1/bootstrap.sh" ] && [ -f "$1/attention.py" ] && [ -f "$1/install.py" ]
-}
+check_prereqs || exit 1
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=''
-
 if is_checkout "$script_dir"; then
   root=$script_dir
 elif [ -n "${TMUX_ATTN_DIR:-}" ] && is_checkout "$TMUX_ATTN_DIR"; then
@@ -111,9 +132,5 @@ fi
 
 bin="${HOME}/.local/bin/tmux-attn"
 echo ""
-echo "Local install OK."
-echo "  CLI: $bin"
-echo "  Start feed:  ${TMUX_ATTN_HOST:+TMUX_ATTN_HOST=$TMUX_ATTN_HOST }$bin web"
-echo "  Health:      curl -s http://127.0.0.1:7788/api/health"
-echo "  Reload agent hooks (Claude new session / Codex /hooks / Cursor reattach / Pi /reload)."
-print_peer
+echo "Local install OK. CLI: $bin"
+run_join "$root"

@@ -5,97 +5,28 @@
 支援 **Claude Code**、**Codex CLI**、**Cursor CLI（`agent`）**、**Pi**。設定裝在執行 tmux／agent 的工作機上；適合本機跑 agent，再經 Ghostty／SSH 使用。
 
 開源 repo：`git@github.com:cubrady/tmux-attn.git`  
-安裝腳本：[install.sh](install.sh)。另存版：[docs/agent-join-prompt.md](docs/agent-join-prompt.md)。
+腳本：[install.sh](install.sh) · [join_peer.py](join_peer.py)（細節在腳本輸出，不必貼成長 prompt）。
 
 ---
 
-## Copy-paste：給 Agent 的完整安裝指示
+## Copy-paste：Agent install prompt
 
-在 GitHub 點下方程式碼區塊右上角 **Copy**，貼到 Claude／Cursor／Codex 等 agent。  
-先填好（或讓 agent 問你）：`PEER_NAME`、`LOCAL_FEED_URL`、Attention Server 怎麼改 peers。
+GitHub 點 **Copy**，貼給 agent。細節由腳本印出的 `NEXT STEPS` 執行。
 
-````text
-Task: Install tmux-attn on THIS machine (local tmux status bar + hooks), start the local web feed, and join the Attention Server fleet panel.
+```text
+Install tmux-attn on THIS machine (tmux status + hooks), start local web feed, join Attention Server.
 
-Repo: git@github.com:cubrady/tmux-attn.git
-After clone, read README.md for product context. Prefer install.sh (wraps bootstrap.sh).
+Ask user if missing (STOP; never guess): PEER_NAME, LOCAL_FEED_URL (this host http://…:7788), AGGREGATOR=A|B|C
+  A=user edits server peers  B=this machine is aggregator  C=remote (need AGGREGATOR_SSH)
+Rules: Tailscale/LAN only; no public :7788; this host only serves /api/agents; no mutual --fleet loops.
 
-Hard rules:
-- No built-in auth. Use Tailscale / private LAN only. Never expose :7788 to the public internet.
-- Do NOT guess Tailscale IPs, aggregator hostnames, peers paths, or SSH targets. If missing, STOP and ask.
-- This machine runs only: tmux-attn web  (serves GET /api/agents).
-- The Attention Server (aggregator) reads ~/.config/tmux-attn/peers.json and serves GET /api/fleet.
-- Do NOT run mutual --fleet with peers pointing at each other (loops / duplicates).
-- Do not commit secrets. Do not change unrelated config.
-
-Before doing anything, collect from the user (STOP if incomplete):
-1) PEER_NAME — short label on the fleet panel (e.g. brad-mba)
-2) LOCAL_FEED_URL — THIS machine web root (e.g. http://100.91.179.5:7788)
-3) AGGREGATOR mode — how to update peers:
-   A) User edits server themselves → install + start web, then hand them the peer JSON
-   B) This machine IS the aggregator → write ~/.config/tmux-attn/peers.json here
-   C) You may edit remote aggregator → user must give SSH target, remote peers path (default ~/.config/tmux-attn/peers.json), and whether to restart remote web --fleet
-4) Optional: TMUX_ATTN_HOST (defaults to PEER_NAME)
-
-Steps (verify each):
-
-1) Prerequisites
-   - python3 --version  (≥ 3.11)
-   - tmux -V            (≥ 3.7; clickable status needs control ranges)
-   - Can git clone GitHub; agent CLIs ideally already logged in
-   If missing, tell the user how to install — do not skip silently.
-
-2) Clone + install (required path)
-   git clone git@github.com:cubrady/tmux-attn.git
-   cd tmux-attn
-   PEER_NAME='…' LOCAL_FEED_URL='http://…:7788' sh install.sh
-   # sidebar mode: sh install.sh --sidebar
-   # existing checkout: git pull --ff-only && sh install.sh --no-clone
-   install.sh calls bootstrap.sh → ~/.local/share/tmux-attn/, ~/.local/bin/tmux-attn, merges Claude/Codex/Cursor hooks, Pi extension, sources tmux status.
-   Do not copy single files ad hoc; use official checkout + install.sh.
-
-3) Reload hooks
-   - Claude Code: new session (or resume old)
-   - Codex: /hooks and trust; reopen old sessions
-   - Cursor agent: confirm ~/.cursor/hooks.json; reopen
-   - Pi: /reload or reopen
-   Verify: ~/.local/bin/tmux-attn status
-           ~/.local/bin/tmux-attn dump
-   Status bar should show project alias + 🙋/👀/🏃/💤. Prefix Ctrl-b then a opens the list.
-
-4) Start local web feed
-   export TMUX_ATTN_HOST="${TMUX_ATTN_HOST:-$PEER_NAME}"
-   ~/.local/bin/tmux-attn web
-   curl -s http://127.0.0.1:7788/api/health
-   curl -s http://127.0.0.1:7788/api/agents | head
-   Also check LOCAL_FEED_URL from another host on the same tailnet when possible.
-   Keep it running (launchd / systemd / tmux pane — no bundled service unit). Sleep = host offline.
-   Peer JSON only: PEER_NAME='…' LOCAL_FEED_URL='…' sh install.sh --print-peer-only
-
-5) Join Attention Server
-   Peer object: { "name": "PEER_NAME", "url": "LOCAL_FEED_URL" }
-   - Mode A: give JSON to user for aggregator's ~/.config/tmux-attn/peers.json peers[]
-   - Mode B/C: upsert by name (update url if exists, else append); ensure aggregator runs
-     tmux-attn web   OR   tmux-attn web --fleet
-   url must be the worker web ROOT (aggregator requests url + /api/agents), not a fleet URL.
-   Phone: http://<aggregator-tailscale-host>:7788/ — new host should appear.
-
-6) Report back
-   [ ] clone + install.sh OK
-   [ ] status bar + hooks reload reminded
-   [ ] how web is kept running
-   [ ] LOCAL_FEED_URL health OK
-   [ ] peers updated OR JSON delivered
-   [ ] phone aggregator URL
-
-Optional only if user asks: project-aliases.json, ntfy notify.json, migrate.py export.
-
-Failures:
-- clone denied → SSH/GitHub access
-- connection refused → wrong host or web not listening 0.0.0.0:7788
-- missing on fleet → peers missing/wrong URL/scraping fleet instead of agents
-- no status bar → hooks not reloaded; check ~/.local/state/tmux-attn/hook-errors.log
-````
+Run:
+  git clone git@github.com:cubrady/tmux-attn.git && cd tmux-attn
+  PEER_NAME='…' LOCAL_FEED_URL='http://…:7788' AGGREGATOR=A sh install.sh
+Then follow the script's NEXT STEPS (start `~/.local/bin/tmux-attn web`, curl health, reload hooks).
+Mode B/C: install.sh → join_peer.py upserts or prints remote hint. Re-run join only: sh install.sh --join-only
+Report: install OK, how web stays up, health OK, peers done or JSON given to user.
+```
 
 ---
 
