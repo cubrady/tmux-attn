@@ -3,16 +3,17 @@
 
 Setups:
   solo   — one machine; no peers.json
-  multi  — one or more clients + one server
+  multi  — clients + one server
 
 Env (multi client):
   PEER_NAME         panel label
   LOCAL_FEED_URL    this client's web root (http://100.x.x.x:7788)
-  SERVER_SSH        optional user@host — SSH to server and --apply there
-  PEERS_PATH        optional (default ~/.config/tmux-attn/peers.json)
+  SERVER_URL        preferred — POST {name,url} to SERVER_URL/api/peers
+  SERVER_SSH        fallback — ssh and write peers.json (legacy)
+  PEERS_PATH        optional when using --apply locally
 
 Flags:
-  --solo     Solo checklist (no peer env)
+  --solo     Solo checklist
   --apply    Upsert peers.json on THIS machine (run on the server)
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -33,7 +35,8 @@ def peers_path() -> Path:
     return Path(os.environ.get('PEERS_PATH') or Path.home() / '.config/tmux-attn/peers.json')
 
 
-def upsert(path: Path, name: str, url: str) -> str:
+def upsert_local(name: str, url: str) -> str:
+    path = peers_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict = {'peers': []}
     if path.is_file():
@@ -72,16 +75,29 @@ def print_client_next(name: str, url: str) -> None:
     print('  3. curl -s http://127.0.0.1:7788/api/health')
     print(f'  4. curl -s {url}/api/health')
     print('  5. Reload hooks: Claude new session | Codex /hooks | Cursor reopen | Pi /reload')
-    print('SERVER: peers.json includes this client + tmux-attn web running')
     print('Phone → http://<server-tailscale>:7788/')
 
 
-def apply_remote(ssh: str, name: str, url: str) -> None:
-    # Keep remote snippet tiny; no need to ship the whole file.
+def register_via_api(server_url: str, name: str, url: str) -> None:
+    endpoint = server_url.rstrip('/') + '/api/peers'
+    body = json.dumps({'name': name, 'url': url}).encode()
+    request = Request(
+        endpoint, data=body,
+        headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+        method='POST',
+    )
+    with urlopen(request, timeout=5) as response:
+        data = json.loads(response.read().decode())
+    if not data.get('ok'):
+        die(f'server rejected peer: {data.get("error") or data}')
+    print(f'Registered via API {endpoint} ({data.get("action")})')
+
+
+def apply_remote_ssh(ssh: str, name: str, url: str) -> None:
     remote = r'''
 import json, sys
 from pathlib import Path
-name, url = sys.argv[1], sys.argv[2]  # noqa: passed after python3 -c
+name, url = sys.argv[1], sys.argv[2]
 path = Path.home() / ".config/tmux-attn/peers.json"
 path.parent.mkdir(parents=True, exist_ok=True)
 data = {"peers": []}
@@ -104,9 +120,9 @@ print("wrote", path)
     )
     if proc.returncode != 0:
         print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
-        die(f'ssh {ssh} failed — give peer JSON to the user to add on the server', 1)
+        die(f'ssh {ssh} failed — use SERVER_URL=/api/peers or paste JSON on server', 1)
     print(proc.stdout.strip())
-    print(f'Server peers updated via {ssh}')
+    print(f'Server peers updated via ssh {ssh}')
 
 
 def main() -> None:
@@ -121,16 +137,15 @@ def main() -> None:
 
     name = (os.environ.get('PEER_NAME') or '').strip()
     url = (os.environ.get('LOCAL_FEED_URL') or '').strip().rstrip('/')
-    # Prefer SERVER_SSH; keep AGGREGATOR_SSH as alias for old prompts
+    server_url = (os.environ.get('SERVER_URL') or '').strip()
     server_ssh = (os.environ.get('SERVER_SSH') or os.environ.get('AGGREGATOR_SSH') or '').strip()
 
     if not name or not url:
         die(
             'Need PEER_NAME + LOCAL_FEED_URL for multi-client (do not guess).\n'
-            '  Solo:            python3 join_peer.py --solo\n'
-            '  Client:          PEER_NAME=… LOCAL_FEED_URL=http://…:7788 python3 join_peer.py\n'
-            '  Apply on server: PEER_NAME=… LOCAL_FEED_URL=… python3 join_peer.py --apply\n'
-            '  Apply via SSH:   … SERVER_SSH=user@host python3 join_peer.py'
+            '  Solo:   python3 join_peer.py --solo\n'
+            '  Client: PEER_NAME=… LOCAL_FEED_URL=http://…:7788 SERVER_URL=http://server:7788 python3 join_peer.py\n'
+            '  Server: PEER_NAME=… LOCAL_FEED_URL=… python3 join_peer.py --apply'
         )
     if not url.startswith(('http://', 'https://')):
         die(f'LOCAL_FEED_URL must be http(s)://… got {url!r}')
@@ -140,18 +155,27 @@ def main() -> None:
     print()
 
     if args.apply:
-        action = upsert(peers_path(), name, url)
+        action = upsert_local(name, url)
         print(f'Server local: {action} {name!r} → {peers_path()}')
         print('Keep server web up: ~/.local/bin/tmux-attn web')
         print_client_next(name, url)
         return
 
-    if server_ssh:
-        apply_remote(server_ssh, name, url)
+    if server_url:
+        try:
+            register_via_api(server_url, name, url)
+        except Exception as exc:
+            die(f'SERVER_URL register failed: {type(exc).__name__}: {exc}', 1)
         print_client_next(name, url)
         return
 
-    print('Hand this peer to the SERVER peers.json, or rerun with SERVER_SSH=user@host.')
+    if server_ssh:
+        apply_remote_ssh(server_ssh, name, url)
+        print_client_next(name, url)
+        return
+
+    print('Preferred: set SERVER_URL=http://<server>:7788 (POST /api/peers).')
+    print('Or paste the peer JSON into server ~/.config/tmux-attn/peers.json.')
     print_client_next(name, url)
 
 

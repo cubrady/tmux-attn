@@ -537,6 +537,20 @@
     .sheet-actions .status { font-size: 0.78rem; margin-left: auto; color: var(--muted); }
     .sheet-actions .status.bad { color: var(--danger); }
     .sheet-actions .status.ok { color: var(--running); }
+    .sheet-actions .kill {
+      border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+      border-radius: var(--radius);
+      padding: 8px 12px;
+      font: 600 0.8rem var(--font);
+      background: transparent;
+      color: var(--danger);
+      cursor: pointer;
+    }
+    .sheet-actions .kill.armed {
+      background: var(--danger);
+      color: #fff;
+      border-color: var(--danger);
+    }
     .voice-hint {
       margin-top: 6px;
       font-size: 0.7rem;
@@ -591,6 +605,10 @@
           <span class="status" id="sheet-status"></span>
         </div>
         <div class="voice-hint" id="voice-hint" hidden></div>
+        <div class="sheet-actions" style="margin-top:10px">
+          <button type="button" class="kill" id="sheet-kill">關閉 pane</button>
+          <span class="hint" id="sheet-kill-hint">需按兩次確認</span>
+        </div>
       </form>
     </div>
   </div>
@@ -695,8 +713,21 @@
       document.getElementById('sheet-mic').classList.remove('listening');
       document.getElementById('voice-hint').hidden = true;
     }
+    let killArmedUntil = 0;
+    function resetKillArm() {
+      killArmedUntil = 0;
+      const btn = document.getElementById('sheet-kill');
+      const hint = document.getElementById('sheet-kill-hint');
+      if (btn) {
+        btn.classList.remove('armed');
+        btn.textContent = '關閉 pane';
+        btn.disabled = false;
+      }
+      if (hint) hint.textContent = '需按兩次確認';
+    }
     function closeSheet() {
       stopListening();
+      resetKillArm();
       sheetOpen = false;
       selectedKey = '';
       document.getElementById('sheet-root').hidden = true;
@@ -892,6 +923,43 @@
         status.textContent = e.message;
       } finally {
         button.disabled = false;
+      }
+    });
+    document.getElementById('sheet-kill').addEventListener('click', async () => {
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      const status = document.getElementById('sheet-status');
+      const btn = document.getElementById('sheet-kill');
+      const hint = document.getElementById('sheet-kill-hint');
+      if (!agent) return;
+      const now = Date.now();
+      if (now > killArmedUntil) {
+        killArmedUntil = now + 5000;
+        btn.classList.add('armed');
+        btn.textContent = '再按一次確認關閉';
+        hint.textContent = '5 秒內再按一次';
+        status.className = 'status';
+        status.textContent = '';
+        return;
+      }
+      btn.disabled = true;
+      status.className = 'status';
+      status.textContent = '關閉中…';
+      try {
+        const res = await fetch('/api/kill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        status.className = 'status ok';
+        status.textContent = '已關閉 pane';
+        setTimeout(() => { closeSheet(); refresh(); }, 320);
+      } catch (e) {
+        status.className = 'status bad';
+        status.textContent = e.message;
+        resetKillArm();
+        btn.disabled = false;
       }
     });
     async function refresh() {

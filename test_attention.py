@@ -366,7 +366,40 @@ class StoreTests(unittest.TestCase):
             self.assertTrue(forwarded['_local_only'])
             self.assertEqual(forwarded['pane'], '%9')
 
+
+    def test_dispatch_kill_and_peer_register(self):
+        with patch.object(a, 'kill_pane', return_value=None) as kill_mock, \
+             patch.object(a, 'local_host_name', return_value='home'):
+            code, body = a.dispatch_kill({'pane': '%1', 'pid': '123'})
+            self.assertEqual(code, 200)
+            self.assertTrue(body['killed'])
+            kill_mock.assert_called_once_with('%1', '123')
+        with patch.object(a, 'kill_pane', return_value='pane pid changed'):
+            code, body = a.dispatch_kill({'pane': '%1', 'pid': '123'})
+            self.assertEqual((code, body.get('error')), (409, 'pane pid changed'))
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'urlopen') as urlopen_mock:
+            class FakeResp:
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return json.dumps({'ok': True, 'killed': True}).encode()
+            urlopen_mock.return_value = FakeResp()
+            code, body = a.dispatch_kill({'host': 'lab', 'pane': '%9', 'pid': '999'})
+            self.assertEqual(code, 200)
+            self.assertEqual(urlopen_mock.call_args.args[0].full_url, 'http://lab:7788/api/kill')
+        peers = Path(self.tmp.name) / 'peers.json'
+        with patch.object(a, 'peers_config_path', return_value=peers):
+            code, body = a.dispatch_peer_register({'name': 'cicd', 'url': 'http://100.1.2.3:7788'})
+            self.assertEqual(code, 200)
+            self.assertEqual(body['action'], 'added')
+            code, body = a.dispatch_peer_register({'name': 'cicd', 'url': 'http://100.1.2.3:7789'})
+            self.assertEqual(body['action'], 'updated')
+            saved = json.loads(peers.read_text())
+            self.assertEqual(saved['peers'][0]['url'], 'http://100.1.2.3:7789')
+
     def test_send_to_pane_rejects_pid_mismatch(self):
+
         live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj'}}
         with patch.object(a, 'live_panes', return_value=live), \
              patch.object(a, 'tmux', return_value='999'):
