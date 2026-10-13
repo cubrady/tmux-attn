@@ -77,7 +77,7 @@ Report: install OK, how web stays up, health OK, peers done or JSON given to use
 | 一鍵 bootstrap | hooks、底列、別名、備份、依本機路徑產生設定 |
 | 移植 | `migrate.py export` 帶走別名；目的機別名優先保留 |
 | 還原 | `rollback.py` 還原該次安裝備份 |
-| Agent 代裝 prompt | 本頁上方 Copy-paste 區塊（另存 [docs/agent-join-prompt.md](docs/agent-join-prompt.md)） |
+| Agent 代裝 | 本頁短 prompt + `install.sh` / `join_peer.py` |
 
 ---
 
@@ -173,7 +173,7 @@ tmux attach          # 若尚未在 tmux
 | Cursor `agent` | 確認 `~/.cursor/hooks.json`；舊 session 重開 |
 | Pi | `/reload` 或重開 |
 
-空白 CLI 尚未開工時可能還沒有事件。請 agent 代裝／上線：直接複製本頁上方 **Copy-paste** 區塊。
+空白 CLI 尚未開工時可能還沒有事件。請 agent 代裝：複製上方短 prompt（步驟在 `install.sh`／`join_peer.py`）。
 
 ---
 

@@ -1,9 +1,14 @@
 # Agent join prompt
 
-**Canonical copy-paste block lives in the repo [README.md](../README.md)** — section **「Copy-paste：給 Agent 的完整安裝指示」**.
+Canonical short prompt: repo [README.md](../README.md) → **Copy-paste：Agent install prompt**.
 
-On GitHub, open the README and use the code block’s **Copy** button, then paste into your coding agent.
+Executable details live in:
 
-Fill in (or let the agent ask): `PEER_NAME`, `LOCAL_FEED_URL`, and how to update Attention Server `peers.json` (modes A / B / C).
+- [`install.sh`](../install.sh) — clone/bootstrap + calls join helper
+- [`join_peer.py`](../join_peer.py) — peer JSON / upsert peers.json + prints `NEXT STEPS`
 
-This file is a short pointer so older links still work.
+```sh
+PEER_NAME='…' LOCAL_FEED_URL='http://…:7788' AGGREGATOR=A sh install.sh
+# join only:
+PEER_NAME='…' LOCAL_FEED_URL='http://…:7788' AGGREGATOR=B sh install.sh --join-only
+```
