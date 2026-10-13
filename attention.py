@@ -542,18 +542,22 @@ def send_to_pane(pane, pid, text, submit=True, sock=None):
 
 def hook_target():
     # Codex may construct a hook environment from an older shell snapshot.
-    # Resolve the actual parent process chain instead of trusting TMUX_PANE.
+    # Prefer the live process tree over TMUX_PANE (which can be stale).
     process = subprocess.run(['ps','-axo','pid=,ppid='],capture_output=True,text=True,timeout=3)
     parents = {}
+    children = {}
     for line in process.stdout.splitlines():
         fields = line.split()
         if len(fields) == 2:
-            parents[int(fields[0])] = int(fields[1])
+            pid, ppid = int(fields[0]), int(fields[1])
+            parents[pid] = ppid
+            children.setdefault(ppid, []).append(pid)
     ancestors = []
     pid = os.getpid()
     while pid > 1 and pid not in ancestors:
         ancestors.append(pid)
         pid = parents.get(pid, 0)
+    ancestor_set = set(ancestors)
     candidates = set()
     env_socket = os.environ.get('TMUX','').split(',')[0]
     if env_socket:
@@ -572,11 +576,28 @@ def hook_target():
         output = tmux('list-panes','-a','-F','#{pane_id} #{pane_pid}',check=False,sock=candidate)
         for line in output.splitlines():
             fields = line.split()
-            if len(fields) == 2 and fields[1].isdigit() and int(fields[1]) in ancestors:
-                matches.append((ancestors.index(int(fields[1])),candidate,fields[0],fields[1]))
+            if len(fields) != 2 or not fields[1].isdigit():
+                continue
+            pane_id, pane_pid = fields[0], int(fields[1])
+            # Hook is under the pane shell (typical CLI).
+            if pane_pid in ancestor_set:
+                matches.append((ancestors.index(pane_pid), candidate, pane_id, str(pane_pid)))
+                continue
+            # Or hook was reparented but still descends from the pane tree.
+            stack = [pane_pid]
+            seen = set()
+            while stack:
+                current = stack.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                if current == os.getpid() or current in ancestor_set:
+                    matches.append((len(seen), candidate, pane_id, str(pane_pid)))
+                    break
+                stack.extend(children.get(current, ()))
     if matches:
-        _, sock, pane, pid = min(matches)
-        return sock,pane,pid
+        _, sock, pane, pane_pid = min(matches)
+        return sock, pane, pane_pid
     return None
 
 

@@ -7,10 +7,20 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
-from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude
+from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli
 from codex_observer import queued_questions_screen,sync_attention_overlay
 
 class ObserverTests(unittest.TestCase):
+ def test_native_codex_accepts_standalone_short_argv(self):
+  table={123:(1,'zsh'),456:(123,'codex --sandbox danger-full-access resume'),789:(1,'/home/x/.codex/packages/app-server-daemon/releases/x/bin/codex app-server --managed-daemon')}
+  with patch('codex_observer._process_exe', side_effect=lambda pid, args='': {
+   456:'/home/x/.codex/packages/standalone/releases/0.1/bin/codex',
+   789:'/home/x/.codex/packages/app-server-daemon/releases/x/bin/codex',
+  }.get(pid, args.split()[0] if args else '')):
+   self.assertTrue(is_native_codex_cli(456, table[456][1]))
+   self.assertFalse(is_native_codex_cli(789, table[789][1]))
+   self.assertEqual(native_codex_pids(123, table), [456])
+
  def test_queued_questions_override_running_and_clear_to_latest_lifecycle(self):
   screen='• Working (58m 18s • esc to interrupt)\n• Queued follow-up inputs\n  ? 1 question\n    ⇧← to answer\n\n› Ask Codex to do anything\nGPT high · /project · task\n← for agents'
   self.assertEqual(queued_questions_screen(screen),1)

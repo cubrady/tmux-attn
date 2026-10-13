@@ -26,6 +26,33 @@ def processes():
     return result
 
 
+def _process_exe(pid, args=''):
+    """Best-effort absolute executable path (ps args may be a short name)."""
+    try:
+        return os.readlink(f'/proc/{pid}/exe')
+    except OSError:
+        return (args.split(None, 1)[0] if args else '')
+
+
+def is_native_codex_cli(pid, args=''):
+    """True for interactive Codex CLI; false for app-server / helper daemons."""
+    args = args or ''
+    tokens = args.split()
+    if any(token in args for token in ('app-server', 'pid-update-loop', 'codex-code-mode-host')):
+        return False
+    if 'daemon' in tokens or '--managed-daemon' in tokens:
+        return False
+    exe = _process_exe(pid, args)
+    name = Path(exe).name if exe else Path((args.split(None, 1)[0] if args else '')).name
+    if name != 'codex':
+        return False
+    # Legacy npm vendor layout, standalone packages, or PATH symlink targets.
+    if '/vendor/' in exe or '/packages/standalone/' in exe or '/bin/codex' in exe:
+        return True
+    # Short argv ("codex …") with /proc exe pointing at a real CLI binary.
+    return bool(exe) and Path(exe).name == 'codex'
+
+
 def native_codex_pids(pane_pid, table):
     descendants = {int(pane_pid)}
     for _ in range(30):
@@ -33,13 +60,7 @@ def native_codex_pids(pane_pid, table):
         if more.issubset(descendants):
             break
         descendants |= more
-    result = []
-    for pid in descendants:
-        args = table.get(pid,(0,''))[1]
-        executable = args.split(None,1)[0] if args else ''
-        if executable.endswith('/codex') and '/bin/codex' in executable and '/vendor/' in executable:
-            result.append(pid)
-    return result
+    return [pid for pid in descendants if is_native_codex_cli(pid, table.get(pid, (0, ''))[1])]
 
 
 def native_cursor_pids(pane_pid, table):
