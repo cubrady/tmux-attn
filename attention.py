@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
 import os
 from pathlib import Path
 import shlex
@@ -156,7 +157,7 @@ def content_to_text(content):
 def hook_user_text(data):
     if not isinstance(data, dict):
         return ''
-    for key in ('prompt', 'user_prompt', 'last_user_message', 'message', 'text'):
+    for key in ('prompt', 'user_prompt', 'last_user_message', 'message', 'text', 'input', 'query'):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value
@@ -178,6 +179,24 @@ def latest_claude_transcript(cwd):
     if not directory or not directory.is_dir():
         return ''
     files = [p for p in directory.glob('*.jsonl') if p.is_file()]
+    if not files:
+        return ''
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(files[0])
+
+
+def cursor_project_dir(cwd):
+    if not cwd:
+        return None
+    slug = str(Path(cwd)).lstrip('/').replace('/', '-')
+    return Path.home() / '.cursor' / 'projects' / slug / 'agent-transcripts'
+
+
+def latest_cursor_transcript(cwd):
+    directory = cursor_project_dir(cwd)
+    if not directory or not directory.is_dir():
+        return ''
+    files = [p for p in directory.rglob('*.jsonl') if p.is_file()]
     if not files:
         return ''
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -236,6 +255,43 @@ def parse_codex_transcript(path):
     return users, agent
 
 
+def clean_cursor_user_text(text):
+    text = str(text or '').strip()
+    if not text:
+        return ''
+    # IDE agent wraps prompts in <user_query>; prefer the inner task text.
+    match = re.search(r'<user_query>\s*(.*?)\s*</user_query>', text, re.S | re.I)
+    if match:
+        text = match.group(1).strip()
+    text = re.sub(r'<timestamp>[\s\S]*?</timestamp>', '', text, flags=re.I).strip()
+    return text
+
+
+def parse_cursor_transcript(path):
+    """Cursor IDE/agent-transcripts jsonl: {role, message:{content:[...]}}."""
+    users, agent = [], ''
+    with Path(path).open(errors='replace') as source:
+        for line in source:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            role = row.get('role') or ''
+            message = row.get('message') if isinstance(row.get('message'), dict) else {}
+            text = content_to_text(message.get('content')).strip() if message else ''
+            if not text and isinstance(row.get('message'), str):
+                text = row.get('message').strip()
+            if not text:
+                continue
+            if role == 'user':
+                text = clean_cursor_user_text(text)
+                if text and not user_text_is_noise(text):
+                    users.append(text)
+            elif role == 'assistant':
+                agent = text
+    return users, agent
+
+
 def conversation_preview(path, agent=''):
     """Last user intents + latest agent text from a transcript. Empty if unreadable."""
     path = Path(path) if path else None
@@ -243,8 +299,11 @@ def conversation_preview(path, agent=''):
         return {'users': [], 'agent': ''}
     try:
         name = path.name
+        parts = {p.lower() for p in path.parts}
         if 'rollout' in name or agent == 'codex':
             users, agent_text = parse_codex_transcript(path)
+        elif agent == 'cursor' or 'agent-transcripts' in parts:
+            users, agent_text = parse_cursor_transcript(path)
         else:
             users, agent_text = parse_claude_style_transcript(path)
     except OSError:
@@ -289,8 +348,14 @@ def resolve_transcript_path(con, row, meta):
     ).fetchone()
     if mapping and mapping['rollout_path'] and Path(mapping['rollout_path']).is_file():
         return mapping['rollout_path']
-    if row.get('agent') in ('claude', 'cursor') or (meta or {}).get('path'):
-        found = latest_claude_transcript((meta or {}).get('path') or '')
+    cwd = (meta or {}).get('path') or ''
+    agent = row.get('agent') or ''
+    if agent == 'cursor':
+        found = latest_cursor_transcript(cwd)
+        if found:
+            return found
+    if agent in ('claude', 'cursor') or cwd:
+        found = latest_claude_transcript(cwd)
         if found:
             return found
     return path if path and Path(path).is_file() else ''
@@ -978,6 +1043,65 @@ def fleet_payload(include_local=True, peer_timeout=1.5):
     }
 
 
+_GIT_ENV_CACHE = {}
+_GIT_ENV_TTL = 5.0
+
+
+def repo_name(path):
+    return Path(path).name if path else ''
+
+
+def git_workdir_info(path):
+    """Best-effort repo basename, branch, and dirty flag for a pane cwd."""
+    path = str(path or '').strip()
+    repo = repo_name(path)
+    empty = {'repo': repo, 'branch': '', 'dirty': False}
+    if not path:
+        return empty
+    now = time.time()
+    cached = _GIT_ENV_CACHE.get(path)
+    if cached and now - cached[0] < _GIT_ENV_TTL:
+        info = dict(cached[1])
+        info['repo'] = repo
+        return info
+    info = dict(empty)
+    try:
+        result = subprocess.run(
+            ['git', '-C', path, 'status', '-sb', '--porcelain'],
+            capture_output=True, text=True, timeout=1.5,
+        )
+        if result.returncode != 0:
+            _GIT_ENV_CACHE[path] = (now, info)
+            return info
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            _GIT_ENV_CACHE[path] = (now, info)
+            return info
+        head = lines[0]
+        if head.startswith('## '):
+            ref = head[3:].split('...')[0].strip()
+            for prefix in ('No commits yet on ', 'Initial commit on '):
+                if ref.startswith(prefix):
+                    ref = ref[len(prefix):]
+                    break
+            if ref.startswith('HEAD ') or ref == 'HEAD (no branch)':
+                short = subprocess.run(
+                    ['git', '-C', path, 'rev-parse', '--short', 'HEAD'],
+                    capture_output=True, text=True, timeout=1,
+                )
+                info['branch'] = (short.stdout.strip() if short.returncode == 0 else '') or 'detached'
+            else:
+                info['branch'] = ref
+            info['dirty'] = any(not line.startswith('## ') for line in lines)
+        else:
+            # Unexpected format; treat remaining lines as dirty markers only.
+            info['dirty'] = True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    _GIT_ENV_CACHE[path] = (now, info)
+    return info
+
+
 def agents_payload(con, sock=None, live=None, now=None):
     """JSON-ready status for the mobile web panel and future clients."""
     now = time.time() if now is None else now
@@ -994,6 +1118,7 @@ def agents_payload(con, sock=None, live=None, now=None):
         reviewed = row['revision'] <= row['acknowledged'] and (row['state'] == 'WAIT' or row['needs_review'])
         command = row.get('command') or ''
         preview = pane_conversation_preview(con, row, row)
+        env = git_workdir_info(row.get('path', ''))
         agents.append({
             'pane': row['pane'],
             'pid': row['pid'],
@@ -1006,6 +1131,9 @@ def agents_payload(con, sock=None, live=None, now=None):
             'tracked': True,
             'project': labels.get(row['path'], Path(row['path']).name if row.get('path') else ''),
             'path': row.get('path', ''),
+            'repo': env['repo'],
+            'branch': env['branch'],
+            'dirty': bool(env['dirty']),
             'state': row['state'],
             'pending': bool(row['pending']),
             'emoji': agent_emoji(row),
@@ -1021,6 +1149,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             continue
         command = meta.get('command') or ''
         cli = command_cli(command)
+        env = git_workdir_info(meta.get('path', ''))
         agents.append({
             'pane': meta['pane'],
             'pid': meta['pid'],
@@ -1033,6 +1162,9 @@ def agents_payload(con, sock=None, live=None, now=None):
             'tracked': False,
             'project': labels.get(meta['path'], Path(meta['path']).name if meta.get('path') else ''),
             'path': meta.get('path', ''),
+            'repo': env['repo'],
+            'branch': env['branch'],
+            'dirty': bool(env['dirty']),
             'state': 'SHELL',
             'pending': False,
             'emoji': '💻',
