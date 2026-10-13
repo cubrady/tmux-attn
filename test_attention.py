@@ -119,7 +119,11 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(a.classify('codex','PreToolUse',{'tool_name':'request_user_input'})[0],'WAIT')
         self.assertEqual(a.classify('pi','ui_prompt_start',{'title':'Pick one'})[0],'WAIT')
         self.assertEqual(a.classify('pi','agent_settled',{})[0],'IDLE')
-        self.assertEqual(a.classify('claude','Stop',{'last_assistant_message':'你希望採用哪個方案？'})[0],'WAIT')
+        soft=a.classify('claude','Stop',{'last_assistant_message':'你希望採用哪個方案？'})
+        self.assertEqual((soft[0],soft[2]),('IDLE',True))
+        self.assertIn('review suggested',soft[1])
+        soft_en=a.classify('codex','Stop',{'last_assistant_message':'Which option do you prefer?'})
+        self.assertEqual((soft_en[0],soft_en[2]),('IDLE',True))
         self.assertEqual(a.classify('codex','Stop',{'last_assistant_message':'All done.'})[0],'IDLE')
 
     def test_cursor_fast_completion_and_inherited_identity(self):
@@ -205,6 +209,123 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(a.agent_severity({'reason': 'Agent stopped with an error; review needed'}), 'error')
         self.assertEqual(a.agent_severity({'reason': 'Interrupted; review current work'}), 'interrupt')
         self.assertEqual(a.agent_severity({'reason': 'Working'}), '')
+        self.assertEqual(payload['agents'][0]['source'], 'hook')
+        self.assertEqual(next(row['source'] for row in payload['agents'] if not row['tracked']), 'shell')
+
+    def test_record_source_and_notify_on_new_wait(self):
+        calls = []
+        with patch.object(a, 'maybe_notify_wait', side_effect=lambda *args: calls.append(args)):
+            a.record(self.con, 'socket', '%1', '123', 'claude', 'RUNNING', 'Working', source='hook')
+            self.assertEqual(calls, [])
+            a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed', source='hook')
+            self.assertEqual(calls, [('claude', 'Approval needed', '%1')])
+            rev = self.con.execute('SELECT revision FROM panes').fetchone()['revision']
+            # Same WAIT from observer only refreshes source — no revision bump / ntfy.
+            a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed', source='observer')
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(self.con.execute('SELECT revision,source FROM panes').fetchone()['revision'], rev)
+            self.assertEqual(self.con.execute('SELECT source FROM panes').fetchone()['source'], 'observer')
+            # Reason change while still WAIT (unread) updates row but does not re-notify.
+            a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Still waiting', source='observer')
+            self.assertEqual(len(calls), 1)
+        row = self.con.execute('SELECT source,state FROM panes').fetchone()
+        self.assertEqual((row['source'], row['state']), ('observer', 'WAIT'))
+
+
+    def test_conversation_preview_clip_and_parse(self):
+        self.assertEqual(a.clip_preview('x' * 100), 'x' * 100)
+        self.assertTrue(a.clip_preview('x' * 101).endswith('…'))
+        self.assertEqual(len(a.clip_preview('x' * 101)), 100)
+        self.assertTrue(a.user_text_is_noise('<environment_context>\n  <cwd>/tmp</cwd>'))
+        self.assertFalse(a.user_text_is_noise('修好登入流程'))
+        claude = Path(self.tmp.name) / 'claude.jsonl'
+        claude.write_text('\n'.join([
+            json.dumps({'type': 'user', 'isMeta': True, 'message': {'role': 'user', 'content': '<local-command-caveat>x'}}),
+            json.dumps({'type': 'user', 'message': {'role': 'user', 'content': '第一句任務：修好登入'}}),
+            json.dumps({'type': 'user', 'message': {'role': 'user', 'content': '第二句：加上測試'}}),
+            json.dumps({'type': 'user', 'message': {'role': 'user', 'content': '第三句：準備送審'}}),
+            json.dumps({'type': 'user', 'message': {'role': 'user', 'content': '第四句：部署'}}),
+            json.dumps({'type': 'assistant', 'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': '已準備 PR，還要我開嗎？'}]}}),
+        ]) + '\n')
+        preview = a.conversation_preview(claude, 'claude')
+        self.assertEqual(preview['users'], ['第二句：加上測試', '第三句：準備送審', '第四句：部署'])
+        self.assertIn('已準備 PR', preview['agent'])
+        codex = Path(self.tmp.name) / 'rollout-demo.jsonl'
+        codex.write_text('\n'.join([
+            json.dumps({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': '請檢查捐款錯誤'}}),
+            json.dumps({'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': '根因是 JSON parse'}}),
+        ]) + '\n')
+        preview = a.conversation_preview(codex, 'codex')
+        self.assertEqual(preview['users'], ['請檢查捐款錯誤'])
+        self.assertEqual(preview['agent'], '根因是 JSON parse')
+
+    def test_agents_payload_includes_preview(self):
+        self.live = {
+            ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'},
+        }
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
+        a.remember_preview(self.con, 'socket', '%1', '123', user='修好 OAuth', agent='需要你確認 redirect URI')
+        payload = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)
+        preview = payload['agents'][0]['preview']
+        self.assertEqual(preview['users'], ['修好 OAuth'])
+        self.assertIn('redirect URI', preview['agent'])
+
+    def test_maybe_notify_wait_posts_when_enabled(self):
+
+        cfg = {'enabled': True, 'server': 'https://ntfy.example', 'topic': 'attn-test', 'title': 'tmux-attn'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'notify.json'
+            path.write_text(json.dumps(cfg))
+            with patch.dict(os.environ, {'TMUX_ATTN_NOTIFY': str(path)}), \
+                 patch.object(a, 'local_host_name', return_value='home'), \
+                 patch.object(a, 'urlopen') as urlopen_mock:
+                class FakeResp:
+                    def read(self): return b''
+                urlopen_mock.return_value = FakeResp()
+                a.maybe_notify_wait('claude', 'Approval needed', '%1')
+            request = urlopen_mock.call_args.args[0]
+            self.assertEqual(request.full_url, 'https://ntfy.example/attn-test')
+            self.assertEqual(request.data, b'home claude %1: Approval needed')
+            self.assertEqual(request.get_header('Title'), 'tmux-attn')
+
+    def test_dispatch_send_local_and_peer(self):
+        def fake_send(pane, pid, text, submit=True):
+            if not str(text).strip():
+                return 'empty message'
+            return None
+        with patch.object(a, 'send_to_pane', side_effect=fake_send) as send_mock, \
+             patch.object(a, 'local_host_name', return_value='home'):
+            code, body = a.dispatch_send({'pane': '%1', 'pid': '123', 'text': 'hello', 'submit': True})
+            self.assertEqual(code, 200)
+            self.assertTrue(body['ok'])
+            send_mock.assert_called_once_with('%1', '123', 'hello', submit=True)
+            code, body = a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '   '})
+            self.assertEqual((code, body.get('error')), (409, 'empty message'))
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'urlopen') as urlopen_mock:
+            class FakeResp:
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return json.dumps({'ok': True, 'pane': '%9'}).encode()
+            urlopen_mock.return_value = FakeResp()
+            code, body = a.dispatch_send({'host': 'lab', 'pane': '%9', 'pid': '999', 'text': 'yo'})
+            self.assertEqual(code, 200)
+            self.assertTrue(body['ok'])
+            request = urlopen_mock.call_args.args[0]
+            self.assertEqual(request.full_url, 'http://lab:7788/api/send')
+            forwarded = json.loads(request.data.decode())
+            self.assertTrue(forwarded['_local_only'])
+            self.assertEqual(forwarded['pane'], '%9')
+
+    def test_send_to_pane_rejects_pid_mismatch(self):
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj'}}
+        with patch.object(a, 'live_panes', return_value=live), \
+             patch.object(a, 'tmux', return_value='999'):
+            self.assertEqual(a.send_to_pane('%1', '123', 'hi'), 'pane pid changed')
+        with patch.object(a, 'live_panes', return_value=live):
+            self.assertEqual(a.send_to_pane('%1', '456', 'hi'), 'pane not found or pid mismatch')
+            self.assertEqual(a.send_to_pane('%1', '123', '  '), 'empty message')
 
     def test_web_api_smoke(self):
         a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
@@ -232,7 +353,9 @@ class StoreTests(unittest.TestCase):
             self.assertTrue(fleet['ok'])
             self.assertEqual(fleet['agents'][0]['host'], a.local_host_name())
             self.assertIn('/api/fleet', page)
-            self.assertIn('🙋 等待回覆', page)
+            self.assertIn('/api/send', page)
+            self.assertIn('等待回覆', page)
+            self.assertIn('composer', page)
         finally:
             server.shutdown()
             server.server_close()

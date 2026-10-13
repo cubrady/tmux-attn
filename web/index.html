@@ -8,44 +8,49 @@
   <title>Attention</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@450;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #eef1f4;
-      --bg-elevated: #f7f8fa;
-      --fg: #1c2430;
-      --muted: #5c6b7a;
-      --line: #d0d7e0;
+      --bg: #f4f5f7;
+      --bg-elevated: #ffffff;
+      --fg: #18181b;
+      --muted: #71717a;
+      --line: #e4e4e7;
       --card: #ffffff;
-      --accent: #3a5f7a;
-      --wait: #b85c38;
-      --review: #3d6f8c;
-      --running: #3d6b52;
-      --idle: #6a7380;
-      --danger: #b33a3a;
-      --danger-bg: color-mix(in srgb, var(--danger) 8%, var(--card));
-      --shadow: 0 1px 0 rgba(28, 36, 48, 0.04), 0 8px 24px -12px rgba(28, 36, 48, 0.18);
-      --radius: 12px;
-      --font: "IBM Plex Sans", "PingFang TC", "Noto Sans TC", sans-serif;
-      --mono: "IBM Plex Mono", ui-monospace, monospace;
-      --max: 44rem;
+      --accent: #0f766e;
+      --accent-fg: #f8fafc;
+      --wait: #c2410c;
+      --review: #0369a1;
+      --running: #15803d;
+      --idle: #71717a;
+      --danger: #b91c1c;
+      --danger-bg: #fef2f2;
+      --radius: 8px;
+      --font: "Outfit", "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
+      --mono: "JetBrains Mono", ui-monospace, monospace;
+      --max: 42rem;
+      --ease: cubic-bezier(0.16, 1, 0.3, 1);
+      --header-bg: color-mix(in srgb, var(--bg) 86%, transparent);
+      --composer-bg: color-mix(in srgb, var(--card) 94%, transparent);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #12161c;
-        --bg-elevated: #171c24;
-        --fg: #e8edf2;
-        --muted: #93a0ae;
-        --line: #2a3340;
-        --card: #1a212b;
-        --accent: #7ea0b8;
-        --wait: #d4845c;
-        --review: #6e9bb5;
-        --running: #6f9f82;
-        --idle: #8b95a3;
-        --danger: #d45a5a;
-        --danger-bg: color-mix(in srgb, var(--danger) 12%, var(--card));
-        --shadow: 0 1px 0 rgba(0, 0, 0, 0.25), 0 12px 28px -14px rgba(0, 0, 0, 0.55);
+        --bg: #0c0c0e;
+        --bg-elevated: #141417;
+        --fg: #f4f4f5;
+        --muted: #a1a1aa;
+        --line: #27272a;
+        --card: #18181b;
+        --accent: #2dd4bf;
+        --accent-fg: #042f2e;
+        --wait: #fb923c;
+        --review: #38bdf8;
+        --running: #4ade80;
+        --idle: #a1a1aa;
+        --danger: #f87171;
+        --danger-bg: #450a0a;
+        --header-bg: color-mix(in srgb, var(--bg) 88%, transparent);
+        --composer-bg: color-mix(in srgb, var(--card) 92%, transparent);
       }
     }
     * { box-sizing: border-box; }
@@ -55,23 +60,11 @@
       min-height: 100dvh;
       font: 15px/1.45 var(--font);
       color: var(--fg);
-      background:
-        radial-gradient(1200px 500px at 10% -10%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
-        var(--bg);
-      padding: 20px 16px calc(28px + env(safe-area-inset-bottom));
-    }
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.035;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-      z-index: 0;
+      background: var(--bg);
+      padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
+      -webkit-font-smoothing: antialiased;
     }
     .wrap {
-      position: relative;
-      z-index: 1;
       width: min(100%, var(--max));
       margin: 0 auto;
     }
@@ -79,136 +72,147 @@
       position: sticky;
       top: 0;
       z-index: 2;
-      margin: -8px -4px 0;
-      padding: 12px 4px 14px;
-      background: color-mix(in srgb, var(--bg) 82%, transparent);
-      backdrop-filter: blur(14px) saturate(1.1);
-      border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+      margin: -4px -8px 0;
+      padding: 10px 8px 12px;
+      background: var(--header-bg);
+      backdrop-filter: blur(16px) saturate(1.2);
+      -webkit-backdrop-filter: blur(16px) saturate(1.2);
+      border-bottom: 1px solid var(--line);
+    }
+    @media (prefers-reduced-transparency: reduce) {
+      header, .composer {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        background: var(--card);
+      }
     }
     .brand {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
       gap: 12px;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
     }
     h1 {
       margin: 0;
-      font-size: 1.35rem;
+      font-size: 1.25rem;
       font-weight: 600;
-      letter-spacing: -0.03em;
-      text-wrap: balance;
+      letter-spacing: -0.04em;
     }
     .live {
       font-family: var(--mono);
-      font-size: 0.72rem;
+      font-size: 0.7rem;
       font-weight: 500;
       color: var(--muted);
-      letter-spacing: 0.04em;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
     }
+    .live[data-state="offline"] { color: var(--danger); }
     .meta {
       color: var(--muted);
-      font-size: 0.84rem;
-      font-weight: 450;
-      margin-bottom: 14px;
+      font-size: 0.8rem;
+      margin-bottom: 12px;
     }
     .summary {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 8px;
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
     }
     .stat {
       background: var(--card);
-      box-shadow: var(--shadow);
-      border-radius: 10px;
-      padding: 12px 8px 10px;
+      padding: 10px 6px 9px;
       text-align: center;
     }
     .stat .n {
       font-family: var(--mono);
-      font-size: 1.2rem;
+      font-size: 1.05rem;
       font-weight: 500;
       font-variant-numeric: tabular-nums;
-      letter-spacing: -0.02em;
+      letter-spacing: -0.03em;
     }
     .stat .l {
-      margin-top: 4px;
-      font-size: 0.68rem;
+      margin-top: 3px;
+      font-size: 0.65rem;
       font-weight: 500;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
       color: var(--muted);
     }
     .hosts {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      margin-top: 12px;
+      margin-top: 10px;
     }
     .host-pill {
       font-family: var(--mono);
-      font-size: 0.7rem;
+      font-size: 0.68rem;
       font-weight: 500;
-      padding: 4px 8px;
+      padding: 3px 7px;
       border-radius: 6px;
       background: var(--bg-elevated);
       color: var(--muted);
       border: 1px solid var(--line);
     }
-    .host-pill.ok { color: var(--running); }
+    .host-pill.ok { color: var(--running); border-color: color-mix(in srgb, var(--running) 35%, var(--line)); }
     .host-pill.bad {
       color: var(--danger);
       background: var(--danger-bg);
-      border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+      border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
     }
     main.list {
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      margin-top: 18px;
+      gap: 8px;
+      margin-top: 16px;
+      padding-bottom: 8px;
     }
     .section {
       display: flex;
       align-items: baseline;
       gap: 8px;
-      margin: 10px 2px 2px;
-      font-size: 0.72rem;
+      margin: 12px 0 2px;
+      font-size: 0.78rem;
       font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
       color: var(--muted);
     }
+    .section:first-child { margin-top: 4px; }
     .section .count {
       font-family: var(--mono);
       font-weight: 500;
-      letter-spacing: 0;
-      opacity: 0.85;
+      font-size: 0.72rem;
+      opacity: 0.9;
     }
     .card {
       background: var(--card);
-      box-shadow: var(--shadow);
       border-radius: var(--radius);
-      padding: 14px 14px 13px;
-      border: 1px solid transparent;
+      padding: 12px 12px 12px 14px;
+      border: 1px solid var(--line);
       border-left: 3px solid var(--idle);
-      transition: transform 180ms ease, box-shadow 180ms ease;
+      transition: border-color 160ms var(--ease), background 160ms var(--ease);
     }
-    .card:active { transform: scale(0.99); }
+    @media (prefers-reduced-motion: no-preference) {
+      .card { transition: border-color 160ms var(--ease), background 160ms var(--ease), transform 140ms var(--ease); }
+      .card:active { transform: scale(0.985); }
+    }
+    .card.selected {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+      background: color-mix(in srgb, var(--accent) 6%, var(--card));
+    }
     .card.wait { border-left-color: var(--wait); }
     .card.review { border-left-color: var(--review); }
     .card.running { border-left-color: var(--running); }
     .card.idle { border-left-color: var(--idle); }
     .card.shell {
-      border-left-color: color-mix(in srgb, var(--muted) 55%, var(--line));
-      background: color-mix(in srgb, var(--card) 88%, var(--bg));
+      border-left-color: color-mix(in srgb, var(--muted) 40%, var(--line));
+      background: color-mix(in srgb, var(--card) 70%, var(--bg));
     }
     .card.error {
-      border: 1.5px solid var(--danger);
-      border-left-width: 3px;
+      border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
       border-left-color: var(--danger);
       background: var(--danger-bg);
-      box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 12%, transparent), var(--shadow);
     }
     .row1 {
       display: flex;
@@ -219,22 +223,22 @@
     .title {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 7px;
       flex-wrap: wrap;
       font-weight: 600;
-      font-size: 1.02rem;
-      letter-spacing: -0.01em;
+      font-size: 0.98rem;
+      letter-spacing: -0.02em;
       min-width: 0;
     }
-    .emoji { font-size: 1.15rem; line-height: 1; }
+    .emoji { font-size: 1.05rem; line-height: 1; }
     .project { min-width: 0; overflow-wrap: anywhere; }
     .host {
       font-family: var(--mono);
-      font-size: 0.68rem;
+      font-size: 0.65rem;
       font-weight: 500;
-      padding: 3px 7px;
+      padding: 2px 6px;
       border-radius: 5px;
-      background: var(--bg-elevated);
+      background: var(--bg);
       border: 1px solid var(--line);
       color: var(--muted);
     }
@@ -242,19 +246,19 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
       border: 1px solid var(--line);
-      background: var(--bg-elevated);
+      background: var(--bg);
       flex: 0 0 auto;
     }
-    .cli img { width: 22px; height: 22px; display: block; }
+    .cli img { width: 16px; height: 16px; display: block; }
     .cli .cli-text {
       font-family: var(--mono);
-      font-size: 0.62rem;
+      font-size: 0.58rem;
       font-weight: 500;
-      max-width: 30px;
+      max-width: 26px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -265,42 +269,136 @@
     }
     .age {
       font-family: var(--mono);
-      font-size: 0.78rem;
+      font-size: 0.72rem;
       font-weight: 500;
       font-variant-numeric: tabular-nums;
       color: var(--muted);
       white-space: nowrap;
-      padding-top: 2px;
+      padding-top: 3px;
     }
     .sub {
-      margin-top: 6px;
+      margin-top: 5px;
       color: var(--muted);
-      font-size: 0.82rem;
+      font-size: 0.78rem;
     }
     .reason {
-      margin-top: 8px;
-      font-size: 0.92rem;
-      color: color-mix(in srgb, var(--fg) 88%, var(--muted));
+      margin-top: 7px;
+      font-size: 0.88rem;
+      color: color-mix(in srgb, var(--fg) 82%, var(--muted));
       text-wrap: pretty;
     }
     .card.error .reason {
       color: var(--danger);
       font-weight: 500;
     }
+    .preview {
+      margin-top: 10px;
+      padding-top: 9px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .preview-line {
+      display: grid;
+      grid-template-columns: 2.4rem 1fr;
+      gap: 8px;
+      align-items: start;
+      font-size: 0.84rem;
+      line-height: 1.4;
+    }
+    .preview-line .who {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      font-weight: 500;
+      color: var(--muted);
+      padding-top: 3px;
+    }
+    .preview-line.user .text {
+      color: var(--fg);
+      font-weight: 500;
+      text-wrap: pretty;
+    }
+    .preview-line.user:last-of-type .text { font-weight: 600; }
+    .preview-line.agent {
+      margin-top: 3px;
+      padding-top: 6px;
+      border-top: 1px dashed var(--line);
+    }
+    .preview-line.agent .text {
+      color: var(--muted);
+      text-wrap: pretty;
+    }
     .empty, .banner-error {
-      margin-top: 28px;
+      margin-top: 24px;
       text-align: center;
       color: var(--muted);
-      padding: 28px 16px;
+      padding: 24px 14px;
       background: var(--card);
+      border: 1px solid var(--line);
       border-radius: var(--radius);
-      box-shadow: var(--shadow);
     }
     .banner-error {
       color: var(--danger);
       background: var(--danger-bg);
-      border: 1.5px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+      border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
     }
+    .composer {
+      position: sticky;
+      bottom: 0;
+      margin-top: 14px;
+      padding: 12px;
+      background: var(--composer-bg);
+      backdrop-filter: blur(14px) saturate(1.15);
+      -webkit-backdrop-filter: blur(14px) saturate(1.15);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+    .composer[hidden] { display: none !important; }
+    .composer .target {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-bottom: 8px;
+      font-family: var(--mono);
+    }
+    .composer textarea {
+      width: 100%;
+      min-height: 68px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px 11px;
+      font: 0.92rem/1.4 var(--font);
+      background: var(--bg-elevated);
+      color: var(--fg);
+      outline: none;
+    }
+    .composer textarea:focus {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    }
+    .composer .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+    }
+    .composer button {
+      border: 0;
+      border-radius: var(--radius);
+      padding: 8px 14px;
+      font: 600 0.84rem var(--font);
+      background: var(--accent);
+      color: var(--accent-fg);
+      cursor: pointer;
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .composer button:active { transform: scale(0.98); }
+    }
+    .composer button:disabled { opacity: 0.45; cursor: default; }
+    .composer .hint { font-size: 0.72rem; color: var(--muted); }
+    .composer .status { font-size: 0.78rem; margin-left: auto; color: var(--muted); }
+    .composer .status.bad { color: var(--danger); }
+    .composer .status.ok { color: var(--running); }
   </style>
 </head>
 <body>
@@ -317,6 +415,15 @@
     <main class="list" id="list"></main>
     <div class="empty" id="empty" hidden></div>
     <div class="banner-error" id="error" hidden></div>
+    <form class="composer" id="composer" hidden>
+      <div class="target" id="composer-target">選一個 agent 以傳送訊息</div>
+      <textarea id="composer-text" placeholder="傳送到選定 pane（貼上並送出 Enter）"></textarea>
+      <div class="row">
+        <button type="submit" id="composer-send">送出</button>
+        <span class="hint">文字 paste，不做批准</span>
+        <span class="status" id="composer-status"></span>
+      </div>
+    </form>
   </div>
   <script>
     const SECTIONS = [
@@ -327,6 +434,11 @@
       ['shell', '其他 pane'],
     ];
     const SECTION_EMOJI = { wait: '🙋', review: '👀', running: '🏃', idle: '💤', shell: '💻' };
+    let selectedKey = '';
+    let latestAgents = [];
+    function agentKey(a) {
+      return [a.host || '', a.pane || '', a.pid || ''].join('|');
+    }
     function category(agent) {
       if (!agent.tracked || agent.state === 'SHELL') return 'shell';
       if (agent.state === 'WAIT') return 'wait';
@@ -348,7 +460,16 @@
       const cli = (a.cli || a.agent || a.command || 'shell').toLowerCase();
       const host = a.host ? `<span class="host">${escapeHtml(a.host)}</span>` : '';
       const errorClass = a.severity === 'error' ? ' error' : '';
-      return `<article class="card ${cat}${errorClass}">
+      const selected = agentKey(a) === selectedKey ? ' selected' : '';
+      const source = a.source ? ` / ${escapeHtml(a.source)}` : '';
+      const selectable = a.tracked ? ' tabindex="0" role="button"' : '';
+      const preview = a.preview || {};
+      const users = Array.isArray(preview.users) ? preview.users.filter(Boolean) : [];
+      const agentLine = preview.agent || '';
+      const previewHtml = (users.length || agentLine) ? `<div class="preview">${
+        users.map(text => `<div class="preview-line user"><span class="who">you</span><span class="text">${escapeHtml(text)}</span></div>`).join('')
+      }${agentLine ? `<div class="preview-line agent"><span class="who">agent</span><span class="text">${escapeHtml(agentLine)}</span></div>` : ''}</div>` : '';
+      return `<article class="card ${cat}${errorClass}${selected}" data-key="${escapeHtml(agentKey(a))}"${selectable}>
         <div class="row1">
           <div class="title">
             <span class="emoji" aria-hidden="true">${a.emoji}</span>
@@ -358,9 +479,21 @@
           </div>
           <div class="age">${escapeHtml(a.age)}</div>
         </div>
-        <div class="sub">${escapeHtml(cli)}${a.command && a.command !== cli ? ' · ' + escapeHtml(a.command) : ''} · ${escapeHtml(a.session)} / ${escapeHtml(a.window)}</div>
+        <div class="sub">${escapeHtml(cli)}${a.command && a.command !== cli ? ' / ' + escapeHtml(a.command) : ''} / ${escapeHtml(a.session)} / ${escapeHtml(a.window)}${source}</div>
         <div class="reason">${escapeHtml(a.reason)}</div>
+        ${previewHtml}
       </article>`;
+    }
+    function syncComposer() {
+      const composer = document.getElementById('composer');
+      const target = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      if (!target) {
+        composer.hidden = true;
+        return;
+      }
+      composer.hidden = false;
+      document.getElementById('composer-target').textContent =
+        `${target.host || 'local'} ${target.pane} / ${target.project || target.window} / ${target.cli || target.agent}`;
     }
     function render(data) {
       const s = data.summary || {};
@@ -375,9 +508,9 @@
       const hosts = data.hosts || [];
       const okHosts = hosts.filter(h => h.ok).length;
       document.getElementById('meta').textContent =
-        `追蹤 ${s.tracked || 0} · 其他 ${s.untracked || 0}` +
-        (hosts.length ? ` · 主機 ${okHosts}/${hosts.length}` : '') +
-        ' · 約 2 秒更新';
+        `追蹤 ${s.tracked || 0}，其他 ${s.untracked || 0}` +
+        (hosts.length ? `，主機 ${okHosts}/${hosts.length}` : '') +
+        '，約 2 秒更新';
       document.getElementById('hosts').innerHTML = hosts.map(h =>
         `<span class="host-pill ${h.ok ? 'ok' : 'bad'}" title="${escapeHtml(h.error || h.url || h.source || '')}">${escapeHtml(h.name)}${h.ok ? '' : ' offline'}</span>`
       ).join('');
@@ -385,41 +518,89 @@
       const empty = document.getElementById('empty');
       const err = document.getElementById('error');
       err.hidden = true;
-      const agents = data.agents || [];
-      if (!agents.length) {
+      latestAgents = data.agents || [];
+      if (selectedKey && !latestAgents.some(a => agentKey(a) === selectedKey && a.tracked)) {
+        selectedKey = '';
+      }
+      if (!latestAgents.length) {
         list.innerHTML = '';
         empty.hidden = false;
         empty.textContent = hosts.some(h => !h.ok)
           ? '尚無資料。檢查 peers 是否在線，或本機 tmux／hooks。'
           : '沒有 live pane。確認工作機上的 tmux 有在跑。';
+        syncComposer();
         return;
       }
       empty.hidden = true;
       const grouped = Object.fromEntries(SECTIONS.map(([key]) => [key, []]));
-      for (const a of agents) grouped[category(a)].push(a);
+      for (const a of latestAgents) grouped[category(a)].push(a);
       list.innerHTML = SECTIONS.map(([key, title]) => {
         const rows = grouped[key];
         if (!rows.length) return '';
         return `<div class="section"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>` + rows.map(cardHtml).join('');
       }).join('');
+      syncComposer();
     }
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       }[c]));
     }
+    document.getElementById('list').addEventListener('click', (event) => {
+      const card = event.target.closest('.card[data-key]');
+      if (!card) return;
+      const agent = latestAgents.find(a => agentKey(a) === card.dataset.key);
+      if (!agent || !agent.tracked) return;
+      selectedKey = card.dataset.key;
+      document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
+      card.classList.add('selected');
+      syncComposer();
+      document.getElementById('composer-status').textContent = '';
+      document.getElementById('composer-text').focus();
+    });
+    document.getElementById('composer').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      const status = document.getElementById('composer-status');
+      const button = document.getElementById('composer-send');
+      const text = document.getElementById('composer-text').value;
+      if (!agent) return;
+      button.disabled = true;
+      status.className = 'status';
+      status.textContent = '送出中…';
+      try {
+        const res = await fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, text, submit: true }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        status.className = 'status ok';
+        status.textContent = '已貼上';
+        document.getElementById('composer-text').value = '';
+      } catch (e) {
+        status.className = 'status bad';
+        status.textContent = e.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
     async function refresh() {
+      const clock = document.getElementById('clock');
       try {
         const res = await fetch('/api/fleet', { cache: 'no-store' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || 'payload error');
         render(data);
-        document.getElementById('clock').textContent = 'live';
+        clock.textContent = 'live';
+        clock.dataset.state = 'live';
       } catch (e) {
         document.getElementById('error').hidden = false;
         document.getElementById('error').textContent = '無法讀取狀態：' + e.message;
-        document.getElementById('clock').textContent = 'offline';
+        clock.textContent = 'offline';
+        clock.dataset.state = 'offline';
       }
     }
     refresh();

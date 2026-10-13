@@ -151,17 +151,17 @@ python3 rollback.py /path/to/printed/backup
 
 狀態主要來自 agent hooks／Pi 事件，保存在本機 SQLite。Codex 相容監控會唯讀讀取本機對話事件及必要的 pane 畫面，交叉驗證主對話身分；子 agent 的事件不會覆蓋主 agent 狀態。Claude 的相容監控也會交叉確認前景程序及明確的工作／完成畫面，修正未更新的舊通知；批准或回答選單會阻止畫面校正。未知畫面保留原事件狀態。這些判斷不需要額外 LLM 呼叫。
 
-一般完成回覆會成為未查看項目。若回覆最後以 `?` 或 `？` 結尾，目前會推測為等待回答；這是啟發式判斷，可能把反問誤判。明確的批准／輸入事件會直接標記為等待回覆。
+一般完成回覆會成為未查看項目。若回覆最後以 `?` 或 `？` 結尾，只當成 soft 👀「建議查看」（`IDLE` + needs_review），**不會**硬標 🙋；明確的批准／AskUserQuestion／Permission／ui_prompt 事件才標記為等待回覆。
 
 `🏃` 表示主回合正在工作。主回覆完成後，即使背景 shell／dev server 還在執行，也會顯示 `👀`；背景工作的存在會另外顯示在 popup 說明中。
 
 對以 `resume` 啟動的 Codex CLI，相容監控會用前景程序的工作目錄與完整對話名稱核對既有綁定；右側額外資訊不會視為名稱的一部分。若同一 CLI 切換對話後，名稱被截斷或對應不唯一，仍需重新載入 hooks。監控依賴本機資料格式，無法確認的對應不會猜測。
 
-## 手機／遠端只讀面板（MVP）
+## 手機／遠端面板（MVP）
 
-在跑 agent 的工作機上啟動網頁服務；預設綁定 `0.0.0.0:7788`，同一 Tailscale／LAN 內可直接開啟。目前為**只讀**。不需要 `tailscale serve`，也無內建 auth（請只暴露在私有網）。
+在跑 agent 的工作機上啟動網頁服務；預設綁定 `0.0.0.0:7788`，同一 Tailscale／LAN 內可直接開啟。不需要 `tailscale serve`，也無內建 auth（請只暴露在私有網）。
 
-頁面依**注意力分組**：🙋 等待 → 👀 待看 → 🏃 進行中 → 💤 閒置 → 💻 其他 pane。
+頁面依**注意力分組**：🙋 等待 → 👀 待看 → 🏃 進行中 → 💤 閒置 → 💻 其他 pane。卡片會標 `source`（`hook`／`observer`／`shell`）。點選已追蹤 agent 可在底部輸入文字，經 `POST /api/send` 貼到該 pane（再確認 `pane_pid`；可轉發 peer）。這是 paste 回覆，不是遠端批准。
 
 ```sh
 # 每台工作機
@@ -190,15 +190,21 @@ http://<vps-或聚合機 Tailscale 名或 100.x>:7788/
 
 單機也可直接開工作機的 `:7788/`（fleet = 本機 + 可選 peers）。工作機休眠則該 host 顯示離線；整頁其餘 host 仍可用。
 
+### 可選推播（ntfy）
+
+僅在 pane **新進入** 🙋（WAIT）時推送。複製 [notify.example.json](notify.example.json) 為 `~/.config/tmux-attn/notify.json`，設 `enabled: true` 與私有 `topic`（可用自架 ntfy／Tailscale）。也可設環境變數 `TMUX_ATTN_NOTIFY` 指向設定檔。失敗寫入 state 目錄的 `notify-errors.log`。
+
 ## 檔案與檢查
 
 | 位置 | 用途 |
 | --- | --- |
 | `~/.local/bin/tmux-attn` | 開啟 popup 或查詢狀態 |
 | `~/.local/share/tmux-attn/` | 安裝後的程式 |
-| `~/.local/share/tmux-attn/web/` | 手機只讀面板靜態頁 |
+| `~/.local/share/tmux-attn/web/` | 手機面板靜態頁 |
 | `~/.config/tmux-attn/sidebar.conf` | tmux 顯示及快捷鍵設定 |
 | `~/.config/tmux-attn/project-aliases.json` | 個人別名 |
+| `~/.config/tmux-attn/peers.json` | 多機聚合 peers（可選） |
+| `~/.config/tmux-attn/notify.json` | 可選 ntfy 推播（預設關閉） |
 | `~/.local/state/tmux-attn/inbox.sqlite3` | 狀態及已查看標記 |
 | `~/.local/state/tmux-attn/backups/` | 安裝備份 |
 
@@ -221,7 +227,9 @@ python3 tests/popup_roundtrip.py
 
 Repo 追蹤程式、測試、文件及預設別名；本機狀態、匯出檔和個人紀錄由 `.gitignore` 排除。原始 polling starter 保留在 `legacy/` 作為歷史參考。
 
-Cursor CLI 使用原生 `~/.cursor/hooks.json` 的完成事件，並辨識繼承的 Claude hooks 為 Cursor。已開啟的互動 CLI 另以程序與畫面確認狀態：`ctrl+c to stop` 表示工作中，完成後切成 👀；若回答以問號結尾則顯示 🙋。核准對話框優先顯示 🙋。此畫面補充辨識已在 Cursor CLI 2026.10.01 驗證，未知畫面不猜測。
+Cursor CLI 使用原生 `~/.cursor/hooks.json` 的完成事件，並辨識繼承的 Claude hooks 為 Cursor。已開啟的互動 CLI 另以程序與畫面確認狀態：`ctrl+c to stop` 表示工作中，完成後切成 👀；句尾問號只當 soft 👀，核准對話框仍優先 🙋。此畫面補充辨識已在 Cursor CLI 2026.10.01 驗證，未知畫面不猜測。
+
+調研衍生項目見 [docs/survey-actions.md](docs/survey-actions.md)。
 
 點擊底列右側的 🙋／👀／🏃／💤 圖示或數字，可循環巡覽該狀態的 agent，直接定位到對應 session、window 與 pane。四組各自記住位置，依 session 名稱、window 建立順序與 pane 編號巡覽；走到最後後回到第一個。數量為零時不切換。點擊不會標記已查看，仍需在清單按 `d`。每個連線 client 的巡覽位置分開記錄，原有底列 session 點擊保留。安裝會開啟 tmux mouse；回復腳本會還原原本設定與按鍵。
 

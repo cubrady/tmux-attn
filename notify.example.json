@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "server": "https://ntfy.sh",
+  "topic": "your-private-topic",
+  "title": "tmux-attn",
+  "priority": "default",
+  "tags": "raising_hand"
+}
