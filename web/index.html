@@ -794,6 +794,7 @@
       overflow: auto;
       margin-bottom: 10px;
       -webkit-overflow-scrolling: touch;
+      outline: none;
     }
     .sheet-preview .preview { margin-top: 0; padding-top: 0; border-top: 0; }
     .sheet-compose {
@@ -1203,7 +1204,7 @@
       </div>
       <div class="sheet-env" id="sheet-env" hidden></div>
       <div class="sheet-reason" id="sheet-reason"></div>
-      <div class="sheet-preview" id="sheet-preview"></div>
+      <div class="sheet-preview" id="sheet-preview" tabindex="0"></div>
       <button type="button" class="host-pill" id="sheet-refresh">重新整理內容</button>
       <form class="sheet-compose" id="sheet-form">
         <textarea id="sheet-text" placeholder="輸入訊息" enterkeyhint="send"></textarea>
@@ -1918,7 +1919,8 @@
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
       const card = document.querySelector(`.card[data-key="${CSS.escape(selectedKey)}"]`);
       if (card) card.classList.add('selected');
-      requestAnimationFrame(() => document.getElementById('sheet-text').focus());
+      // Focus the transcript, not the reply box: focusing a textarea raises the on-screen keyboard on phones.
+      requestAnimationFrame(() => document.getElementById('sheet-preview').focus());
     }
     function syncSheetFromData() {
       if (!sheetOpen || !selectedKey) return;
