@@ -9,6 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@450;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.5/dist/purify.min.js"></script>
   <style>
     :root {
       --bg: #f4f5f7;
@@ -364,6 +366,20 @@
     @media (prefers-color-scheme: dark) {
       .cli.agent img { filter: invert(1); }
     }
+    .cli.broken::after {
+      content: attr(title);
+      font-family: var(--mono);
+      font-size: 0.55rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: var(--muted);
+      max-width: 26px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding: 0 2px;
+    }
     .age {
       font-family: var(--mono);
       font-size: 0.72rem;
@@ -473,14 +489,115 @@
       -webkit-line-clamp: 3;
       overflow: hidden;
     }
+    .card .preview-line .text.md {
+      display: block;
+      -webkit-line-clamp: unset;
+      -webkit-box-orient: unset;
+      max-height: 4.9em;
+      overflow: hidden;
+    }
     .card.review .preview-line.agent .text {
       -webkit-line-clamp: 4;
       color: color-mix(in srgb, var(--fg) 78%, var(--muted));
     }
+    .card.review .preview-line.agent .text.md {
+      -webkit-line-clamp: unset;
+      max-height: 6.6em;
+      color: color-mix(in srgb, var(--fg) 78%, var(--muted));
+    }
     .sheet-preview .preview-line .text {
-      white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    .sheet-preview .preview-line .text.md {
+      max-height: none;
+      overflow: visible;
+    }
+    .preview-line .text.md {
+      font-size: inherit;
+      line-height: 1.45;
+    }
+    .preview-line .text.md > :first-child { margin-top: 0; }
+    .preview-line .text.md > :last-child { margin-bottom: 0; }
+    .preview-line .text.md p,
+    .preview-line .text.md ul,
+    .preview-line .text.md ol,
+    .preview-line .text.md pre,
+    .preview-line .text.md blockquote,
+    .preview-line .text.md table {
+      margin: 0.35em 0;
+    }
+    .preview-line .text.md h1,
+    .preview-line .text.md h2,
+    .preview-line .text.md h3,
+    .preview-line .text.md h4 {
+      margin: 0.55em 0 0.25em;
+      font-size: 1em;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--fg);
+      line-height: 1.3;
+    }
+    .preview-line .text.md h1 { font-size: 1.12em; }
+    .preview-line .text.md h2 { font-size: 1.06em; }
+    .preview-line .text.md ul,
+    .preview-line .text.md ol {
+      padding-left: 1.25em;
+    }
+    .preview-line .text.md li { margin: 0.15em 0; }
+    .preview-line .text.md li + li { margin-top: 0.1em; }
+    .preview-line .text.md code {
+      font-family: var(--mono);
+      font-size: 0.86em;
+      background: color-mix(in srgb, var(--bg) 70%, var(--line));
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    .preview-line .text.md pre {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .preview-line .text.md pre code {
+      background: transparent;
+      padding: 0;
+      font-size: 0.8em;
+      line-height: 1.4;
+    }
+    .preview-line .text.md blockquote {
+      border-left: 3px solid var(--line);
+      padding-left: 0.75em;
+      color: var(--muted);
+    }
+    .preview-line .text.md a {
+      color: var(--accent);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .preview-line .text.md table {
+      border-collapse: collapse;
+      font-size: 0.9em;
+      width: 100%;
+    }
+    .preview-line .text.md th,
+    .preview-line .text.md td {
+      border: 1px solid var(--line);
+      padding: 4px 8px;
+      text-align: left;
+    }
+    .preview-line .text.md th {
+      background: var(--bg);
+      font-weight: 600;
+    }
+    .preview-line .text.md hr {
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 0.6em 0;
+    }
+    .preview-line .text.md strong { font-weight: 650; color: var(--fg); }
+    .preview-line.agent .text.md strong { color: color-mix(in srgb, var(--fg) 88%, var(--muted)); }
     .empty, .banner-error {
       margin-top: 24px;
       text-align: center;
@@ -622,39 +739,49 @@
       display: flex;
       gap: 8px;
       align-items: center;
+      justify-content: space-between;
       margin-top: 8px;
     }
-    .sheet-actions .send {
+    .sheet-actions-left,
+    .sheet-actions-right {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .sheet-actions-right { margin-left: auto; }
+    .icon-btn.send {
       border: 0;
-      border-radius: var(--radius);
-      padding: 9px 16px;
-      font: 600 0.88rem var(--font);
       background: var(--accent);
       color: var(--accent-fg);
-      cursor: pointer;
+    }
+    .icon-btn.send:disabled {
+      opacity: 0.45;
+      cursor: default;
     }
     @media (prefers-reduced-motion: no-preference) {
-      .sheet-actions .send:active,
       .icon-btn:active { transform: scale(0.97); }
     }
-    .sheet-actions .send:disabled,
-    .icon-btn:disabled { opacity: 0.45; cursor: default; }
-    .sheet-actions .hint { font-size: 0.72rem; color: var(--muted); }
-    .sheet-actions .status { font-size: 0.78rem; margin-left: auto; color: var(--muted); }
-    .sheet-actions .status.bad { color: var(--danger); }
-    .sheet-actions .status.ok { color: var(--running); }
+    .icon-btn:disabled { opacity: 0.4; cursor: default; }
     .icon-btn.kill {
       color: var(--danger);
       border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
-      margin-left: 2px;
+      background: transparent;
     }
     .icon-btn.kill.armed {
       background: var(--danger);
       border-color: var(--danger);
       color: #fff;
     }
-    .voice-hint {
+    .sheet-feedback {
+      min-height: 1.1em;
       margin-top: 6px;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .sheet-feedback.bad { color: var(--danger); }
+    .sheet-feedback.ok { color: var(--running); }
+    .voice-hint {
+      margin-top: 4px;
       font-size: 0.7rem;
       color: var(--muted);
     }
@@ -695,25 +822,33 @@
       <form class="sheet-compose" id="sheet-form">
         <textarea id="sheet-text" placeholder="輸入訊息，或按麥克風語音輸入" enterkeyhint="send"></textarea>
         <div class="sheet-actions">
-          <button type="button" class="icon-btn" id="sheet-mic" aria-label="語音輸入" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="3" width="6" height="11" rx="3"/>
-              <path d="M5 11a7 7 0 0 0 14 0"/>
-              <path d="M12 18v3"/>
-            </svg>
-          </button>
-          <button type="submit" class="send" id="sheet-send">送出</button>
-          <button type="button" class="icon-btn kill" id="sheet-kill" aria-label="關閉 pane" title="關閉 pane（需按兩次）">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M3 6h18"/>
-              <path d="M8 6V4h8v2"/>
-              <path d="M19 6l-1 14H6L5 6"/>
-              <path d="M10 11v6M14 11v6"/>
-            </svg>
-          </button>
-          <span class="hint">貼上並 Enter</span>
-          <span class="status" id="sheet-status"></span>
+          <div class="sheet-actions-left">
+            <button type="button" class="icon-btn" id="sheet-mic" aria-label="語音輸入" title="語音輸入">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="3" width="6" height="11" rx="3"/>
+                <path d="M5 11a7 7 0 0 0 14 0"/>
+                <path d="M12 18v3"/>
+              </svg>
+            </button>
+          </div>
+          <div class="sheet-actions-right">
+            <button type="button" class="icon-btn kill" id="sheet-kill" aria-label="關閉 pane" title="關閉 pane（需按兩次）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18"/>
+                <path d="M8 6V4h8v2"/>
+                <path d="M19 6l-1 14H6L5 6"/>
+                <path d="M10 11v6M14 11v6"/>
+              </svg>
+            </button>
+            <button type="submit" class="icon-btn send" id="sheet-send" aria-label="送出" title="送出">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M22 2L11 13"/>
+                <path d="M22 2L15 22l-4-9-9-4 20-7z"/>
+              </svg>
+            </button>
+          </div>
         </div>
+        <div class="sheet-feedback" id="sheet-status" aria-live="polite"></div>
         <div class="voice-hint" id="voice-hint" hidden></div>
       </form>
     </div>
@@ -768,21 +903,40 @@
       return 'idle';
     }
     function cliBadge(cli) {
-      const known = new Set(['claude', 'codex', 'agent', 'pi']);
       const name = (cli || 'shell').toLowerCase();
-      if (known.has(name)) {
-        return `<span class="cli ${escapeHtml(name)}" title="${escapeHtml(name)}"><img src="/icons/${escapeHtml(name)}.svg" alt="${escapeHtml(name)}"></span>`;
+      const icon = ({ claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi' })[name];
+      if (icon) {
+        const label = name === 'cursor' ? 'cursor' : name;
+        return `<span class="cli ${escapeHtml(icon)}" title="${escapeHtml(label)}"><img src="/icons/${escapeHtml(icon)}.svg" alt="${escapeHtml(label)}" loading="lazy" onerror="this.closest('.cli').classList.add('broken');this.remove()"></span>`;
       }
       const short = name.length > 6 ? name.slice(0, 5) + '…' : name;
       return `<span class="cli" title="${escapeHtml(name)}"><span class="cli-text">${escapeHtml(short)}</span></span>`;
+    }
+    function renderMarkdown(text) {
+      const raw = String(text ?? '');
+      if (!raw) return '';
+      try {
+        if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+          if (!renderMarkdown._ready) {
+            marked.setOptions({ gfm: true, breaks: true });
+            renderMarkdown._ready = true;
+          }
+          const html = marked.parse(raw, { async: false });
+          return DOMPurify.sanitize(html, {
+            USE_PROFILES: { html: true },
+            ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+          });
+        }
+      } catch (_) { /* fall through */ }
+      return escapeHtml(raw).replace(/\n/g, '<br>');
     }
     function previewHtml(preview) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
       const agentLine = preview?.agent || '';
       if (!users.length && !agentLine) return '';
       return `<div class="preview">${
-        users.map(text => `<div class="preview-line user"><span class="who">you</span><span class="text">${escapeHtml(text)}</span></div>`).join('')
-      }${agentLine ? `<div class="preview-line agent"><span class="who">agent</span><span class="text">${escapeHtml(agentLine)}</span></div>` : ''}</div>`;
+        users.map(text => `<div class="preview-line user"><span class="who">you</span><span class="text md">${renderMarkdown(text)}</span></div>`).join('')
+      }${agentLine ? `<div class="preview-line agent"><span class="who">agent</span><span class="text md">${renderMarkdown(agentLine)}</span></div>` : ''}</div>`;
     }
     function clipBranch(branch, limit = 36) {
       const text = String(branch || '');
@@ -867,7 +1021,7 @@
       document.body.classList.remove('sheet-open');
       document.getElementById('sheet-text').value = '';
       document.getElementById('sheet-status').textContent = '';
-      document.getElementById('sheet-status').className = 'status';
+      document.getElementById('sheet-status').className = 'sheet-feedback';
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
     }
     function emptyPreviewHtml() {
@@ -905,7 +1059,7 @@
         if (!res.ok || !data.ok) {
           const status = document.getElementById('sheet-status');
           if (status && !status.textContent) {
-            status.className = 'status bad';
+            status.className = 'sheet-feedback bad';
             status.textContent = (data && data.error) ? ('預覽：' + data.error) : ('預覽載入失敗 HTTP ' + res.status);
           }
           return;
@@ -917,7 +1071,7 @@
       } catch (e) {
         const status = document.getElementById('sheet-status');
         if (status && !status.textContent) {
-          status.className = 'status bad';
+          status.className = 'sheet-feedback bad';
           status.textContent = '預覽載入失敗';
         }
       }
@@ -934,7 +1088,7 @@
       sheetPreviewUpdated = 0;
       fillSheet(agent, { refreshPreview: true });
       document.getElementById('sheet-status').textContent = '';
-      document.getElementById('sheet-status').className = 'status';
+      document.getElementById('sheet-status').className = 'sheet-feedback';
       document.getElementById('sheet-root').hidden = false;
       document.body.classList.add('sheet-open');
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
@@ -942,11 +1096,13 @@
       if (card) card.classList.add('selected');
       const mic = document.getElementById('sheet-mic');
       if (SpeechAPI) {
-        mic.hidden = false;
+        mic.disabled = false;
+        mic.title = '語音輸入';
       } else {
-        mic.hidden = true;
+        mic.disabled = true;
+        mic.title = '此瀏覽器不支援語音辨識';
         document.getElementById('voice-hint').hidden = false;
-        document.getElementById('voice-hint').textContent = '此瀏覽器不支援語音辨識，可用鍵盤內建麥克風。';
+        document.getElementById('voice-hint').textContent = '此瀏覽器不支援語音辨識，可用鍵盤輸入。';
       }
       requestAnimationFrame(() => document.getElementById('sheet-text').focus());
     }
@@ -1084,7 +1240,7 @@
         listening = false;
         document.getElementById('sheet-mic').classList.remove('listening');
         const status = document.getElementById('sheet-status');
-        status.className = 'status bad';
+        status.className = 'sheet-feedback bad';
         status.textContent = event.error === 'not-allowed' ? '需要麥克風權限' : ('語音錯誤: ' + event.error);
         document.getElementById('voice-hint').hidden = true;
       };
@@ -1138,7 +1294,7 @@
       try {
         recognition.start();
       } catch (e) {
-        document.getElementById('sheet-status').className = 'status bad';
+        document.getElementById('sheet-status').className = 'sheet-feedback bad';
         document.getElementById('sheet-status').textContent = e.message || '無法開始語音';
       }
     });
@@ -1151,7 +1307,7 @@
       const text = document.getElementById('sheet-text').value;
       if (!agent) return;
       button.disabled = true;
-      status.className = 'status';
+      status.className = 'sheet-feedback';
       status.textContent = '送出中…';
       try {
         const res = await fetch('/api/send', {
@@ -1161,12 +1317,12 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
-        status.className = 'status ok';
+        status.className = 'sheet-feedback ok';
         status.textContent = '已貼上';
         document.getElementById('sheet-text').value = '';
         setTimeout(closeSheet, 280);
       } catch (e) {
-        status.className = 'status bad';
+        status.className = 'sheet-feedback bad';
         status.textContent = e.message;
       } finally {
         button.disabled = false;
@@ -1183,12 +1339,12 @@
         btn.classList.add('armed');
         btn.setAttribute('aria-label', '再按一次確認關閉');
         btn.title = '5 秒內再按一次確認關閉';
-        status.className = 'status';
+        status.className = 'sheet-feedback';
         status.textContent = '再按一次確認關閉';
         return;
       }
       btn.disabled = true;
-      status.className = 'status';
+      status.className = 'sheet-feedback';
       status.textContent = '關閉中…';
       try {
         const res = await fetch('/api/kill', {
@@ -1198,11 +1354,11 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
-        status.className = 'status ok';
+        status.className = 'sheet-feedback ok';
         status.textContent = '已關閉 pane';
         setTimeout(() => { closeSheet(); refresh(); }, 320);
       } catch (e) {
-        status.className = 'status bad';
+        status.className = 'sheet-feedback bad';
         status.textContent = e.message;
         resetKillArm();
         btn.disabled = false;
