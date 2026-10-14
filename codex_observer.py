@@ -406,6 +406,29 @@ def repair_mapping(con, mapping, state_db):
     return True
 
 
+def observe_codex_unmapped(con, sock, live, table):
+    """Track unique foreground Codex even before session→pane discovery succeeds."""
+    for (pane, pid), meta in live.items():
+        if len(native_codex_pids(pid, table)) != 1:
+            continue
+        if con.execute('SELECT 1 FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
+                       (sock, pane, pid)).fetchone():
+            continue
+        screen = tmux('capture-pane', '-p', '-J', '-t', pane, check=False)
+        questions = queued_questions_screen(screen)
+        if approval_screen(screen):
+            record(con, sock, pane, pid, 'codex', 'WAIT', 'Approval dialog visible', source='observer')
+            continue
+        if questions:
+            record(con, sock, pane, pid, 'codex', 'WAIT', f'Queued follow-up questions: {questions}', source='observer')
+            continue
+        if re.search(r'(?:• Working \(|esc to interrupt)', screen):
+            record(con, sock, pane, pid, 'codex', 'RUNNING', 'Working', source='observer')
+            continue
+        if re.search(r'Ask Codex to do anything', screen) and re.search(r'← for agents', screen):
+            record(con, sock, pane, pid, 'codex', 'IDLE', 'Waiting for next task', source='observer')
+
+
 def observe():
     sock = socket()
     STATE.mkdir(parents=True,exist_ok=True)
@@ -433,6 +456,7 @@ def observe():
                     discover(con,sock,live,table,attempted)
                 observe_cursor(con,sock,live,table)
                 observe_claude(con,sock,live,table)
+                observe_codex_unmapped(con,sock,live,table)
                 for mapping in con.execute('SELECT * FROM codex_sessions WHERE socket=?',(sock,)).fetchall():
                     pane,pid = mapping['pane'],mapping['pid']
                     if (pane,pid) not in live:
