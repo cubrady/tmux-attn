@@ -1347,23 +1347,27 @@ def load_project_aliases():
         return {}
 
 
-def project_labels(paths, aliases):
+# tmux window labels stay compact; a web card title has room for much more.
+WEB_LABEL_CHARS = 28
+
+
+def project_labels(paths, aliases, limit=12):
     labels = {}
     for path in sorted(set(paths)):
         name = clean(Path(path).name)
-        labels[path] = aliases.get(path) or aliases.get(name) or (name if len(name) <= 12 else name[:11]+'…')
+        labels[path] = aliases.get(path) or aliases.get(name) or (name if len(name) <= limit else name[:limit-1]+'…')
     duplicates = {label for label in labels.values() if list(labels.values()).count(label) > 1}
     for path, label in list(labels.items()):
         if label in duplicates:
             suffix = clean(Path(path).name).rsplit('-', 1)[-1]
-            candidate = label[:max(1, 11-len(suffix))]+'-'+suffix
+            candidate = label[:max(1, limit-1-len(suffix))]+'-'+suffix
             # Prefer a readable suffix; use the full path when names are identical.
-            if len(candidate) <= 12 and suffix not in label and candidate not in labels.values():
+            if len(candidate) <= limit and suffix not in label and candidate not in labels.values():
                 labels[path] = candidate
             else:
                 digest = hashlib.sha256(path.encode()).hexdigest()
-                for length in range(4, 11):
-                    candidate = label[:11-length]+'-'+digest[:length]
+                for length in range(4, limit-1):
+                    candidate = label[:limit-1-length]+'-'+digest[:length]
                     if candidate not in labels.values():
                         labels[path] = candidate
                         break
@@ -1843,7 +1847,7 @@ def agents_payload(con, sock=None, live=None, now=None):
     tracked_keys = {(row['pane'], row['pid']) for row in rows}
     paths = [row['path'] for row in rows if row.get('path')]
     paths += [meta['path'] for key, meta in live.items() if key not in tracked_keys and meta.get('path')]
-    labels = project_labels(paths, load_project_aliases())
+    labels = project_labels(paths, load_project_aliases(), limit=WEB_LABEL_CHARS)
     agents = []
     for row in rows:
         reviewed = row['revision'] <= row['acknowledged'] and (row['state'] == 'WAIT' or row['needs_review'])

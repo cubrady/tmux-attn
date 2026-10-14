@@ -26,6 +26,7 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
     listeners: {},
     addEventListener(type, listener) { this.listeners[type] = listener; },
   };
+  Object.assign(document, overrides.document || {});
   let nowMs = 0;
   const win = { location: { hash: '' }, addEventListener() {}, history: {}, ...(overrides.window || {}) };
   const nav = overrides.navigator || win.navigator || {};
@@ -725,6 +726,7 @@ function fakeBrowser() {
   const fire = () => Promise.resolve().then(() => listeners.hashchange && listeners.hashchange());
   return {
     state,
+    listeners,
     window: {
       addEventListener(type, fn) { listeners[type] = fn; },
       getSelection: () => ({ toString: () => state.selection }),
@@ -1072,4 +1074,87 @@ test('attaching an image on a host with an older tmux-attn says so on the image'
   assert.match(t.chips(), /attachment error/);
   assert.match(t.chips(), /版本較舊/);
   assert.doesNotMatch(t.chips(), /older tmux-attn/);
+});
+
+// ---- card layout --------------------------------------------------------
+
+function cardHtmlFor(overrides) {
+  const ui = dashboard(() => new Promise(() => {}));
+  ui.render({ agents: [{ ...agent('', 'IDLE', true, true), project: 'demo', ...overrides }] });
+  return ui.elements.get('list').innerHTML;
+}
+
+test('a card leads with the result and keeps only the latest prompt as context', () => {
+  const html = cardHtmlFor({ preview: { users: ['prompt one', 'prompt two', 'prompt three'], agent: 'the finished result' } });
+  assert.ok(html.indexOf('the finished result') < html.indexOf('prompt three'), 'result comes first');
+  assert.doesNotMatch(html, /prompt one|prompt two/);
+  assert.equal((html.match(/class="preview-line (user|agent)"/g) || []).length, 2);
+});
+
+test('a card for a running agent shows its latest prompt when there is no result yet', () => {
+  const html = cardHtmlFor({ state: 'RUNNING', pending: false, preview: { users: ['older', 'the latest ask'], agent: '' } });
+  assert.match(html, /the latest ask/);
+  assert.doesNotMatch(html, /older|preview-line agent/);
+});
+
+test('the sheet keeps every prompt in order while cards are shortened', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  const html = t.el('sheet-preview').innerHTML;
+  assert.ok(html.indexOf('first prompt') < html.indexOf('second prompt'));
+  assert.ok(html.indexOf('second prompt') < html.indexOf('agent answer'));
+});
+
+test('a reason that only restates the state is left out, one that adds information stays', () => {
+  const hidden = [
+    ['IDLE', '已完成，尚未查看'], ['IDLE', '已完成，已查看'], ['IDLE', '閒置，等待新任務'], ['RUNNING', '正在工作'],
+  ];
+  for (const [state, reason] of hidden) {
+    assert.doesNotMatch(cardHtmlFor({ state, reason }), /class="reason"/, reason);
+  }
+  const kept = ['發生錯誤，尚未查看', '已中斷，尚未查看', '已完成，尚未查看（背景工作仍在運行）', '需要批准指令或操作 · rm -rf build'];
+  for (const reason of kept) {
+    const html = cardHtmlFor({ state: reason.startsWith('需要') ? 'WAIT' : 'IDLE', reason });
+    assert.match(html, /class="reason"/, reason);
+  }
+});
+
+test('previews that overflow their lines are marked so they can fade out', () => {
+  const ui = dashboard(() => new Promise(() => {}));
+  const toggled = [];
+  const preview = (name, scrollHeight, clientHeight) => ({
+    scrollHeight, clientHeight, classList: { toggle: (cls, on) => toggled.push([name, cls, on]) },
+  });
+  ui.document.querySelectorAll = selector => (selector.includes('.preview-line') ? [preview('long', 130, 60), preview('short', 40, 40)] : []);
+  ui.render({ agents: [{ ...agent('', 'IDLE', true, true), preview: { users: ['p'], agent: 'a' } }] });
+  assert.deepEqual(toggled, [['long', 'clipped', true], ['short', 'clipped', false]]);
+});
+
+test('card preview CSS cuts on whole lines, drops the label gutter and keeps labels for screen readers', () => {
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.doesNotMatch(html, /max-height: 4\.9em|max-height: 6\.6em/);
+  assert.match(html, /\.card \.preview-line \.text\.md \{[^}]*max-height: calc\(1\.45em \* 5\)/);
+  assert.match(html, /\.card \.preview-line\.user \.text\.md \{[^}]*max-height: calc\(1\.45em \* 2\)/);
+  assert.match(html, /\.card \.preview-line \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(html, /\.card \.preview-line \.who \{[^}]*clip:/);
+  assert.match(html, /\.text\.md\.clipped \{[^}]*mask-image/);
+});
+
+test('clipped previews are re-measured after web fonts load and when the window is resized', () => {
+  const fontListeners = {};
+  const browser = fakeBrowser();
+  const ui = dashboard({
+    window: browser.window,
+    document: { fonts: { addEventListener: (type, fn) => { fontListeners[type] = fn; } } },
+  });
+  let overflow = false;
+  ui.document.querySelectorAll = selector => (selector.includes('.preview-line')
+    ? [{ scrollHeight: overflow ? 130 : 40, clientHeight: 60, classList: { toggle: (cls, on) => { toggled.push(on); } } }] : []);
+  const toggled = [];
+  ui.render({ agents: [{ ...agent('', 'IDLE', true, true), preview: { users: ['p'], agent: 'a' } }] });
+  assert.deepEqual(toggled, [false]);
+  overflow = true;                       // the web font arrives and the text now wraps onto more lines
+  fontListeners.loadingdone();
+  browser.listeners.resize();
+  assert.deepEqual(toggled, [false, true, true]);
 });

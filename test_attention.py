@@ -165,6 +165,24 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(all(len(label)<=12 for label in labels.values()))
         self.assertEqual(labels,a.project_labels(list(reversed(paths))+paths,aliases))
 
+    def test_project_labels_can_use_a_longer_limit_for_the_web(self):
+        long_name = '/w/sonice-roven-ai'
+        self.assertEqual(a.project_labels([long_name], {})[long_name], 'sonice-rove…')
+        self.assertEqual(a.project_labels([long_name], {}, limit=28)[long_name], 'sonice-roven-ai')
+        too_long = '/w/' + 'x' * 40
+        self.assertEqual(a.project_labels([too_long], {}, limit=28)[too_long], 'x' * 27 + '…')
+        paths = ['/a/service-api', '/b/service-api', '/a/service-web', '/b/billing-service-gateway']
+        labels = a.project_labels(paths, {}, limit=28)
+        self.assertEqual(len(set(labels.values())), len(paths))
+        self.assertTrue(all(len(label) <= 28 for label in labels.values()))
+
+    def test_web_payload_shows_project_names_that_fit_a_card_title(self):
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Finished', True)
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/sonice-roven-ai'}}
+        with patch.object(a, 'live_panes', return_value=live):
+            payload = a.agents_payload(self.con, 'socket', now=time.time() + 3)
+        self.assertEqual(payload['agents'][0]['project'], 'sonice-roven-ai')
+
     def test_child_codex_hooks_cannot_change_root_state_or_transcript(self):
         root = Path(self.tmp.name)/'root.jsonl'
         child = Path(self.tmp.name)/'child.jsonl'
