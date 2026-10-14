@@ -14,7 +14,7 @@
 # Flags: --sidebar  --no-clone  --join-only  --check  --solo
 set -eu
 
-REPO_DEFAULT='git@github.com:cubrady/tmux-attn.git'
+REPO_DEFAULT='https://github.com/cubrady/tmux-attn.git'
 REPO="${TMUX_ATTN_REPO:-$REPO_DEFAULT}"
 SIDEBAR=0
 NO_CLONE=0
@@ -91,7 +91,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   exit $?
 fi
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "$JOIN_ONLY" -eq 1 ]; then
   if is_checkout "$script_dir"; then
@@ -113,7 +113,7 @@ if is_checkout "$script_dir"; then
 elif [ -n "${TMUX_ATTN_DIR:-}" ] && is_checkout "$TMUX_ATTN_DIR"; then
   root=$TMUX_ATTN_DIR
 elif is_checkout "${TMUX_ATTN_DIR:-./tmux-attn}"; then
-  root=$(CDPATH= cd -- "${TMUX_ATTN_DIR:-./tmux-attn}" && pwd)
+  root=$(CDPATH='' cd -- "${TMUX_ATTN_DIR:-./tmux-attn}" && pwd)
 elif [ "$NO_CLONE" -eq 1 ]; then
   echo "Not inside a tmux-attn checkout and --no-clone was set." >&2
   exit 1
@@ -130,7 +130,7 @@ else
     echo "Using existing checkout $dest (git pull --ff-only)"
     git -C "$dest" pull --ff-only
   fi
-  root=$(CDPATH= cd -- "$dest" && pwd)
+  root=$(CDPATH='' cd -- "$dest" && pwd)
 fi
 
 echo "Installing from $root"

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -118,7 +119,7 @@ path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 print("wrote", path)
 '''
     proc = subprocess.run(
-        ['ssh', ssh, 'python3', '-c', remote, name, url],
+        ['ssh', ssh, shlex.join(['python3', '-c', remote, name, url])],
         capture_output=True, text=True,
     )
     if proc.returncode != 0:
