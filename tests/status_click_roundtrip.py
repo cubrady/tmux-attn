@@ -85,7 +85,17 @@ with tempfile.TemporaryDirectory() as directory:
         click(118,targets[4])
         click(97,pane_a)  # independent category cursor survives other categories
         with a.db() as con:
-            assert before==[dict(row) for row in con.execute('SELECT * FROM panes ORDER BY pane')]
+            after=[dict(row) for row in con.execute('SELECT * FROM panes ORDER BY pane')]
+            for old,row in zip(before,after):
+                expected=dict(old)
+                if row['pane']==targets[2]:
+                    expected['acknowledged']=row['revision']
+                assert row==expected,(old,row)
+            # The viewed completion remains navigable in review, without unread count.
+            rows,_=a.items(con,sock,a.live_panes(sock),True)
+            review=a.status_groups(rows)['review']
+            assert len(review)==1 and review[0]['reviewed']
+            assert '👀 0' in a.status_text(a.status_groups(rows))
             con.execute("UPDATE panes SET state='IDLE',needs_review=0 WHERE state='WAIT'")
             con.commit()
         drain(2.2)
@@ -95,7 +105,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert 'original-control' in tmux('list-keys','-T','root')
         assert 'original-double' in tmux('list-keys','-T','root')
         assert 'original-prefix' in tmux('list-keys','-T','prefix')
-        print('PASS: real mouse clicks, four groups, cross-session/pane, wraparound, rapid clicks, zero count, unchanged acknowledgement and rollback')
+        print('PASS: real mouse clicks, four groups, cross-session/pane, wraparound, rapid clicks, exact completion acknowledgement, viewed group, zero count and rollback')
     finally:
         client.terminate()
         try:client.wait(timeout=3)

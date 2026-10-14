@@ -6,7 +6,7 @@ import curses
 import fcntl
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import closing
+from contextlib import closing, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from urllib.parse import urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
@@ -172,6 +173,7 @@ def db():
             ('preview_agent', "TEXT DEFAULT ''"),
             ('preview_users', "TEXT DEFAULT '[]'"),
             ('preview_mtime', 'REAL DEFAULT 0'),
+            ('preview_revision', 'INTEGER DEFAULT 0'),
         ]:
             if column not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
                 try:
@@ -311,6 +313,7 @@ def parse_claude_style_transcript(path):
                 text = content_to_text(message.get('content') if isinstance(message, dict) else message)
                 if not user_text_is_noise(text):
                     users.append(text.strip())
+                    agent = ''
             elif kind == 'assistant':
                 message = row.get('message') or {}
                 text = content_to_text(message.get('content') if isinstance(message, dict) else message).strip()
@@ -333,6 +336,7 @@ def parse_codex_transcript(path):
                     text = str(payload.get('message') or '').strip()
                     if not user_text_is_noise(text):
                         users.append(text)
+                        agent = ''
                 elif payload.get('type') == 'agent_message':
                     text = str(payload.get('message') or '').strip()
                     if text:
@@ -344,6 +348,7 @@ def parse_codex_transcript(path):
                     continue
                 if role == 'user' and not user_text_is_noise(text):
                     users.append(text)
+                    agent = ''
                 elif role == 'assistant':
                     agent = text
     return users, agent
@@ -381,6 +386,7 @@ def parse_cursor_transcript(path):
                 text = clean_cursor_user_text(text)
                 if text and not user_text_is_noise(text):
                     users.append(text)
+                    agent = ''
             elif role == 'assistant':
                 agent = text
     return users, agent
@@ -406,9 +412,9 @@ def conversation_preview(path, agent='', limit=PREVIEW_CHARS_FULL):
     return {'users': users, 'agent': clip_preview(agent_text, limit) if agent_text else ''}
 
 
-def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_path=None):
+def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_path=None, expected_revision=None):
     row = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
-    if not row:
+    if not row or (expected_revision is not None and row['revision'] != expected_revision):
         return
     users = []
     try:
@@ -424,12 +430,20 @@ def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_
         else (row['preview_agent'] if 'preview_agent' in row.keys() else '')
     )
     path = clean(transcript_path or '', 500) if transcript_path else (row['transcript_path'] if 'transcript_path' in row.keys() else '')
+    baseline_mtime = row['preview_mtime']
+    if (user or agent) and path:
+        try:
+            baseline_mtime = Path(path).stat().st_mtime
+        except OSError:
+            pass
     with con:
         con.execute(
-            '''UPDATE panes SET preview_users=?, preview_agent=?, transcript_path=CASE
+            '''UPDATE panes SET preview_users=?, preview_agent=?, preview_revision=?, preview_mtime=?, transcript_path=CASE
                 WHEN ?<>'' THEN ? ELSE transcript_path END
-               WHERE socket=? AND pane=? AND pid=?''',
-            (json.dumps(users, ensure_ascii=False), agent_text or '', path, path, sock, pane, pid),
+               WHERE socket=? AND pane=? AND pid=? AND revision=?''',
+            (json.dumps(users, ensure_ascii=False), agent_text or '',
+             row['revision'] if agent and str(agent).strip() else row['preview_revision'],
+             baseline_mtime, path, path, sock, pane, pid, row['revision']),
         )
 
 
@@ -458,7 +472,7 @@ def resolve_transcript_path(con, row, meta):
     return path if path and Path(path).is_file() else ''
 
 
-def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS):
+def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS, snapshot=False):
     """Cached preview, refreshed from transcript when the file changes.
 
     Store a long cache; callers choose card (short) vs sheet (full) clip length.
@@ -469,9 +483,12 @@ def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS):
     except (TypeError, ValueError):
         users = []
     agent_text = (row['preview_agent'] if 'preview_agent' in row.keys() else '') or ''
+    preview_revision = row['preview_revision'] if 'preview_revision' in row.keys() else 0
     cached_mtime = float(row['preview_mtime'] if 'preview_mtime' in row.keys() else 0) or 0
     path = resolve_transcript_path(con, row, meta)
-    if path:
+    # A hook's current result is authoritative; a lagging transcript must not replace it.
+    if path and not (row['state'] == 'IDLE' and row['needs_review']
+                     and preview_revision == row['revision'] and agent_text):
         try:
             mtime = Path(path).stat().st_mtime
         except OSError:
@@ -485,22 +502,38 @@ def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS):
         if mtime and (force_full or stale_clip or mtime != cached_mtime or not (users or agent_text)):
             parsed = conversation_preview(path, row.get('agent') or '', limit=PREVIEW_CHARS_FULL)
             if parsed['users'] or parsed['agent']:
+                # Only forward progress in an identified transcript may confirm a turn.
+                # Cwd-based discovery remains useful for display, but isn't proof of ownership.
+                mapping = con.execute('SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
+                                      (row['socket'], row['pane'], row['pid'])).fetchone()
+                bound_path = path == row.get('transcript_path') or bool(mapping and path == mapping['rollout_path'])
+                forward_users = not users or parsed['users'] == users or any(
+                    users[-overlap:] == parsed['users'][:overlap] and len(parsed['users']) > overlap
+                    for overlap in range(1, len(users) + 1)
+                )
+                advanced = parsed['agent'] != agent_text or parsed['users'] != users
+                verified = (row['state'] == 'IDLE' and bool(row['needs_review']) and bool(parsed['agent'])
+                            and bound_path and mtime > cached_mtime and forward_users and advanced)
+                preview_revision = row['revision'] if verified else 0
                 users, agent_text = parsed['users'], parsed['agent']
                 with con:
-                    con.execute(
-                        '''UPDATE panes SET preview_users=?, preview_agent=?, preview_mtime=?,
-                           transcript_path=CASE WHEN transcript_path='' OR transcript_path IS NULL THEN ? ELSE transcript_path END
-                           WHERE socket=? AND pane=? AND pid=?''',
-                        (json.dumps(users, ensure_ascii=False), agent_text, mtime, path,
-                         row['socket'], row['pane'], row['pid']),
+                    updated = con.execute(
+                        '''UPDATE panes SET preview_users=?, preview_agent=?, preview_mtime=?, preview_revision=?
+                           WHERE socket=? AND pane=? AND pid=? AND revision=?
+                           AND preview_revision=?''',
+                        (json.dumps(users, ensure_ascii=False), agent_text, mtime, preview_revision,
+                         row['socket'], row['pane'], row['pid'], row['revision'], row['preview_revision']),
                     )
-    return {
+                    if not updated.rowcount:
+                        preview_revision = 0
+    preview = {
         'users': [clip_preview(text, limit) for text in users[-PREVIEW_USERS:] if str(text).strip()],
         'agent': clip_preview(agent_text, limit) if agent_text else '',
     }
+    return (preview, preview_revision) if snapshot else preview
 
 
-def local_preview_for_pane(con, pane, pid, limit=PREVIEW_CHARS_FULL):
+def local_preview_for_pane(con, pane, pid, limit=PREVIEW_CHARS_FULL, snapshot=False):
     """Resolve a live tracked pane and return a (longer) conversation preview."""
     sock = resolve_socket()
     live = live_panes(sock)
@@ -514,7 +547,19 @@ def local_preview_for_pane(con, pane, pid, limit=PREVIEW_CHARS_FULL):
     if not row:
         return None, 'pane is not tracked'
     item = dict(row) | meta
-    return pane_conversation_preview(con, item, meta, limit=limit), None
+    if snapshot:
+        preview, preview_revision = pane_conversation_preview(con, item, meta, limit=limit, snapshot=True)
+    else:
+        preview = pane_conversation_preview(con, item, meta, limit=limit)
+    if not snapshot:
+        return preview, None
+    current = con.execute('SELECT revision FROM panes WHERE socket=? AND pane=? AND pid=?',
+                          (sock, pane, pid)).fetchone()
+    if not current or current['revision'] != row['revision']:
+        return None, 'content changed; refresh preview'
+    return {'preview': preview, 'revision': row['revision'],
+            'viewable': row['state'] == 'IDLE' and bool(row['needs_review'])
+            and preview_revision == row['revision'] and bool(preview['agent'].strip())}, None
 
 
 def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event_time=None, event_key="", replace_identity=False, source='hook'):
@@ -538,7 +583,7 @@ def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event
             else:
                 con.execute("UPDATE panes SET last_event_time=?,event_key=CASE WHEN ?<>'' THEN ? ELSE event_key END WHERE socket=? AND pane=? AND pid=?",
                             (stamp,event_key,event_key,sock,pane,pid))
-            return
+            return old['revision']
         became_wait = state == 'WAIT' and (not old or old['state'] != 'WAIT' or old['revision'] <= old['acknowledged'])
         con.execute('''INSERT INTO panes(socket,pane,pid,agent,state,reason,updated,revision,needs_review,event_key,last_event_time,source)
             VALUES(?,?,?,?,?,?,?,1,?,?,?,?) ON CONFLICT(socket,pane,pid) DO UPDATE SET
@@ -546,8 +591,11 @@ def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event
             updated=excluded.updated,revision=panes.revision+1,needs_review=excluded.needs_review,event_key=excluded.event_key,last_event_time=excluded.last_event_time,source=excluded.source''',
             (sock, pane, pid, agent, state, reason,stamp,int(needs_review),event_key,stamp,source))
         notify = became_wait
+        revision = con.execute('SELECT revision FROM panes WHERE socket=? AND pane=? AND pid=?',
+                               (sock, pane, pid)).fetchone()['revision']
     if notify:
         maybe_notify_wait(agent, reason, pane)
+    return revision
 
 
 def classify(agent, event, data):
@@ -804,6 +852,7 @@ def event_command(agent, event):
                     register_codex_session(con,sock,pane,pid,data)
                 # Reattaching/restarting must not discard an unread completion.
                 existing = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock,pane,pid)).fetchone()
+                recorded_revision = None
                 if event in ('SessionEnd','session_shutdown','sessionEnd') and existing:
                     if existing['needs_review']:
                         # Keep an unread completed response after the agent exits.
@@ -812,7 +861,7 @@ def event_command(agent, event):
                         state = ('IDLE', 'Agent exited; review current work', True)
                 if event not in ('SessionStart','session_start','sessionStart') or not existing:
                     if state:
-                        record(con, sock, pane, pid, agent, *state,event_key=(data.get('generation_id','') if agent == 'cursor' else data.get('turn_id','')))
+                        recorded_revision = record(con, sock, pane, pid, agent, *state,event_key=(data.get('generation_id','') if agent == 'cursor' else data.get('turn_id','')))
                 user_text = hook_user_text(data) if event in (
                     'UserPromptSubmit', 'beforeSubmitPrompt', 'agent_start',
                 ) else ''
@@ -828,6 +877,7 @@ def event_command(agent, event):
                         user=user_text or None,
                         agent=agent_text or None,
                         transcript_path=transcript or None,
+                        expected_revision=recorded_revision,
                     )
     except Exception as exc:
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -859,19 +909,23 @@ def items(con, sock, live, all_states=False, now=None):
             continue
         item = dict(row) | meta
         running += row['state'] == 'RUNNING'
-        pending = (row['state'] == 'WAIT' or bool(row['needs_review'])) and row['revision'] > row['acknowledged']
+        reviewable = row['state'] == 'WAIT' or bool(row['needs_review'])
+        item['unread'] = reviewable and row['revision'] > row['acknowledged']
+        item['reviewed'] = reviewable and not item['unread']
+        pending = item['unread']
         snoozed = row['snoozed_revision'] == row['revision'] and row['snoozed_until'] > now
         # Allow immediate continuation hooks to settle before showing completion.
         stable = not row['needs_review'] or now - row['updated'] >= 2
         item['pending'] = pending and not snoozed and stable
         if item['pending'] or all_states:
             result.append(item)
-    result.sort(key=lambda x: (0 if x['pending'] and x['state'] == 'WAIT' else 1 if x['pending'] else 2, x['updated'], x['pane']))
+    result.sort(key=lambda x: (0 if x['pending'] and x['state'] == 'WAIT' else 1 if x['pending'] else 2, -x['updated'], x['pane']))
     return result, running
 
 
 def acknowledge(con, item, seconds=0):
-    with con:
+    # Navigation serializes cursor changes and confirmation in one transaction.
+    with (nullcontext() if con.in_transaction else con):
         if seconds:
             con.execute('UPDATE panes SET snoozed_revision=?,snoozed_until=? WHERE socket=? AND pane=? AND pid=? AND revision=?',
                         (item['revision'], time.time()+seconds, item['socket'], item['pane'], item['pid'], item['revision']))
@@ -888,18 +942,21 @@ def status_groups(rows):
     for row in rows:
         category = ('wait' if row['state'] == 'WAIT' else
                     'running' if row['state'] == 'RUNNING' else
-                    'review' if row['pending'] else 'idle')
+                    'review' if row.get('needs_review') or row['pending'] else 'idle')
         groups[category].append(row)
     for group in groups.values():
-        # State timestamps change while agents work; navigation order must not.
+        # Keep stable navigation for working/waiting panes; review follows recency below.
         group.sort(key=lambda row:(row['session'],int(row['window_id'][1:]),int(row['pane'][1:])))
+    groups['review'].sort(key=lambda row: (not row.get('unread', row['pending']),
+                                          -float(row.get('updated') or 0), row['pane']))
     return groups
 
 
 def status_text(groups, clickable=False):
     labels = []
     for index,(key,emoji) in enumerate(STATUS_GROUPS):
-        label = f'{emoji} {len(groups[key])}'
+        count = sum(row.get('unread', row['pending']) for row in groups[key]) if key == 'review' else len(groups[key])
+        label = f'{emoji} {count}'
         if clickable:
             label = f'#[range=control|{index}]'+label+'#[norange]'
         labels.append(label)
@@ -922,7 +979,7 @@ def cycle_category(con, sock, client, category):
         previous = tuple(cursor) if cursor else None
         index = (identities.index(previous)+1)%len(group) if previous in identities else 0
         target = group[index]
-        if jump(target,client):
+        if jump_and_acknowledge(con,target,client):
             con.execute('''INSERT INTO cycle_cursors(socket,client,category,pane,pid) VALUES(?,?,?,?,?)
                 ON CONFLICT(socket,client,category) DO UPDATE SET pane=excluded.pane,pid=excluded.pid''',
                 (sock,client,category,target['pane'],target['pid']))
@@ -931,7 +988,7 @@ def cycle_category(con, sock, client, category):
 def window_badge(rows):
     if any(x['state'] == 'WAIT' for x in rows):
         return '🙋'
-    if any(x['state'] == 'IDLE' and x['pending'] for x in rows):
+    if any(x['state'] == 'IDLE' and x.get('unread', x['pending']) for x in rows):
         return '👀'
     if any(x['state'] == 'RUNNING' for x in rows):
         return '🏃'
@@ -1016,6 +1073,15 @@ def jump(item, client=None):
     return True
 
 
+def jump_and_acknowledge(con, item, client=None):
+    """Confirm only the completion version selected before a successful jump."""
+    if not jump(item, client):
+        return False
+    if item['state'] == 'IDLE' and item.get('needs_review'):
+        acknowledge(con, item)
+    return True
+
+
 def age(stamp):
     seconds = max(0, int(time.time()-stamp))
     return f'{seconds//3600}h' if seconds >= 3600 else f'{seconds//60}m' if seconds >= 60 else f'{seconds}s'
@@ -1083,8 +1149,8 @@ def agent_sort_key(row):
     fresh = -float(row.get('updated') or 0)
     if row['state'] == 'WAIT':
         return (0, fresh, host, row['pane'])
-    if row.get('pending'):
-        return (1, fresh, host, row['pane'])
+    if row.get('needs_review') or row.get('pending'):
+        return (1, not row.get('unread', row.get('pending', False)), fresh, host, row['pane'])
     if row['state'] == 'RUNNING':
         return (2, fresh, host, row['pane'])
     return (3, fresh, host, row['pane'])
@@ -1177,7 +1243,7 @@ def fetch_peer_agents(url, timeout=1.5):
 
 
 def empty_summary():
-    return {'wait': 0, 'review': 0, 'running': 0, 'idle': 0, 'tracked': 0, 'untracked': 0}
+    return {'wait': 0, 'review': 0, 'review_seen': 0, 'running': 0, 'idle': 0, 'tracked': 0, 'untracked': 0}
 
 
 def merge_summaries(parts):
@@ -1333,6 +1399,11 @@ def agents_payload(con, sock=None, live=None, now=None):
             'dirty': bool(env['dirty']),
             'state': row['state'],
             'pending': bool(row['pending']),
+            'needs_review': bool(row['needs_review']),
+            'unread': bool(row['unread']),
+            'reviewed': bool(row['reviewed']),
+            'revision': row['revision'],
+            'acknowledged': row['acknowledged'],
             'emoji': agent_emoji(row),
             'severity': agent_severity(row),
             'source': (row['source'] if 'source' in row.keys() else 'hook') or 'hook',
@@ -1377,7 +1448,8 @@ def agents_payload(con, sock=None, live=None, now=None):
         'ok': True,
         'summary': {
             'wait': len(groups['wait']),
-            'review': len(groups['review']),
+            'review': sum(row['unread'] for row in groups['review']),
+            'review_seen': sum(not row['unread'] for row in groups['review']),
             'running': len(groups['running']),
             'idle': len(groups['idle']),
             'tracked': len(rows),
@@ -1388,7 +1460,9 @@ def agents_payload(con, sock=None, live=None, now=None):
 
 
 def grouped_rows(rows):
-    return sorted(rows, key=lambda x: (('WAIT', 'IDLE', 'RUNNING').index(x['state']), not x['pending'], x['updated'], x['pane']))
+    return sorted(rows, key=lambda x: (('WAIT', 'IDLE', 'RUNNING').index(x['state']),
+                                      not x.get('needs_review', False) if x['state'] == 'IDLE' else False,
+                                      not x.get('unread', x['pending']), -x['updated'], x['pane']))
 
 
 def display_reason(item, reviewed):
@@ -1415,12 +1489,18 @@ def display_reason(item, reviewed):
 
 def inbox_lines(rows):
     lines = []
-    for state, title in [('WAIT', '🙋 等待回覆'), ('IDLE', '💤 閒置'), ('RUNNING', '🏃 工作進行中')]:
-        group = [x for x in rows if x['state'] == state]
+    groups = [
+        ('🙋 等待回覆', [x for x in rows if x['state'] == 'WAIT']),
+        ('👀 待看 · 未看', [x for x in rows if x['state'] == 'IDLE' and x.get('needs_review') and x['unread']]),
+        ('👀 待看 · 已看', [x for x in rows if x['state'] == 'IDLE' and x.get('needs_review') and not x['unread']]),
+        ('💤 閒置', [x for x in rows if x['state'] == 'IDLE' and not x.get('needs_review')]),
+        ('🏃 工作進行中', [x for x in rows if x['state'] == 'RUNNING']),
+    ]
+    for title, group in groups:
         lines.append((None, f'── {title} ({len(group)}) ──'))
         for item in group:
             identity = (item['pane'], item['pid'])
-            reviewed = item['revision'] <= item['acknowledged'] and (state == 'WAIT' or item['needs_review'])
+            reviewed = item['reviewed']
             label = window_badge([item])
             if reviewed:
                 label += ' · 已查看'
@@ -1454,7 +1534,7 @@ def sidebar(win, popup=False, client=None):
         rows, running = items(con, sock, live, show_all)
         rows = grouped_rows(rows)
         registered, _ = items(con, sock, live, True)
-        idle = sum(x['state'] == 'IDLE' for x in registered)
+        idle = sum(x['state'] == 'IDLE' and not x['needs_review'] for x in registered)
         ids = [(x['pane'], x['pid']) for x in rows]
         if selected not in ids:
             selected = ids[0] if ids else None
@@ -1463,8 +1543,8 @@ def sidebar(win, popup=False, client=None):
         win.erase()
         draw(win, 0, 1, '待處理清單', curses.A_BOLD)
         waiting = sum(x['state'] == 'WAIT' for x in registered)
-        review = sum(x['pending'] and x['state'] == 'IDLE' for x in rows)
-        draw(win, 1, 1, f'🙋 {waiting} · 👀 {review} · 🏃 {running} · 💤 {idle-review}', curses.A_BOLD)
+        review = sum(x['unread'] and x['state'] == 'IDLE' for x in registered)
+        draw(win, 1, 1, f'🙋 {waiting} · 👀 {review} · 🏃 {running} · 💤 {idle}', curses.A_BOLD)
         draw(win, 2, 1, '全部 agent · 👀 表示尚未查看' if show_all else '僅顯示待處理項目')
         lines = inbox_lines(rows)
         slots = max(1, (h//2 if preview else h-4)-4)
@@ -1514,8 +1594,8 @@ def sidebar(win, popup=False, client=None):
         elif key in (10,13,curses.KEY_ENTER) and rows:
             try:
                 target_client = client or tmux('display-message', '-p', '-t', os.environ['TMUX_PANE'], '#{client_name}')
-                jump(rows[index], target_client or None)
-                if popup:
+                jumped = jump_and_acknowledge(con, rows[index], target_client or None)
+                if popup and jumped:
                     con.close()
                     return
             except RuntimeError as exc:
@@ -1681,12 +1761,66 @@ def dispatch_preview(payload):
             return 502, {'ok': False, 'error': f'peer preview failed: {type(exc).__name__}'}
     try:
         with closing(db()) as con:
-            preview, error = local_preview_for_pane(con, pane, pid)
+            snapshot, error = local_preview_for_pane(con, pane, pid, snapshot=True)
     except Exception as exc:
         return 500, {'ok': False, 'error': f'{type(exc).__name__}'}
     if error:
         return 409, {'ok': False, 'error': error}
-    return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, 'preview': preview}
+    return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, **snapshot}
+
+
+def dispatch_ack(payload):
+    """Persist the displayed version on its owning host, never a newer version."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    pane = clean(payload.get('pane') or '')
+    pid = clean(str(payload.get('pid') or ''))
+    host = clean(payload.get('host') or '')
+    revision = payload.get('revision')
+    if not pane or not pid or type(revision) is not int or revision < 1:
+        return 400, {'ok': False, 'error': 'pane, pid, and positive integer revision are required'}
+    local = local_host_name()
+    if host and host != local and not payload.get('_local_only'):
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, {'ok': False, 'error': f'unknown host {host}'}
+        try:
+            request = Request(peer['url'].rstrip('/') + '/api/ack',
+                              data=json.dumps({'pane': pane, 'pid': pid, 'revision': revision,
+                                               '_local_only': True}).encode(),
+                              headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                              method='POST')
+            with urlopen(request, timeout=3) as response:
+                data = json.loads(response.read().decode())
+            return (200 if data.get('ok') else 502), data
+        except HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read().decode())
+            except (ValueError, UnicodeError):
+                return 502, {'ok': False, 'error': f'peer acknowledgement failed: HTTP {exc.code}'}
+        except Exception as exc:
+            return 502, {'ok': False, 'error': f'peer acknowledgement failed: {type(exc).__name__}'}
+    try:
+        sock = resolve_socket()
+        if (pane, pid) not in live_panes(sock):
+            return 409, {'ok': False, 'error': 'pane is not live'}
+        with closing(db()) as con, con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',
+                              (sock, pane, pid)).fetchone()
+            if not row:
+                return 409, {'ok': False, 'error': 'pane is not tracked'}
+            if revision > row['revision']:
+                return 409, {'ok': False, 'error': 'revision is newer than current content'}
+            if row['state'] != 'WAIT' and not row['needs_review']:
+                return 409, {'ok': False, 'error': 'pane has no reviewable result'}
+            acknowledge(con, dict(row) | {'revision': revision})
+            saved = max(row['acknowledged'], revision)
+            return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local,
+                         'revision': row['revision'], 'acknowledged': saved,
+                         'unread': saved < row['revision'], 'reviewed': saved >= row['revision']}
+    except Exception as exc:
+        return 500, {'ok': False, 'error': type(exc).__name__}
 
 
 def dispatch_peer_register(payload):
@@ -1802,6 +1936,14 @@ def make_web_handler(fleet_only=False):
                 code, body = dispatch_preview(payload)
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
+            if path == '/api/ack':
+                if fleet_only and not payload.get('host'):
+                    self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
+                               'application/json; charset=utf-8')
+                    return
+                code, body = dispatch_ack(payload)
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
             self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
 
     return Handler
@@ -1914,7 +2056,7 @@ def main():
             elif args.command == 'dump':
                 print(json.dumps(rows, ensure_ascii=False, indent=2))
             elif rows:
-                jump(rows[0], args.args[0] if args.args else None)
+                jump_and_acknowledge(con, rows[0], args.args[0] if args.args else None)
 
 
 if __name__ == '__main__':

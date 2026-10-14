@@ -245,6 +245,7 @@
       letter-spacing: 0.02em;
       color: var(--muted);
     }
+    .stat .secondary { margin-top: 3px; font-size: 0.68rem; color: var(--muted); }
     .hosts {
       display: flex;
       flex-wrap: wrap;
@@ -363,6 +364,11 @@
       background: color-mix(in srgb, var(--review) 16%, transparent);
       opacity: 1;
     }
+    .review-group { display: flex; gap: 8px; margin: 6px 0 0; font-size: 0.72rem; color: var(--muted); }
+    .review-group.unread { color: var(--review); }
+    .review-state { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 500; color: var(--muted); }
+    .review-state.unread { color: var(--review); font-weight: 600; }
+    .review-state.unread::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
     .card {
       background: var(--card);
       border-radius: var(--radius);
@@ -382,11 +388,11 @@
       background: color-mix(in srgb, var(--accent) 6%, var(--card));
     }
     .card.wait { border-left-color: var(--wait); }
-    .card.review {
+    .card.review.unread {
       border-left-color: var(--review);
       background: color-mix(in srgb, var(--review) 7%, var(--card));
     }
-    .card.review.newest {
+    .card.review.unread.newest {
       box-shadow: 0 0 0 1px color-mix(in srgb, var(--review) 40%, transparent);
       background: color-mix(in srgb, var(--review) 11%, var(--card));
     }
@@ -535,11 +541,11 @@
       max-height: 4.9em;
       overflow: hidden;
     }
-    .card.review .preview-line.agent .text {
+    .card.review.unread .preview-line.agent .text {
       -webkit-line-clamp: 4;
       color: color-mix(in srgb, var(--fg) 78%, var(--muted));
     }
-    .card.review .preview-line.agent .text.md {
+    .card.review.unread .preview-line.agent .text.md {
       -webkit-line-clamp: unset;
       max-height: 6.6em;
       color: color-mix(in srgb, var(--fg) 78%, var(--muted));
@@ -966,6 +972,7 @@
       <div class="sheet-env" id="sheet-env" hidden></div>
       <div class="sheet-reason" id="sheet-reason"></div>
       <div class="sheet-preview" id="sheet-preview"></div>
+      <button type="button" class="host-pill" id="sheet-refresh">重新整理內容</button>
       <form class="sheet-compose" id="sheet-form">
         <textarea id="sheet-text" placeholder="輸入訊息，或按麥克風語音輸入" enterkeyhint="send"></textarea>
         <div class="sheet-actions">
@@ -1021,7 +1028,10 @@
     let sheetPreviewKey = '';
     let sheetPreviewFull = false;
     let sheetPreviewUpdated = 0;
+    let sheetPreviewRevision = 0;
     let sheetPreviewToken = 0;
+    const acknowledgedVersions = new Map();
+    const acknowledgementsInFlight = new Set();
     let recognition = null;
     let listening = false;
     let speechBase = '';
@@ -1064,8 +1074,13 @@
       if (!agent.tracked || agent.state === 'SHELL') return 'shell';
       if (agent.state === 'WAIT') return 'wait';
       if (agent.state === 'RUNNING') return 'running';
-      if (agent.pending) return 'review';
+      if (agent.needs_review ?? agent.pending) return 'review';
       return 'idle';
+    }
+    function isUnread(agent) {
+      const acknowledged = Math.max(Number(agent.acknowledged) || 0, acknowledgedVersions.get(agentKey(agent)) || 0);
+      if (Number.isInteger(agent.revision) && agent.revision > 0) return agent.revision > acknowledged;
+      return agent.unread ?? agent.pending ?? !agent.reviewed;
     }
     function renderMarkdown(text) {
       const raw = String(text ?? '');
@@ -1123,18 +1138,24 @@
       const cat = category(a);
       const errorClass = a.severity === 'error' ? ' error' : '';
       const newestClass = opts.newest ? ' newest' : '';
+      const reviewed = cat === 'review' && !isUnread(a);
+      const emoji = reviewed ? '✓' : a.emoji;
+      const reason = reviewed ? String(a.reason || '').replace('尚未查看', '已查看') : a.reason;
+      const reviewClass = cat === 'review' ? (reviewed ? ' reviewed' : ' unread') : '';
+      const reviewState = cat === 'review' ? `<span class="review-state${isUnread(a) ? ' unread' : ''}">${isUnread(a) ? '未看' : '已看'}</span>` : '';
       const selected = agentKey(a) === selectedKey ? ' selected' : '';
       const selectable = a.tracked ? ' tabindex="0" role="button"' : '';
-      return `<article class="card ${cat}${newestClass}${errorClass}${selected}" data-key="${escapeHtml(agentKey(a))}"${selectable}>
+      return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}" data-key="${escapeHtml(agentKey(a))}"${selectable}>
         <div class="row1">
           <div class="title">
-            <span class="emoji" aria-hidden="true">${a.emoji}</span>
+            <span class="emoji" aria-hidden="true">${emoji}</span>
             <span class="project">${escapeHtml(a.project || a.window || '未命名專案')}</span>
+            ${reviewState}
           </div>
           <div class="age">${escapeHtml(a.age)}</div>
         </div>
         ${envLineHtml(a)}
-        <div class="reason">${escapeHtml(a.reason)}</div>
+        <div class="reason">${escapeHtml(reason)}</div>
         ${previewHtml(a.preview)}
       </article>`;
     }
@@ -1165,6 +1186,7 @@
       sheetPreviewKey = '';
       sheetPreviewFull = false;
       sheetPreviewUpdated = 0;
+      sheetPreviewRevision = 0;
       sheetPreviewToken += 1;
       document.getElementById('sheet-root').hidden = true;
       document.body.classList.remove('sheet-open');
@@ -1172,6 +1194,7 @@
       document.getElementById('sheet-status').textContent = '';
       document.getElementById('sheet-status').className = 'sheet-feedback';
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
+      if (latestPayload) render(latestPayload);
     }
     function emptyPreviewHtml() {
       return '<div class="preview-line agent"><span class="who">—</span><span class="text">尚無對話預覽</span></div>';
@@ -1202,7 +1225,7 @@
           body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid }),
         });
         const data = await res.json();
-        if (token !== sheetPreviewToken || selectedKey !== key) return;
+        if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== key) return;
         if (!res.ok || !data.ok) {
           const status = document.getElementById('sheet-status');
           if (status && !status.textContent) {
@@ -1215,12 +1238,53 @@
         sheetPreviewFull = true;
         sheetPreviewKey = key;
         sheetPreviewUpdated = agent.updated || 0;
+        sheetPreviewRevision = data.revision || 0;
+        document.getElementById('sheet-refresh').textContent = '重新整理內容';
+        if (data.viewable === false && category(agent) === 'review' && isUnread(agent)) {
+          const status = document.getElementById('sheet-status');
+          if (!status.textContent) {
+            status.className = 'sheet-feedback';
+            status.textContent = '最新內容尚未就緒，請稍後重新整理。';
+          }
+        }
+        if (data.viewable && Number.isInteger(data.revision) && data.revision > 0) {
+          // Let the rendered content reach the screen before acknowledging its exact version.
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          if (!sheetOpen || document.visibilityState === 'hidden' || token !== sheetPreviewToken || selectedKey !== key) return;
+          await acknowledgePreview(agent, data.revision, token);
+        }
       } catch (e) {
+        if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== key) return;
         const status = document.getElementById('sheet-status');
         if (status && !status.textContent) {
           status.className = 'sheet-feedback bad';
           status.textContent = '預覽載入失敗';
         }
+      }
+    }
+    async function acknowledgePreview(agent, revision, token) {
+      const key = agentKey(agent);
+      const attempt = `${key}|${revision}`;
+      const acknowledged = Math.max(Number(agent.acknowledged) || 0, acknowledgedVersions.get(key) || 0);
+      if (revision <= acknowledged || acknowledgementsInFlight.has(attempt)) return;
+      acknowledgementsInFlight.add(attempt);
+      try {
+        const res = await fetch('/api/ack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, revision }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        acknowledgedVersions.set(key, Math.max(acknowledgedVersions.get(key) || 0, revision));
+        if (latestPayload) render(latestPayload);
+      } catch (_) {
+        if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== key) return;
+        const status = document.getElementById('sheet-status');
+        status.className = 'sheet-feedback bad';
+        status.textContent = '已看狀態儲存失敗，請重新整理內容重試。';
+      } finally {
+        acknowledgementsInFlight.delete(attempt);
       }
     }
     function fillSheet(agent, { refreshPreview = true } = {}) {
@@ -1233,6 +1297,8 @@
       sheetPreviewKey = '';
       sheetPreviewFull = false;
       sheetPreviewUpdated = 0;
+      sheetPreviewRevision = 0;
+      document.getElementById('sheet-refresh').textContent = '重新整理內容';
       fillSheet(agent, { refreshPreview: true });
       document.getElementById('sheet-status').textContent = '';
       document.getElementById('sheet-status').className = 'sheet-feedback';
@@ -1260,10 +1326,11 @@
         closeSheet();
         return;
       }
-      fillSheetMeta(agent);
-      if (!sheetPreviewFull || (agent.updated || 0) !== sheetPreviewUpdated) {
-        loadSheetPreview(agent);
-      }
+      // Polling updates the list, but does not replace content the user is reading.
+      const newer = sheetPreviewFull && (sheetPreviewRevision
+        ? (agent.revision || 0) > sheetPreviewRevision
+        : (agent.updated || 0) > sheetPreviewUpdated);
+      document.getElementById('sheet-refresh').textContent = newer ? '有新訊息 · 重新整理內容' : '重新整理內容';
     }
     function renderSummary(counts) {
       document.getElementById('summary').innerHTML = [
@@ -1272,17 +1339,21 @@
         ['running', '🏃', counts.running || 0, '進行中'],
         ['idle', '💤', counts.idle || 0, '閒置'],
       ].map(([key, e, n, l]) => {
-        const disabled = n === 0 ? ' disabled' : '';
+        const seen = key === 'review' ? counts.reviewed || 0 : 0;
+        const disabled = n + seen === 0 ? ' disabled' : '';
         const active = activeGroup === key ? ' active' : '';
-        const title = n === 0 ? '目前沒有此狀態' : `跳到${l}`;
-        return `<button type="button" class="stat${active}" data-group="${key}"${disabled} title="${title}" aria-label="${title}"><div class="n">${e} ${n}</div><div class="l">${l}</div></button>`;
+        const title = n + seen === 0 ? '目前沒有此狀態' : `跳到${l}`;
+        const ariaLabel = key === 'review' ? `${title}，未看 ${n}，已看 ${seen}` : title;
+        const secondary = key === 'review' && seen ? `<div class="secondary">已看 ${seen}</div>` : '';
+        return `<button type="button" class="stat${active}" data-group="${key}"${disabled} title="${title}" aria-label="${ariaLabel}"><div class="n">${e} ${n}</div><div class="l">${l}</div>${secondary}</button>`;
       }).join('');
     }
     function visibleSummaryCounts(agents) {
-      const counts = { wait: 0, review: 0, running: 0, idle: 0 };
+      const counts = { wait: 0, review: 0, reviewed: 0, running: 0, idle: 0 };
       for (const a of agents) {
         const key = category(a);
-        if (key in counts) counts[key] += 1;
+        if (key === 'review' && !isUnread(a)) counts.reviewed += 1;
+        else if (key in counts) counts[key] += 1;
       }
       return counts;
     }
@@ -1358,8 +1429,14 @@
       list.innerHTML = SECTIONS.map(([key, title]) => {
         const rows = grouped[key];
         if (!rows.length) return '';
-        return `<div class="section" id="group-${key}" data-group="${key}"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>` +
-          rows.map((a, i) => cardHtml(a, { newest: key === 'review' && i === 0 })).join('');
+        const heading = `<div class="section" id="group-${key}" data-group="${key}"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>`;
+        if (key !== 'review') return heading + rows.map(a => cardHtml(a)).join('');
+        return heading + [true, false].map(unread => {
+          const subgroup = rows.filter(a => isUnread(a) === unread);
+          if (!subgroup.length) return '';
+          return `<div class="review-group${unread ? ' unread' : ''}" data-review="${unread ? 'unread' : 'reviewed'}"><span>${unread ? '未看' : '已看'}</span><span>${subgroup.length}</span></div>` +
+            subgroup.map((a, i) => cardHtml(a, { newest: unread && i === 0 })).join('');
+        }).join('');
       }).join('');
       syncSheetFromData();
     }
@@ -1444,6 +1521,12 @@
     });
     document.getElementById('sheet-scrim').addEventListener('click', closeSheet);
     document.getElementById('sheet-close').addEventListener('click', closeSheet);
+    document.getElementById('sheet-refresh').addEventListener('click', () => {
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      if (!sheetOpen || !agent) return;
+      document.getElementById('sheet-status').textContent = '';
+      fillSheet(agent);
+    });
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape' && sheetOpen) closeSheet();
     });

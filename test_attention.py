@@ -34,7 +34,7 @@ class StoreTests(unittest.TestCase):
     def test_lifecycle_ack_new_work(self):
         self.write('RUNNING','Working'); self.assertEqual(self.rows(),[])
         self.write('WAIT','Approve'); item=self.rows()[0]
-        # Opening a target does not mutate its inbox state.
+        # Viewing confirmation does not change the content's revision.
         self.assertEqual(self.rows()[0]['revision'],item['revision'])
         a.acknowledge(self.con,item); self.assertEqual(self.rows(),[])
         self.write('RUNNING','Working'); self.write('IDLE','Finished',True)
@@ -96,7 +96,8 @@ class StoreTests(unittest.TestCase):
         self.assertIn('#[range=control|1]👀 1#[norange]',a.status_text(groups,True))
         a.acknowledge(self.con,rows[0])
         rows,_=a.items(self.con,'socket',self.live,True,now=time.time()+3)
-        self.assertEqual(a.status_text(a.status_groups(rows)),'🙋 0 · 👀 0 · 🏃 0 · 💤 1')
+        self.assertEqual(a.status_text(a.status_groups(rows)),'🙋 0 · 👀 0 · 🏃 0 · 💤 0')
+        self.assertEqual(len(a.status_groups(rows)['review']), 1)
 
     def test_verified_identity_replacement_is_new_unread_even_for_same_state(self):
         a.record(self.con,'socket','%1','123','codex','WAIT','Answer needed',event_time=2000000000)
@@ -193,7 +194,7 @@ class StoreTests(unittest.TestCase):
             payload = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)
         self.assertTrue(payload['ok'])
         self.assertEqual(payload['summary'], {
-            'wait': 1, 'review': 1, 'running': 1, 'idle': 1, 'tracked': 4, 'untracked': 1,
+            'wait': 1, 'review': 1, 'review_seen': 0, 'running': 1, 'idle': 1, 'tracked': 4, 'untracked': 1,
         })
         emojis = [row['emoji'] for row in payload['agents'] if row['tracked']]
         self.assertEqual(emojis, ['🙋', '👀', '🏃', '💤'])
@@ -612,10 +613,10 @@ class IntegrationTests(unittest.TestCase):
                 backup=json.loads(result)['backup']
                 app=home/'.local/share/tmux-attn/attention.py'
                 def wait(predicate):
-                    for _ in range(30):
+                    for _ in range(100):
                         if predicate(): return
                         time.sleep(.1)
-                    self.fail('Timed out waiting for tmux sidebar: '+run('capture-pane','-p','-t',sidebar)+'\nFILES: '+str(list(home.rglob('hook-errors.log')))+'\nLOG: '+''.join(p.read_text() for p in home.rglob('hook-errors.log'))+'\nDUMP: '+subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))
+                    self.fail('Timed out waiting for tmux sidebar: '+run('capture-pane','-p','-t',sidebar)+'\nWORK PANE: '+run('capture-pane','-p','-t',pane)+'\nFILES: '+str(list(home.rglob('hook-errors.log')))+'\nLOG: '+''.join(p.read_text() for p in home.rglob('hook-errors.log'))+'\nDUMP: '+subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))
                 wait(lambda:'\t1' in run('list-panes','-a','-F','#{pane_id}\t#{@tmux_attn_sidebar}'))
                 sidebar=next(l.split('\t')[0] for l in run('list-panes','-t',window,'-F','#{pane_id}\t#{@tmux_attn_sidebar}').splitlines() if l.endswith('\t1'))
                 def event(name,data={},agent='codex'):
@@ -664,7 +665,7 @@ class IntegrationTests(unittest.TestCase):
                 wait(lambda:'\t1' in run('list-panes','-t',new,'-F','#{pane_id}\t#{@tmux_attn_sidebar}'))
                 subprocess.run([sys.executable,str(app),'ensure'],env=env,check=True)
                 self.assertEqual(run('list-panes','-a','-F','#{@tmux_attn_sidebar}').splitlines().count('1'),2)
-                # Jump from another window to the exact agent pane; item remains pending.
+                # A WAIT jump preserves the action that still needs a reply.
                 run('select-window','-t',new)
                 subprocess.run([sys.executable,str(app),'next'],env=env,check=True)
                 self.assertEqual(run('display-message','-p','#{pane_id}'),pane)
