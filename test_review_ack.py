@@ -4,6 +4,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import threading
@@ -466,6 +467,162 @@ class ReviewAcknowledgementTests(unittest.TestCase):
         a.record(self.con, 'socket', '%2', '456', 'codex', 'IDLE', 'Newest', True, event_time=200)
         pending, _ = a.items(self.con, 'socket', self.live, now=203)
         self.assertEqual([row['pane'] for row in pending], ['%2', '%1'])
+
+    def completed_codex_snapshot(self, *, stored_turn='turn-alpha', later_running=False):
+        def entry(timestamp, kind, **data):
+            return {'timestamp': datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+                    'type': 'event_msg', 'payload': {'type': kind} | data}
+
+        entries = [
+            entry(1098, 'task_started', turn_id='turn-alpha'),
+            entry(1098, 'user_message', message='Current task'),
+            entry(1099, 'agent_message', message='Current answer'),
+            entry(1100, 'task_complete', turn_id='turn-alpha', last_agent_message='Current answer'),
+        ]
+        if later_running:
+            entries.append(entry(1101, 'task_started', turn_id='turn-beta'))
+        path = Path(self.tmp.name) / 'rollout-completed.jsonl'
+        path.write_text(''.join(json.dumps(row) + '\n' for row in entries))
+        os.utime(path, (1100, 1100))
+        a.record(self.con, 'socket', '%1', '123', 'codex', 'RUNNING', 'Working', event_time=1098)
+        # A card poll cached the final text while the completion hook had not yet arrived.
+        with self.con:
+            self.con.execute('UPDATE panes SET transcript_path=?,preview_users=?,preview_agent=?,preview_mtime=?',
+                             (str(path), json.dumps(['Current task']), 'Current answer', 1100))
+        a.record(self.con, 'socket', '%1', '123', 'codex', 'IDLE', 'Completed', True,
+                 event_time=1100, event_key=stored_turn)
+        return path
+
+    def test_stable_completed_codex_snapshot_binds_matching_generation(self):
+        self.completed_codex_snapshot()
+        code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+        self.assertEqual(code, 200)
+        self.assertEqual(body['preview']['agent'], 'Current answer')
+        self.assertTrue(body['viewable'])
+        self.assertTrue(self.item()['unread'])
+
+    def test_stable_codex_snapshot_rejects_wrong_generation_or_later_start(self):
+        for stored_turn, later_running in [('turn-wrong', False), ('turn-alpha', True)]:
+            with self.subTest(stored_turn=stored_turn, later_running=later_running):
+                self.completed_codex_snapshot(stored_turn=stored_turn, later_running=later_running)
+                code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+                self.assertEqual(code, 200)
+                self.assertFalse(body['viewable'])
+                self.assertTrue(self.item()['unread'])
+
+    def completed_claude_snapshot(self, *, summary_time=1100.021, later_user=False):
+        def entry(timestamp, kind, **data):
+            return {'timestamp': datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+                    'type': kind, 'isSidechain': False, 'sessionId': 'root-session'} | data
+
+        entries = [
+            entry(1098, 'user', message={'role': 'user', 'content': 'Current task'}),
+            entry(summary_time - .241, 'assistant', message={'role': 'assistant', 'stop_reason': 'end_turn',
+                                               'content': [{'type': 'text', 'text': 'Current answer'}]}),
+            entry(summary_time, 'system', subtype='stop_hook_summary', preventedContinuation=False),
+        ]
+        if later_user:
+            entries.append(entry(1101, 'user', message={'role': 'user', 'content': 'New task'}))
+        path = Path(self.tmp.name) / 'claude-completed.jsonl'
+        path.write_text(''.join(json.dumps(row) + '\n' for row in entries))
+        os.utime(path, (1100.1, 1100.1))
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'RUNNING', 'Working', event_time=1098)
+        with self.con:
+            self.con.execute('UPDATE panes SET transcript_path=?,preview_users=?,preview_agent=?,preview_mtime=?',
+                             (str(path), json.dumps(['Current task']), 'Current answer', 1100.1))
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Completed', True, event_time=1100)
+        return path
+
+    def test_stable_completed_claude_snapshot_binds_matching_stop_marker(self):
+        self.completed_claude_snapshot()
+        code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+        self.assertEqual(code, 200)
+        self.assertEqual(body['preview']['agent'], 'Current answer')
+        self.assertTrue(body['viewable'])
+        self.assertTrue(self.item()['unread'])
+
+    def test_stable_claude_snapshot_rejects_old_stop_marker(self):
+        self.completed_claude_snapshot(summary_time=1090)
+        code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+        self.assertEqual(code, 200)
+        self.assertFalse(body['viewable'])
+        self.assertTrue(self.item()['unread'])
+
+    def test_claude_stop_marker_before_current_completion_cannot_bind(self):
+        self.completed_claude_snapshot(summary_time=1099.5)
+        code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+        self.assertEqual(code, 200)
+        self.assertFalse(body['viewable'])
+        self.assertTrue(self.item()['unread'])
+
+    def test_previous_completed_marker_cannot_bind_new_interrupted_turn(self):
+        self.completed_claude_snapshot()
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'RUNNING', 'Working', event_time=1100.5)
+        a.remember_preview(self.con, 'socket', '%1', '123', user='New task')
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE',
+                 'Interrupted; review current work', True, event_time=1101)
+        code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+        self.assertEqual(code, 200)
+        self.assertFalse(body['viewable'])
+        self.assertTrue(self.item()['unread'])
+
+    def test_completion_marker_still_requires_forward_user_history(self):
+        self.completed_claude_snapshot()
+        with self.con:
+            self.con.execute('UPDATE panes SET preview_users=?', (json.dumps(['Current task', 'New task']),))
+        code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+        self.assertEqual(code, 200)
+        self.assertFalse(body['viewable'])
+        self.assertTrue(self.item()['unread'])
+
+    def test_completion_proof_rejects_noncompleted_outcome_even_with_matching_marker(self):
+        path = self.completed_claude_snapshot()
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        for reason in ('Interrupted; review current work', 'Agent stopped with an error; review needed',
+                       'Agent exited; review current work'):
+            with self.subTest(reason=reason):
+                self.assertFalse(a.completed_transcript_matches_revision(str(path), row | {'reason': reason},
+                                                                        'Current answer'))
+
+    def test_stable_claude_snapshot_rejects_later_user(self):
+        self.completed_claude_snapshot(later_user=True)
+        code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+        self.assertEqual(code, 200)
+        self.assertFalse(body['viewable'])
+        self.assertTrue(self.item()['unread'])
+
+    def test_completion_proof_rejects_continuation_and_prevented_stop(self):
+        for agent, later_entry in [
+            ('codex', {'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': 'Continuation'}}),
+            ('claude', {'type': 'assistant', 'timestamp': '1970-01-01T00:18:21+00:00',
+                        'message': {'stop_reason': 'end_turn', 'content': 'Continuation'}}),
+        ]:
+            with self.subTest(agent=agent):
+                path = self.completed_codex_snapshot() if agent == 'codex' else self.completed_claude_snapshot()
+                with path.open('a') as output:
+                    output.write(json.dumps(later_entry) + '\n')
+                os.utime(path, (1100.1, 1100.1))
+                row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+                self.assertFalse(a.completed_transcript_matches_revision(str(path), row, 'Current answer'))
+        path = self.completed_claude_snapshot()
+        entries = [json.loads(line) for line in path.read_text().splitlines()]
+        entries[-1]['preventedContinuation'] = True
+        path.write_text(''.join(json.dumps(entry) + '\n' for entry in entries))
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertFalse(a.completed_transcript_matches_revision(str(path), row, 'Current answer'))
+
+    def test_completion_proof_ignores_sidechain_but_rejects_subagent_root(self):
+        path = self.completed_claude_snapshot()
+        with path.open('a') as output:
+            output.write(json.dumps({'type': 'assistant', 'isSidechain': True,
+                                     'message': {'stop_reason': 'end_turn', 'content': 'Child answer'}}) + '\n')
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertTrue(a.completed_transcript_matches_revision(str(path), row, 'Current answer'))
+        path = self.completed_codex_snapshot()
+        header = {'type': 'session_meta', 'payload': {'source': {'subagent': {'parent_thread_id': 'parent'}}}}
+        path.write_text(json.dumps(header) + '\n' + path.read_text())
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertFalse(a.completed_transcript_matches_revision(str(path), row, 'Current answer'))
 
     def test_running_preview_keeps_refreshing_until_final_result(self):
         self.record('Working', state='RUNNING', review=False)
