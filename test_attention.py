@@ -237,6 +237,10 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(a.clip_preview('x' * (a.PREVIEW_CHARS + 1)).endswith('…'))
         self.assertEqual(len(a.clip_preview('x' * (a.PREVIEW_CHARS + 1))), a.PREVIEW_CHARS)
         self.assertEqual(len(a.clip_preview('y' * 500, a.PREVIEW_CHARS_FULL)), 500)
+        md = a.clip_preview('# Title\n\n- item **one**\n- item two\n\n```\ncode\n```', 200)
+        self.assertIn('\n', md)
+        self.assertIn('# Title', md)
+        self.assertIn('**one**', md)
         self.assertTrue(a.user_text_is_noise('<environment_context>\n  <cwd>/tmp</cwd>'))
         self.assertFalse(a.user_text_is_noise('修好登入流程'))
         claude = Path(self.tmp.name) / 'claude.jsonl'

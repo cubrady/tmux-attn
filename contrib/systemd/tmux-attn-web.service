@@ -1,0 +1,18 @@
+[Unit]
+Description=tmux-attn web panel (0.0.0.0:7788)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/tmux-attn web 0.0.0.0 7788
+Restart=on-failure
+RestartSec=2
+KillMode=process
+
+# Optional overrides via environment:
+#   systemctl --user edit tmux-attn-web
+#   Environment=TMUX_ATTN_HOST=my-laptop
+
+[Install]
+WantedBy=default.target

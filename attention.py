@@ -115,11 +115,17 @@ PREVIEW_USERS = 3
 
 
 def clip_preview(text, limit=PREVIEW_CHARS):
-    text = ' '.join(str(text or '').split())
-    text = ''.join(c for c in text if c.isprintable())
+    """Trim preview text while keeping markdown structure (newlines / indents)."""
+    text = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+    text = ''.join(c for c in text if c in '\n\t' or c.isprintable())
+    text = re.sub(r'\n{3,}', '\n\n', text).strip('\n')
     if len(text) <= limit:
         return text
-    return text[:max(0, limit - 1)] + '…'
+    cut = text[:max(0, limit - 1)]
+    nl = cut.rfind('\n')
+    if nl >= max(24, limit // 3):
+        cut = cut[:nl]
+    return cut.rstrip() + '…'
 
 
 def user_text_is_noise(text):
@@ -1452,6 +1458,8 @@ def web_icon_path(name):
     safe = Path(name).name
     if not safe.endswith('.svg') or safe != name:
         return None
+    aliases = {'cursor.svg': 'agent.svg'}
+    safe = aliases.get(safe, safe)
     path = ROOT / 'web' / 'icons' / safe
     return path if path.is_file() else None
 
