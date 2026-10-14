@@ -419,73 +419,6 @@
     }
     .emoji { font-size: 1.05rem; line-height: 1; }
     .project { min-width: 0; overflow-wrap: anywhere; }
-    .host {
-      font-family: var(--mono);
-      font-size: 0.65rem;
-      font-weight: 600;
-      padding: 2px 6px;
-      border-radius: 5px;
-      color: var(--host-fg, var(--muted));
-      background: var(--host-bg, var(--bg));
-      border: 1px solid var(--host-bd, var(--line));
-    }
-    .host.tone-0 { --host-fg: #0f766e; --host-bg: #ccfbf1; --host-bd: #5eead4; }
-    .host.tone-1 { --host-fg: #b45309; --host-bg: #ffedd5; --host-bd: #fdba74; }
-    .host.tone-2 { --host-fg: #1d4ed8; --host-bg: #dbeafe; --host-bd: #93c5fd; }
-    .host.tone-3 { --host-fg: #be123c; --host-bg: #ffe4e6; --host-bd: #fda4af; }
-    .host.tone-4 { --host-fg: #3f6212; --host-bg: #ecfccb; --host-bd: #bef264; }
-    .host.tone-5 { --host-fg: #0e7490; --host-bg: #cffafe; --host-bd: #67e8f9; }
-    .host.tone-6 { --host-fg: #a16207; --host-bg: #fef9c3; --host-bd: #fde047; }
-    .host.tone-7 { --host-fg: #9a3412; --host-bg: #ffedd5; --host-bd: #fb923c; }
-    @media (prefers-color-scheme: dark) {
-      .host.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
-      .host.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
-      .host.tone-2 { --host-fg: #93c5fd; --host-bg: #172554; --host-bd: #1d4ed8; }
-      .host.tone-3 { --host-fg: #fda4af; --host-bg: #4c0519; --host-bd: #be123c; }
-      .host.tone-4 { --host-fg: #bef264; --host-bg: #1a2e05; --host-bd: #4d7c0f; }
-      .host.tone-5 { --host-fg: #67e8f9; --host-bg: #083344; --host-bd: #0e7490; }
-      .host.tone-6 { --host-fg: #fde047; --host-bg: #422006; --host-bd: #a16207; }
-      .host.tone-7 { --host-fg: #fb923c; --host-bg: #431407; --host-bd: #c2410c; }
-    }
-    .cli {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px;
-      height: 28px;
-      border-radius: 6px;
-      border: 1px solid var(--line);
-      background: var(--bg);
-      flex: 0 0 auto;
-    }
-    .cli img { width: 16px; height: 16px; display: block; }
-    .cli .cli-text {
-      font-family: var(--mono);
-      font-size: 0.58rem;
-      font-weight: 500;
-      max-width: 26px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      padding: 0 2px;
-    }
-    @media (prefers-color-scheme: dark) {
-      .cli.agent img { filter: invert(1); }
-    }
-    .cli.broken::after {
-      content: attr(title);
-      font-family: var(--mono);
-      font-size: 0.55rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.02em;
-      color: var(--muted);
-      max-width: 26px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      padding: 0 2px;
-    }
     .age {
       font-family: var(--mono);
       font-size: 0.72rem;
@@ -780,12 +713,6 @@
       font-weight: 600;
       letter-spacing: -0.02em;
     }
-    .sheet-sub {
-      margin-top: 3px;
-      font-family: var(--mono);
-      font-size: 0.7rem;
-      color: var(--muted);
-    }
     .icon-btn {
       border: 1px solid var(--line);
       background: var(--bg);
@@ -1031,7 +958,6 @@
       <div class="sheet-top">
         <div>
           <h2 class="sheet-title" id="sheet-title">回覆</h2>
-          <div class="sheet-sub" id="sheet-target"></div>
         </div>
         <button type="button" class="icon-btn" id="sheet-close" aria-label="關閉">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -1141,16 +1067,6 @@
       if (agent.pending) return 'review';
       return 'idle';
     }
-    function cliBadge(cli) {
-      const name = (cli || 'shell').toLowerCase();
-      const icon = ({ claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi' })[name];
-      if (icon) {
-        const label = name === 'cursor' ? 'cursor' : name;
-        return `<span class="cli ${escapeHtml(icon)}" title="${escapeHtml(label)}"><img src="/icons/${escapeHtml(icon)}.svg" alt="${escapeHtml(label)}" loading="lazy" onerror="this.closest('.cli').classList.add('broken');this.remove()"></span>`;
-      }
-      const short = name.length > 6 ? name.slice(0, 5) + '…' : name;
-      return `<span class="cli" title="${escapeHtml(name)}"><span class="cli-text">${escapeHtml(short)}</span></span>`;
-    }
     function renderMarkdown(text) {
       const raw = String(text ?? '');
       if (!raw) return '';
@@ -1205,10 +1121,6 @@
     }
     function cardHtml(a, opts = {}) {
       const cat = category(a);
-      const cli = (a.cli || a.agent || a.command || 'shell').toLowerCase();
-      const hostName = agentHostName(a);
-      const tone = hostTone(hostName);
-      const host = `<span class="host tone-${tone}">${escapeHtml(hostName)}</span>`;
       const errorClass = a.severity === 'error' ? ' error' : '';
       const newestClass = opts.newest ? ' newest' : '';
       const selected = agentKey(a) === selectedKey ? ' selected' : '';
@@ -1217,9 +1129,7 @@
         <div class="row1">
           <div class="title">
             <span class="emoji" aria-hidden="true">${a.emoji}</span>
-            <span class="project">${escapeHtml(a.project || a.window || a.pane)}</span>
-            ${cliBadge(cli)}
-            ${host}
+            <span class="project">${escapeHtml(a.project || a.window || '未命名專案')}</span>
           </div>
           <div class="age">${escapeHtml(a.age)}</div>
         </div>
@@ -1268,9 +1178,7 @@
     }
     function fillSheetMeta(agent) {
       document.getElementById('sheet-title').textContent =
-        `${agent.emoji || ''} ${agent.project || agent.window || agent.pane}`.trim();
-      document.getElementById('sheet-target').textContent =
-        `${agent.host || 'local'} ${agent.pane} / ${agent.cli || agent.agent} / ${agent.session}`;
+        `${agent.emoji || ''} ${agent.project || agent.window || '未命名專案'}`.trim();
       const env = document.getElementById('sheet-env');
       const envHtml = sheetEnvHtml(agent);
       env.hidden = !envHtml;
