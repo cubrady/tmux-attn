@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import fcntl
 from contextlib import closing
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,7 +14,7 @@ import time
 
 from attention import (
     STATE, classify, codex_root_transcript, codex_transcript_meta, db, live_panes,
-    prune_stale_panes, record, socket, tmux,
+    prune_stale_panes, record, resolve_socket, tmux, observer_lock_path, log_observer_error,
 )
 
 
@@ -104,7 +103,7 @@ def observe_cursor(con, sock, live, table):
     for (pane,pid),meta in live.items():
         if len(native_cursor_pids(pid,table)) != 1:
             continue
-        screen = tmux('capture-pane','-p','-J','-t',pane,check=False)
+        screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
         state = cursor_screen(screen,meta['path'])
         if state:
             current = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
@@ -168,7 +167,7 @@ def observe_claude(con, sock, live, table):
         current = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
         if not current or current['agent'] != 'claude' or len(native_claude_pids(pid,table)) != 1:
             continue
-        screen = tmux('capture-pane','-p','-J','-t',pane,check=False)
+        screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
         state = claude_screen(screen)
         # Let a freshly emitted native permission/stop event settle before a
         # screen update can replace it. Delayed old notifications still recover.
@@ -342,7 +341,7 @@ def discover(con, sock, live, table, attempted):
             origin = 'startup'
             match = None
             if resumed:
-                screen = tmux('capture-pane','-p','-J','-t',pane,check=False)
+                screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
                 match = resumed_match(state_db,cwd,screen)
                 origin = 'resume'
             if not match and not resumed:
@@ -420,7 +419,7 @@ def observe_codex_unmapped(con, sock, live, table):
         if con.execute('SELECT 1 FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
                        (sock, pane, pid)).fetchone():
             continue
-        screen = tmux('capture-pane', '-p', '-J', '-t', pane, check=False)
+        screen = tmux('capture-pane', '-p', '-J', '-t', pane, check=False, sock=sock)
         questions = queued_questions_screen(screen)
         if approval_screen(screen):
             record(con, sock, pane, pid, 'codex', 'WAIT', 'Approval dialog visible', source='observer')
@@ -436,9 +435,9 @@ def observe_codex_unmapped(con, sock, live, table):
 
 
 def observe():
-    sock = socket()
+    sock = resolve_socket()
     STATE.mkdir(parents=True,exist_ok=True)
-    lock = STATE / ('codex-observer-'+hashlib.sha256(sock.encode()).hexdigest()[:12]+'.lock')
+    lock = observer_lock_path(sock)
     with lock.open('a') as handle:
         try:
             fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -454,9 +453,9 @@ def observe():
         con = db()
         cursors, attempted, overlays = {},{},{}
         table = {}; refreshed = 0
-        while not stopping and tmux('list-sessions',check=False):
+        while not stopping and tmux('list-sessions',check=False,sock=sock):
             try:
-                live = live_panes()
+                live = live_panes(sock=sock)
                 if time.monotonic()-refreshed > 10:
                     table = processes(); refreshed = time.monotonic()
                     prune_stale_panes(con, sock, live)
@@ -485,10 +484,9 @@ def observe():
                             state,stamp,turn = event
                             record(con,sock,pane,pid,'codex',*state,event_time=stamp,event_key=turn,source='observer')
                     # The UI can await human input while the main turn keeps running.
-                    screen = tmux('capture-pane','-p','-t',pane,'-S','-35',check=False)
+                    screen = tmux('capture-pane','-p','-t',pane,'-S','-35',check=False,sock=sock)
                     sync_attention_overlay(con,sock,pane,pid,key,screen,previous,overlays)
             except Exception as exc:
-                with (STATE/'observer-errors.log').open('a') as log:
-                    log.write(f'{time.time():.0f} {type(exc).__name__}: {exc}\n')
+                log_observer_error(exc)
             time.sleep(2)
         con.close()
