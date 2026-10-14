@@ -1043,3 +1043,10 @@ test('reader output stays inert even if a peer relays hostile metadata', async (
   assert.doesNotMatch(t.el('reader-body').innerHTML, /<img/i);
   assert.doesNotMatch(t.el('reader-sub').textContent, /<img/i);
 });
+
+test('wide markdown in a preview scrolls in its own box instead of widening the message column', () => {
+  // The vm harness has no layout engine, so guard the two CSS rules that make this work; see the browser check.
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /\.preview-line \{[^}]*grid-template-columns: 2\.4rem minmax\(0, 1fr\)/);
+  assert.match(html, /\.preview-line \.text\.md table \{[^}]*display: block;[^}]*overflow-x: auto/);
+});

@@ -1149,6 +1149,13 @@ class IntegrationTests(unittest.TestCase):
                     self.fail('Timed out waiting for tmux sidebar: '+run('capture-pane','-p','-t',sidebar)+'\nWORK PANE: '+run('capture-pane','-p','-t',pane)+'\nFILES: '+str(list(home.rglob('hook-errors.log')))+'\nLOG: '+''.join(p.read_text() for p in home.rglob('hook-errors.log'))+'\nDUMP: '+subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))
                 wait(lambda:'\t1' in run('list-panes','-a','-F','#{pane_id}\t#{@tmux_attn_sidebar}'))
                 sidebar=next(l.split('\t')[0] for l in run('list-panes','-t',window,'-F','#{pane_id}\t#{@tmux_attn_sidebar}').splitlines() if l.endswith('\t1'))
+                def wait_badge(expected):
+                    # `status` is what refreshes the window badge, so re-run it on every poll instead of
+                    # reading the option once right after an asynchronous sidebar/hook update.
+                    def badge_is_current():
+                        subprocess.check_output([sys.executable,str(app),'status'],env=env,text=True)
+                        return run('show-options','-wv','-t',window,'@tmux_attn_badge')==expected
+                    wait(badge_is_current)
                 def event(name,data={},agent='codex'):
                     # Replace only the disposable test pane's command with a shell and
                     # invoke the real hook as its child; intentionally poison TMUX_PANE.
@@ -1169,8 +1176,7 @@ class IntegrationTests(unittest.TestCase):
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 event('UserPromptSubmit'); event('PermissionRequest',{'tool_input':{'description':'Approve test action'}})
                 wait(lambda:'🙋 1' in run('capture-pane','-p','-t',sidebar))
-                subprocess.check_output([sys.executable,str(app),'status'],env=env,text=True)
-                self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'🙋')
+                wait_badge('🙋')
                 self.assertIn('@tmux_attn_badge',run('show-options','-gwv','window-status-format'))
                 self.assertIn('@tmux_attn_project',run('show-options','-gwv','window-status-format'))
                 project=Path(run('display-message','-p','-t',pane,'#{pane_current_path}')).name
@@ -1213,11 +1219,9 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'👀')
                 run('send-keys','-t',sidebar,'d')
                 wait(lambda:not json.loads(subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))[0]['pending'])
-                subprocess.check_output([sys.executable,str(app),'status'],env=env,text=True)
-                self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'💤')
+                wait_badge('💤')
                 event('UserPromptSubmit')
-                subprocess.check_output([sys.executable,str(app),'status'],env=env,text=True)
-                self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'🏃')
+                wait_badge('🏃')
                 # Switch to popup, remove only marked panes, then restore sidebar mode.
                 original_app = app.read_text()
                 installed_assets = [
