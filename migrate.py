@@ -15,7 +15,8 @@ FILES = [
     'install_web_service.sh',
     'contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist',
     'web/icons/claude.svg', 'web/icons/codex.svg', 'web/icons/agent.svg', 'web/icons/pi.svg',
-    'test_attention.py', 'test_codex_observer.py', 'test_migration.py', 'tests/popup_roundtrip.py',
+    'test_attention.py', 'test_codex_observer.py', 'test_observer_recovery.py',
+    'test_migration.py', 'tests/popup_roundtrip.py',
     'test_join_peer.py', 'tests/status_click_roundtrip.py', 'tests/web.test.cjs',
 ]
 
