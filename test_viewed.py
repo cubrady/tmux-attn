@@ -67,6 +67,26 @@ class ViewedTests(unittest.TestCase):
         self.con.commit()
         self.assertFalse(self.viewed())
 
+    def test_upgrade_accepts_empty_hook_slots_and_preserves_settings(self):
+        home = Path(self.tmp.name) / 'home'
+        config = home / '.config/tmux-attn/sidebar.conf'
+        config.parent.mkdir(parents=True)
+        original = 'set -g status-left custom\n'
+        config.write_text(original)
+
+        def tmux(*args, **kwargs):
+            if args[0] == 'show-hooks':
+                return args[-1] + ' '
+            return ''
+
+        with patch.object(a.Path, 'home', return_value=home), patch.object(a, 'tmux', side_effect=tmux), \
+                patch.object(a, 'live_panes', return_value={}), patch.object(a, 'update_window_badges'):
+            backup = a.install_view_hooks('sock')
+        self.assertEqual((Path(backup) / 'sidebar.conf').read_text(), original)
+        self.assertTrue(config.read_text().startswith(original))
+        for name in a.VIEW_HOOKS:
+            self.assertIn(name + '[91]', config.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()
