@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install on another machine; generates paths locally and preserves user settings.
 set -eu
-task_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+task_root=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 task_python=''
 for task_candidate in python3 python3.14 python3.13 python3.12 python3.11 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
     if command -v "$task_candidate" >/dev/null 2>&1 && "$task_candidate" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then

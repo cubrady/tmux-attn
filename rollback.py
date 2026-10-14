@@ -27,6 +27,12 @@ for lock in (Path.home()/'.local/state/tmux-attn').glob('codex-observer-*.lock')
 
 for entry in json.loads((backup/'manifest.json').read_text()):
     p = Path(entry['path'])
+    if entry.get('directory'):
+        if p.exists():
+            shutil.rmtree(p)
+        if entry['backup']:
+            shutil.copytree(entry['backup'], p)
+        continue
     if entry['backup']:
         shutil.copy2(entry['backup'], p)
     elif p.exists():

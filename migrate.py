@@ -8,7 +8,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent
 FILES = [
-    'README.md', '.gitignore', 'bootstrap.sh', 'migrate.py', 'install.py',
+    'README.md', 'LICENSE', '.gitignore', 'bootstrap.sh', 'migrate.py', 'install.py',
     'rollback.py', 'attention.py', 'codex_observer.py', 'pi-attention.ts',
     'tmux-attn', 'tmux.conf.snippet', 'project-aliases.example.json',
     'web/index.html', 'peers.example.json', 'join_peer.py', 'install.sh',
@@ -16,7 +16,7 @@ FILES = [
     'contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist',
     'web/icons/claude.svg', 'web/icons/codex.svg', 'web/icons/agent.svg', 'web/icons/pi.svg',
     'test_attention.py', 'test_codex_observer.py', 'test_migration.py', 'tests/popup_roundtrip.py',
-    'tests/status_click_roundtrip.py',
+    'test_join_peer.py', 'tests/status_click_roundtrip.py', 'tests/web.test.cjs',
 ]
 
 
