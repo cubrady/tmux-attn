@@ -94,7 +94,7 @@ class ObserverTests(unittest.TestCase):
   self.assertEqual(claude_screen(waiting),('RUNNING','Working',False))
   self.assertEqual(claude_screen(waiting+'\n'+done)[0],'IDLE')
   self.assertEqual(claude_screen(done)[0],'IDLE')
-  self.assertEqual(claude_screen(done.replace('Finished the update.','Which option？'))[0],'WAIT')
+  self.assertEqual(claude_screen(done.replace('Finished the update.','Which option？')),('IDLE','Response ends with a question; review suggested',True))
   for modal in ['Do you want to proceed?\n❯ 1. Yes\n2. No', 'Claude Code needs your approval for the plan', 'Enter to select · Esc to cancel','Submit answers','Press Enter to continue','Session paused']:
    self.assertIsNone(claude_screen(modal+'\n'+busy))
    self.assertIsNone(claude_screen(modal+'\n'+done))
@@ -129,7 +129,7 @@ class ObserverTests(unittest.TestCase):
   def screen(body,active=False):
    return body+'\n\n → Add a follow-up'+('    ctrl+c to stop' if active else '')+'\n\n Auto · 16.6%    Run Everything\n /project · main\n'
   self.assertEqual(cursor_screen(screen('Done.'),'/project'),('IDLE','Response finished; review needed',True))
-  self.assertEqual(cursor_screen(screen('Pick one？'),'/project')[0],'WAIT')
+  self.assertEqual(cursor_screen(screen('Pick one？'),'/project'),('IDLE','Response ends with a question; review suggested',True))
   self.assertEqual(cursor_screen(screen('Done.',True),'/project')[0],'RUNNING')
   self.assertIsNone(cursor_screen(screen('Done.'),'/other'))
   self.assertIsNone(cursor_screen('Done.\nAdd a follow-up\n/project · main','/project'))
