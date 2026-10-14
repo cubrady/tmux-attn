@@ -1287,7 +1287,8 @@ def install_view_hooks(sock=None):
     prior = []
     for name in VIEW_HOOKS:
         value = tmux('show-hooks', '-g', f'{name}[{VIEW_HOOK_INDEX}]', check=False, sock=sock)
-        if value and str(ROOT / 'attention.py') not in value:
+        command = value.partition(' ')[2].strip()
+        if command and str(ROOT / 'attention.py') not in command:
             raise RuntimeError(f'Hook index {VIEW_HOOK_INDEX} already used: {name}')
         prior.append(value)
     backup = STATE / 'backups' / f'view-hooks-{time.time_ns()}'
