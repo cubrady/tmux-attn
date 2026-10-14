@@ -550,6 +550,72 @@ class StoreTests(unittest.TestCase):
         status = {row['name']: row['ok'] for row in fleet['hosts']}
         self.assertEqual(status, {'home': True, 'lab': True, 'down': False})
 
+    def test_fleet_retains_stale_peer_on_transient_failure_until_ttl_expires(self):
+        a._FLEET_HOST_CACHE.clear()
+        peer_payload = {
+            'ok': True,
+            'summary': {'wait': 0, 'review': 0, 'running': 1, 'idle': 0, 'tracked': 1, 'untracked': 0},
+            'agents': [{
+                'pane': '%9', 'pid': '999', 'session': 'x', 'window': 'y', 'window_id': '@9',
+                'agent': 'codex', 'cli': 'codex', 'command': 'codex', 'tracked': True,
+                'project': 'other', 'path': '/other', 'state': 'RUNNING', 'pending': False,
+                'emoji': '🏃', 'reason': '正在工作', 'updated': 100.0, 'age': '1s',
+            }],
+        }
+        peers = [{'name': 'lab', 'url': 'http://lab:7788'}]
+        with patch.object(a, 'load_peers', return_value=peers), \
+             patch.object(a, 'fetch_peer_agents', return_value=peer_payload):
+            first = a.fleet_payload(include_local=False, now=100.0, stale_ttl=30.0)
+        self.assertEqual(len(first['agents']), 1)
+        self.assertTrue(first['hosts'][0]['ok'])
+
+        with patch.object(a, 'load_peers', return_value=peers), \
+             patch.object(a, 'fetch_peer_agents', side_effect=TimeoutError('slow peer')):
+            stale = a.fleet_payload(include_local=False, now=110.0, stale_ttl=30.0)
+            expired = a.fleet_payload(include_local=False, now=140.0, stale_ttl=30.0)
+        self.assertEqual(len(stale['agents']), 1)
+        self.assertEqual(stale['agents'][0]['host'], 'lab')
+        self.assertEqual(stale['summary']['running'], 1)
+        self.assertFalse(stale['hosts'][0]['ok'])
+        self.assertTrue(stale['hosts'][0].get('stale'))
+        self.assertEqual(stale['hosts'][0].get('stale_age'), 10)
+        self.assertEqual(expired['agents'], [])
+        self.assertEqual(expired['summary']['running'], 0)
+        self.assertFalse(expired['hosts'][0].get('stale', False))
+
+    def test_large_transcript_tail_parse_and_fallback(self):
+        large = Path(self.tmp.name) / 'large.jsonl'
+        filler = json.dumps({'type': 'assistant', 'message': {'content': 'x' * 1024}}) + '\n'
+        tail_rows = [
+            {'type': 'user', 'message': {'content': f'問題 {i}'}}
+            for i in range(1, 5)
+        ] + [{'type': 'assistant', 'message': {'content': '尾端回覆\u2028完成'}}]
+        large.write_text(
+            filler * 300 + ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in tail_rows)
+        )
+        self.assertGreater(large.stat().st_size, a.TRANSCRIPT_TAIL_BYTES)
+        preview = a.conversation_preview(large, 'claude')
+        self.assertEqual(preview['users'], ['問題 2', '問題 3', '問題 4'])
+        self.assertEqual(preview['agent'], '尾端回覆完成')
+
+        sparse = Path(self.tmp.name) / 'sparse.jsonl'
+        early_user = json.dumps({'type': 'user', 'message': {'content': '開頭問題'}}, ensure_ascii=False) + '\n'
+        final_agent = json.dumps({'type': 'assistant', 'message': {'content': '最後結果'}}, ensure_ascii=False) + '\n'
+        sparse.write_text(early_user + filler * 300 + final_agent)
+        sparse_preview = a.conversation_preview(sparse, 'claude')
+        self.assertEqual(sparse_preview['users'], ['開頭問題'])
+        self.assertEqual(sparse_preview['agent'], '最後結果')
+
+    def test_agents_payload_retries_transient_empty_live_panes(self):
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'}}
+        with patch.object(a, 'live_panes', side_effect=[{}, live]) as live_mock, \
+             patch.object(a.time, 'sleep'):
+            payload = a.agents_payload(self.con, 'socket', now=time.time() + 3)
+        self.assertEqual(live_mock.call_count, 2)
+        self.assertEqual(len(payload['agents']), 1)
+        self.assertEqual(payload['agents'][0]['pane'], '%1')
+
     def test_agents_payload_uses_resolved_socket_for_live_panes(self):
         a.record(self.con, '/tmp/custom.sock', '%1', '123', 'claude', 'WAIT', 'Approval needed')
         live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'}}

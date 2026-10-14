@@ -299,59 +299,105 @@ def latest_cursor_transcript(cwd):
     return str(files[0])
 
 
-def parse_claude_style_transcript(path):
+TRANSCRIPT_TAIL_BYTES = 262144
+
+
+def _iter_transcript_tail_lines(path, tail_bytes=TRANSCRIPT_TAIL_BYTES):
+    """Yield lines from the tail of a large transcript starting after a newline boundary."""
+    path = Path(path)
+    size = path.stat().st_size
+    if size <= tail_bytes:
+        with path.open(errors='replace') as source:
+            yield from source
+        return
+    with path.open('rb') as raw:
+        raw.seek(max(0, size - tail_bytes))
+        chunk = raw.read()
+    nl = chunk.find(b'\n')
+    if nl != -1:
+        chunk = chunk[nl + 1:]
+    for line in chunk.decode('utf-8', errors='replace').split('\n'):
+        if line:
+            yield line
+
+
+def _parse_transcript_lines(lines, parser):
+    return parser(lines)
+
+
+def _parse_with_tail_fallback(path, line_parser, tail_bytes=TRANSCRIPT_TAIL_BYTES):
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return [], ''
+    if size > tail_bytes:
+        users, agent = line_parser(_iter_transcript_tail_lines(path, tail_bytes))
+        if len(users) >= PREVIEW_USERS:
+            return users, agent
+    with path.open(errors='replace') as source:
+        return line_parser(source)
+
+
+def _parse_claude_lines(lines):
     users, agent = [], ''
-    with Path(path).open(errors='replace') as source:
-        for line in source:
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            kind = row.get('type')
-            if kind == 'user' and not row.get('isMeta'):
-                message = row.get('message') or {}
-                text = content_to_text(message.get('content') if isinstance(message, dict) else message)
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        kind = row.get('type')
+        if kind == 'user' and not row.get('isMeta'):
+            message = row.get('message') or {}
+            text = content_to_text(message.get('content') if isinstance(message, dict) else message)
+            if not user_text_is_noise(text):
+                users.append(text.strip())
+                agent = ''
+        elif kind == 'assistant':
+            message = row.get('message') or {}
+            text = content_to_text(message.get('content') if isinstance(message, dict) else message).strip()
+            if text:
+                agent = text
+    return users, agent
+
+
+def parse_claude_style_transcript(path):
+    return _parse_with_tail_fallback(path, _parse_claude_lines)
+
+
+def _parse_codex_lines(lines):
+    users, agent = [], ''
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        payload = row.get('payload') if isinstance(row.get('payload'), dict) else {}
+        if row.get('type') == 'event_msg':
+            if payload.get('type') == 'user_message':
+                text = str(payload.get('message') or '').strip()
                 if not user_text_is_noise(text):
-                    users.append(text.strip())
+                    users.append(text)
                     agent = ''
-            elif kind == 'assistant':
-                message = row.get('message') or {}
-                text = content_to_text(message.get('content') if isinstance(message, dict) else message).strip()
+            elif payload.get('type') == 'agent_message':
+                text = str(payload.get('message') or '').strip()
                 if text:
                     agent = text
+        elif row.get('type') == 'response_item' and payload.get('type') == 'message':
+            role = payload.get('role')
+            text = content_to_text(payload.get('content')).strip()
+            if not text:
+                continue
+            if role == 'user' and not user_text_is_noise(text):
+                users.append(text)
+                agent = ''
+            elif role == 'assistant':
+                agent = text
     return users, agent
 
 
 def parse_codex_transcript(path):
-    users, agent = [], ''
-    with Path(path).open(errors='replace') as source:
-        for line in source:
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            payload = row.get('payload') if isinstance(row.get('payload'), dict) else {}
-            if row.get('type') == 'event_msg':
-                if payload.get('type') == 'user_message':
-                    text = str(payload.get('message') or '').strip()
-                    if not user_text_is_noise(text):
-                        users.append(text)
-                        agent = ''
-                elif payload.get('type') == 'agent_message':
-                    text = str(payload.get('message') or '').strip()
-                    if text:
-                        agent = text
-            elif row.get('type') == 'response_item' and payload.get('type') == 'message':
-                role = payload.get('role')
-                text = content_to_text(payload.get('content')).strip()
-                if not text:
-                    continue
-                if role == 'user' and not user_text_is_noise(text):
-                    users.append(text)
-                    agent = ''
-                elif role == 'assistant':
-                    agent = text
-    return users, agent
+    return _parse_with_tail_fallback(path, _parse_codex_lines)
 
 
 def clean_cursor_user_text(text):
@@ -366,30 +412,33 @@ def clean_cursor_user_text(text):
     return text
 
 
+def _parse_cursor_lines(lines):
+    users, agent = [], ''
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        role = row.get('role') or ''
+        message = row.get('message') if isinstance(row.get('message'), dict) else {}
+        text = content_to_text(message.get('content')).strip() if message else ''
+        if not text and isinstance(row.get('message'), str):
+            text = row.get('message').strip()
+        if not text:
+            continue
+        if role == 'user':
+            text = clean_cursor_user_text(text)
+            if text and not user_text_is_noise(text):
+                users.append(text)
+                agent = ''
+        elif role == 'assistant':
+            agent = text
+    return users, agent
+
+
 def parse_cursor_transcript(path):
     """Cursor IDE/agent-transcripts jsonl: {role, message:{content:[...]}}."""
-    users, agent = [], ''
-    with Path(path).open(errors='replace') as source:
-        for line in source:
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            role = row.get('role') or ''
-            message = row.get('message') if isinstance(row.get('message'), dict) else {}
-            text = content_to_text(message.get('content')).strip() if message else ''
-            if not text and isinstance(row.get('message'), str):
-                text = row.get('message').strip()
-            if not text:
-                continue
-            if role == 'user':
-                text = clean_cursor_user_text(text)
-                if text and not user_text_is_noise(text):
-                    users.append(text)
-                    agent = ''
-            elif role == 'assistant':
-                agent = text
-    return users, agent
+    return _parse_with_tail_fallback(path, _parse_cursor_lines)
 
 
 def conversation_preview(path, agent='', limit=PREVIEW_CHARS_FULL):
@@ -516,16 +565,26 @@ def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS, snapshot
                             and bound_path and mtime > cached_mtime and forward_users and advanced)
                 preview_revision = row['revision'] if verified else 0
                 users, agent_text = parsed['users'], parsed['agent']
-                with con:
-                    updated = con.execute(
-                        '''UPDATE panes SET preview_users=?, preview_agent=?, preview_mtime=?, preview_revision=?
-                           WHERE socket=? AND pane=? AND pid=? AND revision=?
-                           AND preview_revision=?''',
-                        (json.dumps(users, ensure_ascii=False), agent_text, mtime, preview_revision,
-                         row['socket'], row['pane'], row['pid'], row['revision'], row['preview_revision']),
-                    )
-                    if not updated.rowcount:
-                        preview_revision = 0
+                try:
+                    con.execute('PRAGMA busy_timeout = 50')
+                    with con:
+                        updated = con.execute(
+                            '''UPDATE panes SET preview_users=?, preview_agent=?, preview_mtime=?, preview_revision=?
+                               WHERE socket=? AND pane=? AND pid=? AND revision=?
+                               AND preview_revision=?''',
+                            (json.dumps(users, ensure_ascii=False), agent_text, mtime, preview_revision,
+                             row['socket'], row['pane'], row['pid'], row['revision'], row['preview_revision']),
+                        )
+                        if not updated.rowcount:
+                            preview_revision = 0
+                except sqlite3.OperationalError:
+                    # Do not fail or stall read-only status polls if a hook holds the write lock.
+                    preview_revision = 0
+                finally:
+                    try:
+                        con.execute('PRAGMA busy_timeout = 3000')
+                    except sqlite3.OperationalError:
+                        pass
     preview = {
         'users': [clip_preview(text, limit) for text in users[-PREVIEW_USERS:] if str(text).strip()],
         'agent': clip_preview(agent_text, limit) if agent_text else '',
@@ -1232,7 +1291,12 @@ def kill_pane(pane, pid, sock=None):
     return None
 
 
-def fetch_peer_agents(url, timeout=1.5):
+PEER_FETCH_TIMEOUT = 3.5
+_FLEET_HOST_CACHE = {}
+_FLEET_STALE_TTL = 35.0
+
+
+def fetch_peer_agents(url, timeout=PEER_FETCH_TIMEOUT):
     """Pull a machine-local /api/agents document. Never call /api/fleet here."""
     request = Request(url.rstrip('/') + '/api/agents', headers={'Accept': 'application/json'})
     with urlopen(request, timeout=timeout) as response:
@@ -1263,39 +1327,79 @@ def tag_host(payload, host):
     return agents, payload.get('summary') or empty_summary()
 
 
-def fleet_payload(include_local=True, peer_timeout=1.5):
+def _remember_fleet_host(cache_key, now, tagged, summary):
+    _FLEET_HOST_CACHE[cache_key] = (
+        float(now),
+        [dict(item) for item in tagged],
+        dict(summary),
+    )
+
+
+def _cached_fleet_host(cache_key, now, stale_ttl):
+    entry = _FLEET_HOST_CACHE.get(cache_key)
+    if not entry or stale_ttl <= 0:
+        return None
+    cached_at, tagged, summary = entry
+    age_s = float(now) - cached_at
+    if age_s < 0 or age_s > stale_ttl:
+        return None
+    return [dict(item) for item in tagged], dict(summary), int(age_s)
+
+
+def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None, stale_ttl=_FLEET_STALE_TTL):
     """Aggregate local and/or Tailscale/LAN peer /api/agents feeds."""
+    now = time.time() if now is None else float(now)
     agents = []
     summaries = []
     hosts = []
     if include_local:
         host = local_host_name()
+        cache_key = ('local', host)
         try:
             with closing(db()) as con:
                 local = agents_payload(con)
             tagged, summary = tag_host(local, host)
+            _remember_fleet_host(cache_key, now, tagged, summary)
             agents.extend(tagged)
             summaries.append(summary)
             hosts.append({'name': host, 'ok': True, 'source': 'local'})
         except Exception as exc:
-            hosts.append({'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'})
+            cached = _cached_fleet_host(cache_key, now, stale_ttl)
+            host_row = {'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'}
+            if cached:
+                tagged, summary, stale_age = cached
+                agents.extend(tagged)
+                summaries.append(summary)
+                host_row['stale'] = True
+                host_row['stale_age'] = stale_age
+            hosts.append(host_row)
     peers = load_peers()
     if peers:
         with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
             futures = {pool.submit(fetch_peer_agents, peer['url'], peer_timeout): peer for peer in peers}
             for future in as_completed(futures):
                 peer = futures[future]
+                cache_key = ('peer', peer['name'], peer['url'])
                 try:
                     payload = future.result()
                     tagged, summary = tag_host(payload, peer['name'])
+                    _remember_fleet_host(cache_key, now, tagged, summary)
                     agents.extend(tagged)
                     summaries.append(summary)
                     hosts.append({'name': peer['name'], 'ok': True, 'source': 'peer', 'url': peer['url']})
                 except Exception as exc:
-                    hosts.append({
+                    cached = _cached_fleet_host(cache_key, now, stale_ttl)
+                    host_row = {
                         'name': peer['name'], 'ok': False, 'source': 'peer', 'url': peer['url'],
                         'error': f'{type(exc).__name__}',
-                    })
+                    }
+                    if cached:
+                        tagged, summary, stale_age = cached
+                        agents.extend(tagged)
+                        summaries.append(summary)
+                        host_row['stale'] = True
+                        host_row['stale_age'] = stale_age
+                    hosts.append(host_row)
     agents.sort(key=agent_sort_key)
     hosts.sort(key=lambda row: (0 if row.get('ok') else 1, row.get('name') or ''))
     return {
@@ -1307,7 +1411,7 @@ def fleet_payload(include_local=True, peer_timeout=1.5):
 
 
 _GIT_ENV_CACHE = {}
-_GIT_ENV_TTL = 5.0
+_GIT_ENV_TTL = 25.0
 
 
 def repo_name(path):
@@ -1331,7 +1435,7 @@ def git_workdir_info(path):
     try:
         result = subprocess.run(
             ['git', '-C', path, 'status', '-sb', '--porcelain'],
-            capture_output=True, text=True, timeout=1.5,
+            capture_output=True, text=True, timeout=0.8,
         )
         if result.returncode != 0:
             _GIT_ENV_CACHE[path] = (now, info)
@@ -1350,7 +1454,7 @@ def git_workdir_info(path):
             if ref.startswith('HEAD ') or ref == 'HEAD (no branch)':
                 short = subprocess.run(
                     ['git', '-C', path, 'rev-parse', '--short', 'HEAD'],
-                    capture_output=True, text=True, timeout=1,
+                    capture_output=True, text=True, timeout=0.5,
                 )
                 info['branch'] = (short.stdout.strip() if short.returncode == 0 else '') or 'detached'
             else:
@@ -1360,7 +1464,11 @@ def git_workdir_info(path):
             # Unexpected format; treat remaining lines as dirty markers only.
             info['dirty'] = True
     except (OSError, subprocess.TimeoutExpired):
-        pass
+        if cached:
+            stale_info = dict(cached[1])
+            stale_info['repo'] = repo
+            _GIT_ENV_CACHE[path] = (now, stale_info)
+            return stale_info
     _GIT_ENV_CACHE[path] = (now, info)
     return info
 
@@ -1369,7 +1477,13 @@ def agents_payload(con, sock=None, live=None, now=None):
     """JSON-ready status for the mobile web panel and future clients."""
     now = time.time() if now is None else now
     sock = resolve_socket() if sock is None else sock
-    live = live_panes(sock) if live is None else live
+    if live is None:
+        live = live_panes(sock)
+        if not live and con.execute('SELECT 1 FROM panes WHERE socket=? LIMIT 1', (sock,)).fetchone():
+            time.sleep(0.04)
+            live = live_panes(sock)
+            if not live and sock and Path(sock).exists():
+                raise RuntimeError('transient empty live_panes while socket exists')
     rows, _ = items(con, sock, live, True, now=now)
     groups = status_groups(rows)
     tracked_keys = {(row['pane'], row['pid']) for row in rows}

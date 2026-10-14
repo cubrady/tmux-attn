@@ -4,10 +4,13 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
-function dashboard(fetchRequest, animationFrame = callback => callback()) {
+function dashboard(firstArg = {}, animationFrame = callback => callback()) {
+  const isFn = typeof firstArg === 'function';
+  const fetchRequest = isFn ? firstArg : (firstArg && firstArg.fetchRequest);
+  const overrides = isFn ? {} : (firstArg || {});
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, {
-    innerHTML: '', textContent: '', hidden: false, dataset: {}, listeners: {},
+    innerHTML: '', textContent: '', value: '', hidden: false, disabled: false, title: '', dataset: {}, listeners: {},
     classList: { add() {}, remove() {}, toggle() {} },
     addEventListener(type, listener) { this.listeners[type] = listener; },
     setAttribute() {}, focus() {},
@@ -22,15 +25,25 @@ function dashboard(fetchRequest, animationFrame = callback => callback()) {
     querySelectorAll() { return []; },
     addEventListener() {},
   };
+  let nowMs = 0;
+  const win = { ...(overrides.window || {}) };
+  const nav = overrides.navigator || win.navigator || {};
+  win.navigator = nav;
   const context = vm.createContext({
-    window: {}, document, performance: { now: () => 0 },
-    fetch: (url, options) => url === '/api/fleet' ? new Promise(() => {}) : fetchRequest(url, options),
-    setInterval() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => value },
+    window: win, navigator: nav, location: win.location,
+    document, performance: { now: () => nowMs },
+    fetch: (url, options) => (url === '/api/fleet' || !fetchRequest) ? new Promise(() => {}) : fetchRequest(url, options),
+    setInterval() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => String(value) },
   });
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
   vm.runInContext(script, context);
-  return { elements, render: data => context.render(data),
-    open: agent => context.openSheet(agent), close: () => context.closeSheet(),
+  return {
+    elements,
+    context,
+    setNow(ms) { nowMs = ms; },
+    render: data => context.render(data),
+    open: agent => context.openSheet(agent),
+    close: () => context.closeSheet(),
     refreshPreview: () => elements.get('sheet-refresh').listeners.click(),
     visibility: state => { document.visibilityState = state; },
   };
@@ -373,4 +386,117 @@ test('preview network failure preserves unread and can retry on reopen', async (
   await settle();
   assert.deepEqual(calls, ['/api/preview', '/api/preview', '/api/ack']);
   assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+});
+
+test('transient host failure retains last-known-good sessions until stale TTL expires', () => {
+  const ui = dashboard();
+  ui.setNow(1000);
+  ui.render({
+    hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }],
+    agents: [agent('alpha', 'WAIT'), agent('beta', 'RUNNING')],
+  });
+  assert.match(ui.elements.get('hosts').innerHTML, /全部<span class="count">\(2\)/);
+
+  ui.setNow(11000);
+  ui.render({
+    hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: false, error: 'TimeoutError' }],
+    agents: [agent('alpha', 'WAIT')],
+  });
+  assert.match(ui.elements.get('hosts').innerHTML, /全部<span class="count">\(2\)/);
+  assert.match(ui.elements.get('hosts').innerHTML, /beta stale<span class="count">\(1\)/);
+  assert.match(ui.elements.get('list').innerHTML, /group-running/);
+
+  ui.setNow(50000);
+  ui.render({
+    hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: false, error: 'TimeoutError' }],
+    agents: [agent('alpha', 'WAIT')],
+  });
+  assert.match(ui.elements.get('hosts').innerHTML, /全部<span class="count">\(1\)/);
+  assert.match(ui.elements.get('hosts').innerHTML, /beta offline<span class="count">\(0\)/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /group-running/);
+});
+
+test('microphone click requests getUserMedia permission before starting speech recognition', async () => {
+  let getUserMediaCalls = 0;
+  let trackStopped = 0;
+  let speechStarted = 0;
+  class FakeSpeech {
+    start() {
+      speechStarted += 1;
+      if (this.onstart) this.onstart();
+    }
+    stop() {}
+  }
+  const ui = dashboard({
+    window: { SpeechRecognition: FakeSpeech, isSecureContext: true },
+    navigator: {
+      language: 'zh-TW',
+      mediaDevices: {
+        async getUserMedia(constraints) {
+          assert.equal(constraints && constraints.audio, true);
+          getUserMediaCalls += 1;
+          return { getTracks: () => [{ stop() { trackStopped += 1; } }] };
+        },
+      },
+    },
+  });
+  await ui.elements.get('sheet-mic').listeners.click();
+  assert.equal(getUserMediaCalls, 1);
+  assert.equal(trackStopped, 1);
+  assert.equal(speechStarted, 1);
+
+  let resolveDelayed;
+  let delayedStarts = 0;
+  class DelayedSpeech {
+    start() { delayedStarts += 1; }
+    stop() {}
+  }
+  const closeUi = dashboard({
+    window: { SpeechRecognition: DelayedSpeech, isSecureContext: true },
+    navigator: {
+      mediaDevices: {
+        getUserMedia: () => new Promise(resolve => { resolveDelayed = resolve; }),
+      },
+    },
+  });
+  closeUi.open(agent('alpha', 'WAIT'));
+  const pendingClick = closeUi.elements.get('sheet-mic').listeners.click();
+  closeUi.close();
+  resolveDelayed({ getTracks: () => [{ stop() {} }] });
+  await pendingClick;
+  assert.equal(delayedStarts, 0);
+});
+
+test('microphone click explains insecure HTTP context or blocked permission instead of hanging', async () => {
+  let speechStarted = 0;
+  class FakeSpeech {
+    start() { speechStarted += 1; }
+    stop() {}
+  }
+  const insecureUi = dashboard({
+    window: {
+      SpeechRecognition: FakeSpeech,
+      isSecureContext: false,
+      location: { protocol: 'http:', hostname: '100.64.0.1' },
+    },
+  });
+  await insecureUi.elements.get('sheet-mic').listeners.click();
+  assert.equal(speechStarted, 0);
+  assert.match(insecureUi.elements.get('sheet-status').textContent, /HTTPS|localhost/);
+
+  const deniedUi = dashboard({
+    window: { SpeechRecognition: FakeSpeech, isSecureContext: true },
+    navigator: {
+      mediaDevices: {
+        async getUserMedia() {
+          const err = new Error('Permission denied');
+          err.name = 'NotAllowedError';
+          throw err;
+        },
+      },
+    },
+  });
+  await deniedUi.elements.get('sheet-mic').listeners.click();
+  assert.equal(speechStarted, 0);
+  assert.match(deniedUi.elements.get('sheet-status').textContent, /已被瀏覽器封鎖|允許麥克風/);
 });
