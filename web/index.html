@@ -232,20 +232,29 @@
     }
     .stat .n {
       font-family: var(--mono);
-      font-size: 1.45rem;
+      font-size: clamp(1rem, 5vw, 1.45rem);
       font-weight: 600;
       font-variant-numeric: tabular-nums;
       letter-spacing: -0.04em;
       line-height: 1.15;
+      white-space: nowrap;
     }
     .stat .l {
       margin-top: 6px;
+      min-height: 1.45em;
       font-size: 0.78rem;
       font-weight: 600;
       letter-spacing: 0.02em;
       color: var(--muted);
     }
-    .stat .secondary { margin-top: 3px; font-size: 0.68rem; color: var(--muted); }
+    .stat .review-unread {
+      padding: 1px 4px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      color: var(--review);
+      background: color-mix(in srgb, var(--review) 10%, var(--card));
+      white-space: nowrap;
+    }
     .hosts {
       display: flex;
       flex-wrap: wrap;
@@ -1395,12 +1404,13 @@
         ['idle', '💤', counts.idle || 0, '閒置'],
       ].map(([key, e, n, l]) => {
         const seen = key === 'review' ? counts.reviewed || 0 : 0;
-        const disabled = n + seen === 0 ? ' disabled' : '';
+        const total = n + seen;
+        const disabled = total === 0 ? ' disabled' : '';
         const active = activeGroup === key ? ' active' : '';
-        const title = n + seen === 0 ? '目前沒有此狀態' : `跳到${l}`;
-        const ariaLabel = key === 'review' ? `${title}，未看 ${n}，已看 ${seen}` : title;
-        const secondary = key === 'review' && seen ? `<div class="secondary">已看 ${seen}</div>` : '';
-        return `<button type="button" class="stat${active}" data-group="${key}"${disabled} title="${title}" aria-label="${ariaLabel}"><div class="n">${e} ${n}</div><div class="l">${l}</div>${secondary}</button>`;
+        const title = total === 0 ? '目前沒有此狀態' : `跳到${l}`;
+        const ariaLabel = key === 'review' ? `${title}，共 ${total}，未看 ${n}，已看 ${seen}` : title;
+        const label = key === 'review' ? (n ? `<span class="review-unread">未看 ${n}</span>` : '') : l;
+        return `<button type="button" class="stat${active}" data-group="${key}"${disabled} title="${title}" aria-label="${ariaLabel}"><div class="n">${e} ${total}</div><div class="l">${label}</div></button>`;
       }).join('');
     }
     function visibleSummaryCounts(agents) {
