@@ -545,7 +545,9 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 const imageFile = (name, type = 'image/jpeg', outSize = 1000) => ({ name, type, size: 1000, outSize });
 const submitEvent = () => ({ preventDefault() {} });
 
-function uploader({ failFor = [], holdUploads = false, holdSend = false, holdPrepare = false } = {}) {
+const PEER_OUTDATED = 'peer is running an older tmux-attn without this feature';
+
+function uploader({ failFor = [], holdUploads = false, holdSend = false, holdPrepare = false, outdatedPeer = false } = {}) {
   const calls = [];
   const revoked = [];
   const held = [];
@@ -559,7 +561,9 @@ function uploader({ failFor = [], holdUploads = false, holdSend = false, holdPre
       calls.push({ url, body });
       if (url === '/api/upload') {
         const name = body.data.replace(/^b64-/, '');
-        const reply = failFor.includes(name)
+        const reply = outdatedPeer
+          ? { ok: false, status: 502, json: async () => ({ ok: false, error: PEER_OUTDATED }) }
+          : failFor.includes(name)
           ? { ok: false, status: 400, json: async () => ({ ok: false, error: 'unsupported image type' }) }
           : { ok: true, status: 200, json: async () => ({ ok: true, id: `id-${name}` }) };
         if (!holdUploads) return reply;
@@ -1049,4 +1053,23 @@ test('wide markdown in a preview scrolls in its own box instead of widening the 
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   assert.match(html, /\.preview-line \{[^}]*grid-template-columns: 2\.4rem minmax\(0, 1fr\)/);
   assert.match(html, /\.preview-line \.text\.md table \{[^}]*display: block;[^}]*overflow-x: auto/);
+});
+
+test('a reader link to a host with an older tmux-attn explains what to do and offers no pointless retry', async () => {
+  const t = readerSetup({ message: () => jsonReply({ ok: false, error: PEER_OUTDATED }, 502) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /版本較舊/);
+  assert.match(t.el('reader-body').innerHTML, /更新/);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /data-retry|not found/);
+  assert.equal(t.el('reader-copy').disabled, true);
+});
+
+test('attaching an image on a host with an older tmux-attn says so on the image', async () => {
+  const t = uploader({ outdatedPeer: true });
+  await t.pick([imageFile('a.jpg')]);
+  assert.match(t.chips(), /attachment error/);
+  assert.match(t.chips(), /版本較舊/);
+  assert.doesNotMatch(t.chips(), /older tmux-attn/);
 });

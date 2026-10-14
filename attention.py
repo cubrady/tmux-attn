@@ -890,6 +890,8 @@ UPLOAD_MAX_FILES = 200
 UPLOAD_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 UPLOAD_ID_RE = re.compile(r'^[0-9a-f]{32}\.(?:png|jpg|gif|webp)\Z')
 PEER_UPLOAD_TIMEOUT = 20
+# A peer's 404 on a new route means that host has not been updated; say so instead of passing 'not found' on.
+PEER_OUTDATED = 'peer is running an older tmux-attn without this feature'
 # Claude Code reads a pasted image path asynchronously; give it a beat before Enter.
 IMAGE_SETTLE_SECONDS = 0.4
 
@@ -2206,6 +2208,8 @@ def dispatch_upload(payload):
             reply = peer_upload_reply(result)
             return (200, reply) if reply else (502, {'ok': False, 'error': 'peer upload failed: bad reply'})
         except HTTPError as exc:
+            if exc.code == 404:
+                return 502, {'ok': False, 'error': PEER_OUTDATED}
             try:
                 return exc.code, json.loads(exc.read().decode())
             except (ValueError, UnicodeError):
@@ -2334,6 +2338,8 @@ def dispatch_message(payload):
             reply = peer_message_reply(data)
             return (200, reply) if reply else (502, {'ok': False, 'error': 'peer message failed: bad reply'})
         except HTTPError as exc:
+            if exc.code == 404:
+                return 502, {'ok': False, 'error': PEER_OUTDATED}
             try:
                 return exc.code, json.loads(exc.read().decode())
             except (ValueError, UnicodeError):
