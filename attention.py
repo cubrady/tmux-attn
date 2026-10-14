@@ -1450,6 +1450,37 @@ def prune_sidebars():
                 tmux('kill-pane','-t',line.split()[0],check=False)
 
 
+def prune_stale_panes(con, sock, live):
+    """Delete inbox rows whose pane+pid is no longer live (status already ignores them).
+
+    Skip when live is empty: list-panes failure also yields {}, and pruning then
+    would wipe every row on the socket.
+    """
+    if not live:
+        return 0
+    live_keys = set(live)
+    removed = 0
+    with con:
+        for table in ('panes', 'codex_sessions'):
+            for row in con.execute(f'SELECT pane, pid FROM {table} WHERE socket=?', (sock,)).fetchall():
+                if (row['pane'], row['pid']) in live_keys:
+                    continue
+                con.execute(f'DELETE FROM {table} WHERE socket=? AND pane=? AND pid=?',
+                            (sock, row['pane'], row['pid']))
+                removed += 1
+        for row in con.execute(
+            'SELECT client, category, pane, pid FROM cycle_cursors WHERE socket=?', (sock,)
+        ).fetchall():
+            if (row['pane'], row['pid']) in live_keys:
+                continue
+            con.execute(
+                'DELETE FROM cycle_cursors WHERE socket=? AND client=? AND category=?',
+                (sock, row['client'], row['category']),
+            )
+            removed += 1
+    return removed
+
+
 def web_index_path():
     return ROOT / 'web' / 'index.html'
 

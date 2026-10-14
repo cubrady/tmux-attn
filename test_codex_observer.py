@@ -9,7 +9,7 @@ from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
 from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli
-from codex_observer import queued_questions_screen,sync_attention_overlay
+from codex_observer import queued_questions_screen,sync_attention_overlay,observe_codex_unmapped
 
 class ObserverTests(unittest.TestCase):
  def test_native_codex_accepts_standalone_short_argv(self):
@@ -339,5 +339,21 @@ class RepairTests(unittest.TestCase):
      self.assertEqual(mapping['rollout_path'],str(root))
      self.assertFalse(repair_mapping(con,mapping,database))
    finally:a.STATE=previous
+
+ def test_observe_codex_unmapped_idle_prompt(self):
+  table={10:(1,'zsh'),20:(10,'codex')}
+  live={('%1','10'):{'pane':'%1','pid':'10','session':'s','window':'w','window_id':'@1','path':'/'}}
+  screen='› Ask Codex to do anything\nGPT high · /tmp · demo\n← for agents'
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     with patch('codex_observer.native_codex_pids', return_value=[20]), \
+          patch('codex_observer.tmux', return_value=screen):
+      observe_codex_unmapped(con,'sock',live,table)
+     row=con.execute('SELECT agent,state,reason,source FROM panes').fetchone()
+     self.assertEqual(tuple(row),('codex','IDLE','Waiting for next task','observer'))
+   finally:a.STATE=previous
+
 
 if __name__=='__main__':unittest.main(verbosity=2)

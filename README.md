@@ -85,9 +85,13 @@ Ask: SETUP=solo|multi
   multi client → PEER_NAME, LOCAL_FEED_URL=http://$(tailscale ip -4):7788, SERVER_URL=http://<server>:7788
        clone … && cd tmux-attn
        PEER_NAME='…' LOCAL_FEED_URL='…' SERVER_URL='…' sh install.sh
-Follow NEXT STEPS; sh install_web_service.sh; curl health; reload hooks.
+Then EXACTLY follow printed NEXT STEPS:
+  sh ~/.local/share/tmux-attn/install_web_service.sh   # required (not bare `tmux-attn web`)
+  curl -s http://127.0.0.1:7788/api/health
+  reload hooks (Claude new session | Codex /hooks | Cursor reopen | Pi /reload)
+  verify: ~/.local/bin/tmux-attn status   # expect non-zero counts when an agent is live
 Join uses POST SERVER_URL/api/peers (no SSH). Phone opens server:7788.
-Report install/web/health/peers status.
+Report: install JSON (status_control_clicks), web health, peers, tmux status line.
 ```
 
 | 你給 agent | 內容 |

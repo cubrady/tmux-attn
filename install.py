@@ -124,6 +124,16 @@ if icons_src.is_dir():
     if icons_dest.exists():
         shutil.rmtree(icons_dest)
     shutil.copytree(icons_src, icons_dest)
+# Persistent web helper lives next to the installed app so NEXT STEPS work without a checkout.
+web_service = DEST / 'install_web_service.sh'
+shutil.copy2(ROOT / 'install_web_service.sh', web_service)
+web_service.chmod(0o755)
+for unit in ['contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist']:
+    src = ROOT / unit
+    if src.is_file():
+        dest = DEST / unit
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
 paths[6].parent.mkdir(parents=True, exist_ok=True)
 paths[6].write_text('#!/bin/sh\nif [ "$#" -eq 0 ]; then set -- popup; fi\nexec '+shlex.join([python,str(app)])+' "$@"\n')
 paths[6].chmod(0o755)
@@ -164,6 +174,31 @@ cursor_path.write_text(json.dumps(cursor,indent=2)+'\n')
 launch = shlex.join(['env', 'TMUX_ATTN_STATE_DIR='+str(HOME/'.local/state/tmux-attn'), python,str(app)])
 config.parent.mkdir(parents=True, exist_ok=True)
 alias_config.write_text(json.dumps(alias_data, ensure_ascii=False, indent=2)+'\n')
+
+
+def supports_status_control_clicks():
+    """Some tmux builds report ≥3.7 but reject MouseDown1Control* (source-file would fail)."""
+    key = 'MouseDown1Control0'
+    prior = root_bindings.get(key, '')
+    probe = subprocess.run(
+        ['tmux', 'bind-key', '-T', 'root', key, 'display-message', 'tmux-attn-probe'],
+        capture_output=True, text=True,
+    )
+    subprocess.run(['tmux', 'unbind-key', '-T', 'root', key], capture_output=True)
+    if prior.strip():
+        subprocess.run(['tmux', 'source-file', '-'], input=prior, text=True, capture_output=True)
+    return probe.returncode == 0
+
+
+control_clicks = supports_status_control_clicks()
+# Clear prior Control binds out-of-band: unknown keys must not appear in sidebar.conf
+# or `tmux source-file` aborts on hosts that reject MouseDown1Control*.
+for index in range(4):
+    for event in ['MouseDown1', 'SecondClick1', 'TripleClick1', 'DoubleClick1']:
+        subprocess.run(
+            ['tmux', 'unbind-key', '-T', 'root', f'{event}Control{index}'],
+            capture_output=True,
+        )
 base = f'''# Managed tmux attention inbox.
 set -g mouse on
 set -g status-interval 2
@@ -172,10 +207,13 @@ set -g status-right '#({launch} status-clickable) | %H:%M'
 bind-key N run-shell -b "{launch} next '#{{client_name}}'"
 run-shell -b '{launch} observe'
 '''
-for index,category in enumerate(['wait','review','running','idle']):
-    base += f'unbind-key -T root DoubleClick1Control{index}\n'
-    for event in ['MouseDown1','SecondClick1','TripleClick1']:
-        base += f'''bind-key -T root {event}Control{index} run-shell -b "{launch} cycle {category} '#{{client_name}}'"\n'''
+if control_clicks:
+    for index, category in enumerate(['wait', 'review', 'running', 'idle']):
+        for event in ['MouseDown1', 'SecondClick1', 'TripleClick1']:
+            base += (
+                f'bind-key -T root {event}Control{index} '
+                f'run-shell -b "{launch} cycle {category} \'#{{client_name}}\'"\n'
+            )
 for key in ['window-status-format', 'window-status-current-format']:
     value = runtime[key]
     if '@tmux_attn_project' not in value:
@@ -206,4 +244,10 @@ if not options.sidebar:
     for line in tmux('list-panes','-a','-F','#{pane_id}\t#{@tmux_attn_sidebar}').splitlines():
         if line.endswith('\t1'):
             subprocess.run(['tmux','kill-pane','-t',line.split('\t')[0]],check=True)
-print(json.dumps({'installed':str(app),'backup':str(BACKUP),'config':str(config)},indent=2))
+print(json.dumps({
+    'installed': str(app),
+    'backup': str(BACKUP),
+    'config': str(config),
+    'status_control_clicks': control_clicks,
+    'web_service': str(web_service),
+}, indent=2))
