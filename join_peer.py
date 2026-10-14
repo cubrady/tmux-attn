@@ -58,10 +58,13 @@ def upsert_local(name: str, url: str) -> str:
     return action
 
 
+WEB_SERVICE = '~/.local/share/tmux-attn/install_web_service.sh'
+
+
 def print_solo() -> None:
     print('Setup: solo (one machine — no peers.json)')
     print('NEXT STEPS:')
-    print('  1. ~/.local/bin/tmux-attn web')
+    print(f'  1. sh {WEB_SERVICE}          # launchd / systemd — survives logout')
     print('  2. curl -s http://127.0.0.1:7788/api/health')
     print('  3. Open http://127.0.0.1:7788/ (or Tailscale:7788)')
     print('  4. Reload hooks: Claude new session | Codex /hooks | Cursor reopen | Pi /reload')
@@ -71,7 +74,7 @@ def print_client_next(name: str, url: str) -> None:
     print()
     print('NEXT STEPS (CLIENT):')
     print(f'  1. export TMUX_ATTN_HOST={name!r}')
-    print('  2. Keep running: ~/.local/bin/tmux-attn web')
+    print(f'  2. sh {WEB_SERVICE}          # keep feed up; do not use bare `tmux-attn web`')
     print('  3. curl -s http://127.0.0.1:7788/api/health')
     print(f'  4. curl -s {url}/api/health')
     print('  5. Reload hooks: Claude new session | Codex /hooks | Cursor reopen | Pi /reload')
@@ -157,7 +160,7 @@ def main() -> None:
     if args.apply:
         action = upsert_local(name, url)
         print(f'Server local: {action} {name!r} → {peers_path()}')
-        print('Keep server web up: ~/.local/bin/tmux-attn web')
+        print(f'Keep server web up: sh {WEB_SERVICE}')
         print_client_next(name, url)
         return
 
