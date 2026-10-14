@@ -278,6 +278,12 @@ class ObserverTests(unittest.TestCase):
 
 class RepairTests(unittest.TestCase):
  def test_resumed_foreground_repairs_same_pid_native_root_once(self):
+  self.assert_foreground_repairs_same_pid('/vendor/bin/codex resume')
+
+ def test_new_foreground_repairs_same_pid_native_root_once(self):
+  self.assert_foreground_repairs_same_pid('/vendor/bin/codex')
+
+ def assert_foreground_repairs_same_pid(self, cli_args):
   with tempfile.TemporaryDirectory() as directory:
    home=Path(directory);(home/'.codex').mkdir()
    database=home/'.codex/state_5.sqlite';rollout=home/'root.jsonl'
@@ -290,7 +296,8 @@ class RepairTests(unittest.TestCase):
     with closing(a.db()) as con:
      con.execute("INSERT INTO codex_sessions(socket,pane,pid,cli_pid,thread_id,rollout_path,origin) VALUES('sock','%1','123',456,'wrong','wrong-path','native')")
      a.record(con,'sock','%1','123','codex','IDLE','Unrelated completed response',True,event_time=2000000000,event_key='wrong-turn')
-     table={123:(1,'zsh'),456:(123,'/vendor/bin/codex resume')}
+     a.remember_preview(con,'sock','%1','123',user='Old request',agent='Old response',transcript_path='wrong-path')
+     table={123:(1,'zsh'),456:(123,cli_args)}
      live={('%1','123'):{'path':'/project'}}
      screen='GPT medium · /project · My task        Goal achieved (1h 2m)\n← for agents'
      def scan():
@@ -301,11 +308,24 @@ class RepairTests(unittest.TestCase):
      self.assertEqual((mapping['thread_id'],mapping['rollout_path'],mapping['origin']),('actual',str(rollout),'resume'))
      row=dict(con.execute('SELECT * FROM panes').fetchone())
      self.assertEqual((row['state'],row['event_key'],row['needs_review']),('RUNNING','actual-turn',0))
+     self.assertEqual((row['transcript_path'],row['preview_users'],row['preview_agent'],row['preview_revision']),
+                      (str(rollout),'[]','',0))
      self.assertLess(row['last_event_time'],2000000000)
      a.acknowledge(con,row)
      row=dict(con.execute('SELECT * FROM panes').fetchone())
      scan()
      self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),row)
+     # Missing/wrong-cwd footers must preserve the current mapping, without
+     # falling back to the thread that happened to start this CLI process.
+     for unmatched in ('GPT medium · /other · My task\n← for agents',
+                       'No current footer'):
+      screen=unmatched
+      with patch('codex_observer.startup_match') as startup:
+       scan()
+       startup.assert_not_called()
+      self.assertEqual(con.execute('SELECT thread_id FROM codex_sessions').fetchone()[0],'actual')
+      self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),row)
+     screen='GPT medium · /project · My task\n← for agents'
      # A duplicate exact title is ambiguous; never choose newest-by-cwd or
      # override the mapping using a startup guess.
      second=home/'second.jsonl'
