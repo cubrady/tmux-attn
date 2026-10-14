@@ -1267,6 +1267,7 @@
     let sheetPreviewToken = 0;
     const acknowledgedVersions = new Map();
     const acknowledgementsInFlight = new Map();
+    const PEER_OUTDATED = 'peer is running an older tmux-attn without this feature';
     const READER_PREFIX = '#/m/';
     const READER_SIG_CHARS = 200;
     let sheetPreviewData = { users: [], agent: '' };
@@ -1545,7 +1546,7 @@
         if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
         if (stillWanted()) patchAttachment(key, { status: 'ready', imageId: body.id });
       } catch (e) {
-        if (stillWanted()) patchAttachment(key, { status: 'error', error: (e && e.message) || '上傳失敗' });
+        if (stillWanted()) patchAttachment(key, { status: 'error', error: friendlyError((e && e.message) || '上傳失敗') });
       }
       const status = document.getElementById('sheet-status');
       if (status.textContent === UPLOADING_NOTICE && !attachments.some(item => item.status === 'uploading')) setSheetStatus('');
@@ -1625,7 +1626,12 @@
       }
       hideReader();
     }
+    function friendlyError(error) {
+      return error === PEER_OUTDATED
+        ? '這台主機的 tmux-attn 版本較舊，尚不支援此功能。請在那台主機更新並重啟 web 服務。' : error;
+    }
     function readerErrorHtml(error, role) {
+      if (error === PEER_OUTDATED) return `<p class="reader-error" role="alert">${escapeHtml(friendlyError(error))}</p>`;
       const moved = error === 'content changed; refresh preview';
       // A user message is addressed by position, so "latest" could be a different prompt; make them re-tap instead.
       if (moved && role === 'user') {

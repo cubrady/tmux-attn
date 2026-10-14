@@ -853,6 +853,18 @@ class StoreTests(unittest.TestCase):
                 with patch.object(a, 'urlopen', side_effect=http_error(code, {'ok': False, 'error': message})):
                     self.assertEqual(dispatch(payload), (code, {'ok': False, 'error': message}), dispatch.__name__)
 
+    def test_a_peer_without_the_new_routes_is_reported_as_outdated(self):
+        peers = [{'name': 'lab', 'url': 'http://lab:7788'}]
+        def missing_route(*args, **kwargs):
+            raise HTTPError('http://lab:7788/x', 404, 'Not Found', {}, io.BytesIO(b'{"ok": false, "error": "not found"}'))
+        with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers), \
+             patch.object(a, 'urlopen', side_effect=missing_route):
+            for dispatch, payload in (
+                    (a.dispatch_message, {'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent'}),
+                    (a.dispatch_upload, {'host': 'lab', 'pane': '%9', 'pid': '9', 'data': 'AAAA'})):
+                code, body = dispatch(payload)
+                self.assertEqual((code, body), (502, {'ok': False, 'error': a.PEER_OUTDATED}), dispatch.__name__)
+
     def test_peer_send_allows_extra_time_when_images_are_attached(self):
         class FakeResp:
             def __enter__(self): return self
