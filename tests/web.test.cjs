@@ -23,23 +23,26 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
     },
     querySelector() { return null; },
     querySelectorAll() { return []; },
-    addEventListener() {},
+    listeners: {},
+    addEventListener(type, listener) { this.listeners[type] = listener; },
   };
   let nowMs = 0;
-  const win = { ...(overrides.window || {}) };
+  const win = { location: { hash: '' }, addEventListener() {}, history: {}, ...(overrides.window || {}) };
   const nav = overrides.navigator || win.navigator || {};
   win.navigator = nav;
   const context = vm.createContext({
     window: win, navigator: nav, location: win.location,
     document, performance: { now: () => nowMs },
     fetch: (url, options) => (url === '/api/fleet' || !fetchRequest) ? new Promise(() => {}) : fetchRequest(url, options),
-    setInterval() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => String(value) },
+    setInterval() {}, setTimeout() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => String(value) },
+    ...(overrides.globals || {}),
   });
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
   vm.runInContext(script, context);
   return {
     elements,
     context,
+    document,
     setNow(ms) { nowMs = ms; },
     render: data => context.render(data),
     open: agent => context.openSheet(agent),
@@ -115,12 +118,13 @@ test('host labels and attributes escape HTML', () => {
   assert.doesNotMatch(pills, /<work>/);
 });
 
-test('review cards retain review labels without restoring removed terminal metadata', () => {
+test('review cards show the agent icon without restoring host chips or sheet target text', () => {
   const ui = dashboard(() => new Promise(() => {}));
   const current = { ...agent('work-machine', 'IDLE', true, true), cli: 'codex', session: 'build-session' };
   ui.render({ agents: [current] });
   const card = ui.elements.get('list').innerHTML;
-  assert.doesNotMatch(card, /class="host tone-|class="cli |\/icons\/codex.svg/);
+  assert.match(card, /class="cli codex"[^>]*>.*?src="\/icons\/codex\.svg"/);
+  assert.doesNotMatch(card, /class="host tone-/);
   assert.match(card, /class="project">未命名專案<\/span>/);
   assert.match(card, /class="review-state unread">未看<\/span>/);
   assert.doesNotMatch(card, /class="project">%1<\/span>/);
@@ -128,7 +132,20 @@ test('review cards retain review labels without restoring removed terminal metad
   assert.equal(ui.elements.has('sheet-target'), false);
   assert.equal(ui.elements.get('sheet-title').textContent, '👀 未命名專案');
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
-  assert.doesNotMatch(html, /\.host\.tone-7|\.cli\.broken::after|\.sheet-sub \{|function cliBadge/);
+  assert.doesNotMatch(html, /\.host\.tone-7|\.sheet-sub \{/);
+});
+
+test('cards map every supported coding agent to its icon and skip non-agent panes', () => {
+  const ui = dashboard(() => new Promise(() => {}));
+  const expected = { claude: 'claude', codex: 'codex', pi: 'pi', agent: 'agent', cursor: 'agent' };
+  for (const [cli, icon] of Object.entries(expected)) {
+    ui.render({ agents: [{ ...agent('', 'RUNNING'), cli }] });
+    assert.match(ui.elements.get('list').innerHTML, new RegExp(`class="cli ${icon}"[^>]*>.*?src="/icons/${icon}\\.svg"`), cli);
+  }
+  for (const cli of ['shell', 'zsh', '', 'constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    ui.render({ agents: [{ ...agent('', 'RUNNING', false), cli }] });
+    assert.doesNotMatch(ui.elements.get('list').innerHTML, /class="cli /, `non-agent ${cli}`);
+  }
 });
 
 function review(project, revision, acknowledged, updated = revision) {
@@ -515,87 +532,514 @@ test('transient host failure retains last-known-good sessions until stale TTL ex
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /group-running/);
 });
 
-test('microphone click requests getUserMedia permission before starting speech recognition', async () => {
-  let getUserMediaCalls = 0;
-  let trackStopped = 0;
-  let speechStarted = 0;
-  class FakeSpeech {
-    start() {
-      speechStarted += 1;
-      if (this.onstart) this.onstart();
-    }
-    stop() {}
-  }
-  const ui = dashboard({
-    window: { SpeechRecognition: FakeSpeech, isSecureContext: true },
-    navigator: {
-      language: 'zh-TW',
-      mediaDevices: {
-        async getUserMedia(constraints) {
-          assert.equal(constraints && constraints.audio, true);
-          getUserMediaCalls += 1;
-          return { getTracks: () => [{ stop() { trackStopped += 1; } }] };
-        },
-      },
-    },
-  });
-  await ui.elements.get('sheet-mic').listeners.click();
-  assert.equal(getUserMediaCalls, 1);
-  assert.equal(trackStopped, 1);
-  assert.equal(speechStarted, 1);
-
-  let resolveDelayed;
-  let delayedStarts = 0;
-  class DelayedSpeech {
-    start() { delayedStarts += 1; }
-    stop() {}
-  }
-  const closeUi = dashboard({
-    window: { SpeechRecognition: DelayedSpeech, isSecureContext: true },
-    navigator: {
-      mediaDevices: {
-        getUserMedia: () => new Promise(resolve => { resolveDelayed = resolve; }),
-      },
-    },
-  });
-  closeUi.open(agent('alpha', 'WAIT'));
-  const pendingClick = closeUi.elements.get('sheet-mic').listeners.click();
-  closeUi.close();
-  resolveDelayed({ getTracks: () => [{ stop() {} }] });
-  await pendingClick;
-  assert.equal(delayedStarts, 0);
+test('reply composer has no microphone control or speech-recognition code', () => {
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.doesNotMatch(html, /sheet-mic|voice-hint|SpeechRecognition|webkitSpeechRecognition|getUserMedia|麥克風/);
+  const ui = dashboard();
+  assert.equal(ui.elements.has('sheet-mic'), false);
+  assert.equal(ui.elements.has('voice-hint'), false);
+  assert.doesNotMatch(ui.elements.get('sheet-text').placeholder || html.match(/<textarea[^>]*>/)[0], /語音|麥克風/);
 });
 
-test('microphone click explains insecure HTTP context or blocked permission instead of hanging', async () => {
-  let speechStarted = 0;
-  class FakeSpeech {
-    start() { speechStarted += 1; }
-    stop() {}
-  }
-  const insecureUi = dashboard({
-    window: {
-      SpeechRecognition: FakeSpeech,
-      isSecureContext: false,
-      location: { protocol: 'http:', hostname: '100.64.0.1' },
+const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+const imageFile = (name, type = 'image/jpeg', outSize = 1000) => ({ name, type, size: 1000, outSize });
+const submitEvent = () => ({ preventDefault() {} });
+
+function uploader({ failFor = [], holdUploads = false, holdSend = false, holdPrepare = false } = {}) {
+  const calls = [];
+  const revoked = [];
+  const held = [];
+  const heldSends = [];
+  const heldPrepares = [];
+  const ui = dashboard({
+    globals: { URL: { createObjectURL: file => `blob:${file.name}`, revokeObjectURL: url => revoked.push(url) } },
+    fetchRequest: async (url, options) => {
+      if (url === '/api/preview') return new Promise(() => {});
+      const body = JSON.parse(options.body);
+      calls.push({ url, body });
+      if (url === '/api/upload') {
+        const name = body.data.replace(/^b64-/, '');
+        const reply = failFor.includes(name)
+          ? { ok: false, status: 400, json: async () => ({ ok: false, error: 'unsupported image type' }) }
+          : { ok: true, status: 200, json: async () => ({ ok: true, id: `id-${name}` }) };
+        if (!holdUploads) return reply;
+        return new Promise(resolve => held.push(() => resolve(reply)));
+      }
+      const sent = { ok: true, status: 200, json: async () => ({ ok: true }) };
+      if (url === '/api/send' && holdSend) return new Promise(resolve => heldSends.push(() => resolve(sent)));
+      return sent;
     },
   });
-  await insecureUi.elements.get('sheet-mic').listeners.click();
-  assert.equal(speechStarted, 0);
-  assert.match(insecureUi.elements.get('sheet-status').textContent, /HTTPS|localhost/);
+  ui.context.prepareImage = async file => {
+    if (holdPrepare) await new Promise(resolve => heldPrepares.push(resolve));
+    return { tag: file.name, size: file.outSize };
+  };
+  ui.context.blobToBase64 = async blob => `b64-${blob.tag}`;
+  const current = { ...agent('lab', 'WAIT'), project: 'demo' };
+  ui.render({ agents: [current] });
+  ui.open(current);
+  const pick = async files => {
+    ui.elements.get('sheet-file').files = files;
+    await ui.elements.get('sheet-file').listeners.change();
+    await flush();
+  };
+  const submit = async () => { await ui.elements.get('sheet-form').listeners.submit(submitEvent()); await flush(); };
+  const sends = () => calls.filter(call => call.url === '/api/send');
+  const uploads = () => calls.filter(call => call.url === '/api/upload');
+  const chips = () => ui.elements.get('sheet-attachments').innerHTML;
+  const chipKeys = () => [...chips().matchAll(/data-key="([^"]+)"/g)].map(([, key]) => key);
+  const remove = key => ui.elements.get('sheet-attachments').listeners.click({
+    target: { closest: () => ({ dataset: { key } }) },
+  });
+  return { ui, calls, revoked, held, heldSends, heldPrepares, current, pick, submit, sends, uploads, chips, chipKeys, remove };
+}
 
-  const deniedUi = dashboard({
-    window: { SpeechRecognition: FakeSpeech, isSecureContext: true },
-    navigator: {
-      mediaDevices: {
-        async getUserMedia() {
-          const err = new Error('Permission denied');
-          err.name = 'NotAllowedError';
-          throw err;
+test('attached images upload to the pane host and their ids ride along with the message', async () => {
+  const t = uploader();
+  await t.pick([imageFile('a.jpg'), imageFile('b.png', 'image/png')]);
+  assert.deepEqual(t.uploads().map(call => call.body), [
+    { host: 'lab', pane: '%1', pid: '123', data: 'b64-a.jpg' },
+    { host: 'lab', pane: '%1', pid: '123', data: 'b64-b.png' },
+  ]);
+  assert.equal(t.chipKeys().length, 2);
+  assert.doesNotMatch(t.chips(), /uploading|error/);
+  t.ui.elements.get('sheet-text').value = 'look at these';
+  await t.submit();
+  assert.equal(t.sends().length, 1);
+  assert.deepEqual(t.sends()[0].body,
+    { host: 'lab', pane: '%1', pid: '123', text: 'look at these', submit: true, images: ['id-a.jpg', 'id-b.png'] });
+  assert.equal(t.chipKeys().length, 0);
+  assert.deepEqual(t.revoked.sort(), ['blob:a.jpg', 'blob:b.png']);
+});
+
+test('an image alone is a valid message', async () => {
+  const t = uploader();
+  await t.pick([imageFile('only.jpg')]);
+  await t.submit();
+  assert.deepEqual(t.sends()[0].body.images, ['id-only.jpg']);
+  assert.equal(t.sends()[0].body.text, '');
+});
+
+test('sending waits for in-flight uploads instead of dropping them', async () => {
+  const t = uploader({ holdUploads: true });
+  await t.pick([imageFile('slow.jpg')]);
+  assert.match(t.chips(), /attachment uploading/);
+  t.ui.elements.get('sheet-text').value = 'hi';
+  await t.submit();
+  assert.equal(t.sends().length, 0);
+  assert.match(t.ui.elements.get('sheet-status').textContent, /上傳中/);
+  t.held.forEach(release => release());
+  await flush();
+  assert.doesNotMatch(t.chips(), /uploading/);
+  await t.submit();
+  assert.deepEqual(t.sends()[0].body.images, ['id-slow.jpg']);
+});
+
+test('a failed upload blocks sending until the image is removed', async () => {
+  const t = uploader({ failFor: ['bad.jpg'] });
+  await t.pick([imageFile('ok.jpg'), imageFile('bad.jpg')]);
+  assert.match(t.chips(), /attachment error/);
+  t.ui.elements.get('sheet-text').value = 'hi';
+  await t.submit();
+  assert.equal(t.sends().length, 0);
+  assert.match(t.ui.elements.get('sheet-status').textContent, /unsupported image type|上傳失敗/);
+  t.remove(t.chipKeys()[1]);
+  await t.submit();
+  assert.deepEqual(t.sends()[0].body.images, ['id-ok.jpg']);
+});
+
+test('only images are accepted and at most four stay attached', async () => {
+  const t = uploader();
+  await t.pick([imageFile('notes.pdf', 'application/pdf'), imageFile('1.jpg'), imageFile('2.jpg'),
+    imageFile('3.jpg'), imageFile('4.jpg'), imageFile('5.jpg')]);
+  assert.equal(t.uploads().length, 4);
+  assert.equal(t.chipKeys().length, 4);
+  assert.match(t.ui.elements.get('sheet-status').textContent, /最多 4 張|只支援圖片/);
+  await t.pick([imageFile('6.jpg')]);
+  assert.equal(t.uploads().length, 4);
+});
+
+test('closing the sheet discards attachments and ignores late upload results', async () => {
+  const t = uploader({ holdUploads: true });
+  await t.pick([imageFile('late.jpg')]);
+  t.ui.close();
+  assert.deepEqual(t.revoked, ['blob:late.jpg']);
+  assert.equal(t.chipKeys().length, 0);
+  t.held.forEach(release => release());
+  await flush();
+  assert.equal(t.chipKeys().length, 0);
+  t.ui.open(t.current);
+  assert.equal(t.chipKeys().length, 0);
+});
+
+test('an image that is still too large after downscaling is rejected before any upload', async () => {
+  const t = uploader();
+  await t.pick([imageFile('huge.png', 'image/png', 9 * 1024 * 1024)]);
+  assert.equal(t.uploads().length, 0);
+  assert.match(t.chips(), /attachment error/);
+  t.ui.elements.get('sheet-text').value = 'hi';
+  await t.submit();
+  assert.equal(t.sends().length, 0);
+});
+
+test('the wait-for-upload notice goes away once uploads finish', async () => {
+  const t = uploader({ holdUploads: true });
+  await t.pick([imageFile('slow.jpg')]);
+  t.ui.elements.get('sheet-text').value = 'hi';
+  await t.submit();
+  assert.match(t.ui.elements.get('sheet-status').textContent, /上傳中/);
+  t.held.forEach(release => release());
+  await flush();
+  assert.equal(t.ui.elements.get('sheet-status').textContent, '');
+});
+
+test('images cannot be added while a send is in flight', async () => {
+  const t = uploader({ holdSend: true });
+  await t.pick([imageFile('a.jpg')]);
+  const pending = t.ui.elements.get('sheet-form').listeners.submit(submitEvent());
+  await flush();
+  assert.equal(t.ui.elements.get('sheet-attach').disabled, true);
+  t.heldSends.forEach(release => release());
+  await pending;
+  assert.equal(t.ui.elements.get('sheet-attach').disabled, false);
+});
+
+test('a sheet closed while an image is still being prepared never uploads it', async () => {
+  const t = uploader({ holdPrepare: true });
+  await t.pick([imageFile('late.jpg')]);
+  t.ui.close();
+  t.heldPrepares.forEach(release => release());
+  await flush();
+  assert.equal(t.uploads().length, 0);
+});
+
+// ---- full-message reader -------------------------------------------------
+
+function fakeBrowser() {
+  const listeners = {};
+  const state = { hash: '', stack: [''], selection: '' };
+  const fire = () => Promise.resolve().then(() => listeners.hashchange && listeners.hashchange());
+  return {
+    state,
+    window: {
+      addEventListener(type, fn) { listeners[type] = fn; },
+      getSelection: () => ({ toString: () => state.selection }),
+      location: {
+        pathname: '/', search: '',
+        get hash() { return state.hash; },
+        set hash(value) { state.hash = value; state.stack.push(value); fire(); },
+      },
+      history: {
+        back() { state.stack.pop(); state.hash = state.stack[state.stack.length - 1]; fire(); },
+        replaceState(_state, _title, url) {
+          state.hash = String(url).includes('#') ? '#' + String(url).split('#')[1] : '';
+          state.stack[state.stack.length - 1] = state.hash;
         },
       },
     },
+  };
+}
+
+const jsonReply = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
+const PREVIEW = { ok: true, revision: 3, viewable: false,
+  preview: { users: ['first prompt', 'second prompt'], agent: 'agent answer '.repeat(30) } };
+
+function readerSetup({ message, startHash = '', clipboard, storage } = {}) {
+  const calls = [];
+  const browser = fakeBrowser();
+  browser.state.hash = startHash;
+  browser.state.stack = [startHash];
+  const ui = dashboard({
+    window: browser.window,
+    globals: storage ? { sessionStorage: storage } : {},
+    navigator: clipboard ? { clipboard } : {},
+    fetchRequest: async (url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push({ url, body });
+      if (url === '/api/preview') return jsonReply(PREVIEW);
+      if (url === '/api/message') {
+        return message ? message(body) : jsonReply({ ok: true, role: body.role, text: `FULL ${body.role} ${body.index}`, chars: 14, truncated: false });
+      }
+      return jsonReply({ ok: true });
+    },
   });
-  await deniedUi.elements.get('sheet-mic').listeners.click();
-  assert.equal(speechStarted, 0);
-  assert.match(deniedUi.elements.get('sheet-status').textContent, /已被瀏覽器封鎖|允許麥克風/);
+  const current = { ...agent('lab', 'WAIT'), project: 'demo' };
+  const el = id => ui.elements.get(id);
+  const line = (role, index) => ({ dataset: { role, index: String(index) } });
+  const tap = (role, index, extra = {}) => el('sheet-preview').listeners.click({
+    target: { closest: selector => selector === 'a[href]' ? (extra.link ? {} : null) : line(role, index) },
+  });
+  const settle = async () => { await flush(); await flush(); };
+  const messages = () => calls.filter(call => call.url === '/api/message');
+  return { ui, el, calls, browser, current, tap, settle, messages };
+}
+
+async function openSheetWithPreview(t) {
+  t.ui.render({ agents: [t.current] });
+  t.ui.open(t.current);
+  await t.settle();
+}
+
+test('sheet messages become tappable only once the full preview has loaded', async () => {
+  const t = readerSetup();
+  t.ui.render({ agents: [{ ...t.current, preview: { users: ['card prompt'], agent: 'card agent' } }] });
+  t.ui.open({ ...t.current, preview: { users: ['card prompt'], agent: 'card agent' } });
+  assert.doesNotMatch(t.el('sheet-preview').innerHTML, /data-role/);
+  await t.settle();
+  const html = t.el('sheet-preview').innerHTML;
+  assert.match(html, /data-role="user" data-index="0"/);
+  assert.match(html, /data-role="user" data-index="1"/);
+  assert.match(html, /data-role="agent" data-index="0"/);
+  assert.equal((html.match(/class="open-full"/g) || []).length, 3);
+});
+
+test('tapping a message opens the reader on a history entry and loads its full text', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(t.browser.state.hash, '#/m/lab/%251/123/agent/0');
+  assert.equal(t.browser.state.stack.length, 2);
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('reader-title').textContent, 'Agent 回覆');
+  assert.match(t.el('reader-sub').textContent, /demo/);
+  assert.match(t.el('reader-sub').textContent, /14 字/);
+  assert.match(t.el('reader-body').innerHTML, /FULL agent 0/);
+  assert.deepEqual(t.messages()[0].body, {
+    host: 'lab', pane: '%1', pid: '123', role: 'agent', index: 0,
+    sig: Array.from('agent answer '.repeat(30)).slice(0, 200).join(''),
+  });
+  await t.tap('user', 1);
+  await t.settle();
+  assert.equal(t.messages()[1].body.sig, 'second prompt');
+  assert.equal(t.el('reader-title').textContent, '你的訊息');
+});
+
+test('the browser back button closes the reader but keeps the sheet', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  await t.tap('user', 0);
+  await t.settle();
+  t.browser.window.history.back();
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.equal(t.el('sheet-root').hidden, false);
+  assert.equal(t.browser.state.hash, '');
+});
+
+async function assertCloseGestureRestoresSheet(gesture) {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(t.browser.state.stack.length, 2);
+  await gesture(t);
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.equal(t.browser.state.stack.length, 1);
+  assert.equal(t.el('sheet-root').hidden, false);
+}
+
+test('the reader back button pops the history entry it pushed', async () => {
+  await assertCloseGestureRestoresSheet(t => t.el('reader-back').listeners.click());
+});
+
+test('Escape closes only the reader, then the sheet', async () => {
+  await assertCloseGestureRestoresSheet(t => t.ui.document.listeners.keydown({ key: 'Escape' }));
+});
+
+test('taps on links and text selections do not open the reader', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0, { link: true });
+  assert.equal(t.browser.state.hash, '');
+  t.browser.state.selection = 'some selected words';
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(t.browser.state.hash, '');
+  assert.equal(t.browser.state.stack.length, 1);
+  assert.equal(t.messages().length, 0);
+});
+
+test('a conversation that moved on shows a recoverable message instead of the wrong text', async () => {
+  const t = readerSetup({ message: () => jsonReply({ ok: false, error: 'content changed; refresh preview' }, 409) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /已有新內容/);
+  assert.match(t.el('reader-body').innerHTML, /data-retry/);
+  assert.equal(t.el('reader-copy').disabled, true);
+});
+
+test('failed loads can be retried', async () => {
+  let attempts = 0;
+  const t = readerSetup({ message: body => ++attempts === 1
+    ? jsonReply({ ok: false, error: 'peer message failed: URLError' }, 502)
+    : jsonReply({ ok: true, role: body.role, text: 'second try', chars: 10, truncated: false }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /peer message failed/);
+  await t.el('reader-body').listeners.click({ target: { closest: selector => selector === '[data-retry]' ? {} : null } });
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /second try/);
+  assert.equal(t.el('reader-copy').disabled, false);
+});
+
+test('truncated messages say how much is shown', async () => {
+  const t = readerSetup({ message: body => jsonReply({ ok: true, role: body.role, text: 'x'.repeat(50), chars: 300000, truncated: true }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /reader-note/);
+  assert.match(t.el('reader-body').innerHTML, /300000/);
+});
+
+test('a late response after the reader closed is ignored', async () => {
+  let release;
+  const t = readerSetup({ message: body => new Promise(resolve => { release = () => resolve(jsonReply({ ok: true, role: body.role, text: 'LATE', chars: 4, truncated: false })); }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  t.browser.window.history.back();
+  await t.settle();
+  release();
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /LATE/);
+});
+
+test('closing the sheet closes the reader and leaves no history entry behind', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  t.ui.close();
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.equal(t.browser.state.stack.length, 1);
+  assert.equal(t.browser.state.hash, '');
+});
+
+test('reply closes the reader and focuses the reply box', async () => {
+  const t = readerSetup();
+  let focused = 0;
+  t.el('sheet-text').focus = () => { focused += 1; };
+  await openSheetWithPreview(t);
+  focused = 0;
+  await t.tap('agent', 0);
+  await t.settle();
+  await t.el('reader-reply').listeners.click();
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.equal(focused, 1);
+});
+
+test('a reload on a reader link reopens the sheet and the message once the session list arrives', async () => {
+  const t = readerSetup({ startHash: '#/m/lab/%251/123/agent/0' });
+  assert.equal(t.messages().length, 0);
+  t.ui.render({ agents: [t.current] });
+  await t.settle();
+  assert.equal(t.el('sheet-root').hidden, false);
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.match(t.el('reader-body').innerHTML, /FULL agent 0/);
+  assert.equal(t.messages()[0].body.sig, '');
+  t.ui.render({ agents: [t.current] });
+  await t.settle();
+  assert.equal(t.messages().length, 1);
+});
+
+test('a reader link to a session that no longer exists is dropped', async () => {
+  for (const hash of ['#/m/lab/%259/999/agent/0', '#/m/broken', '#/m/lab/%251/123/robot/0', '#/m/lab/%251/123/user/-1']) {
+    const t = readerSetup({ startHash: hash });
+    t.ui.render({ agents: [t.current] });
+    await t.settle();
+    assert.equal(t.el('reader-root').hidden, true, hash);
+    assert.equal(t.browser.state.hash, '', hash);
+    assert.equal(t.messages().length, 0, hash);
+  }
+});
+
+test('copy puts the full text on the clipboard and reports failure when it cannot', async () => {
+  const written = [];
+  const t = readerSetup({ clipboard: { writeText: async text => { written.push(text); } } });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  await t.el('reader-copy').listeners.click();
+  assert.deepEqual(written, ['FULL agent 0']);
+  assert.equal(t.el('reader-status').textContent, '已複製');
+  const plain = readerSetup();
+  await openSheetWithPreview(plain);
+  await plain.tap('agent', 0);
+  await plain.settle();
+  await plain.el('reader-copy').listeners.click();
+  assert.equal(plain.el('reader-status').textContent, '無法複製');
+});
+
+test('forward navigation to a reader link reopens the sheet and message from a clean state', async () => {
+  const t = readerSetup();
+  const other = { ...agent('lab', 'WAIT'), pane: '%2', pid: '456', project: 'other' };
+  t.ui.render({ agents: [t.current, other] });
+  t.ui.open(t.current);
+  await t.settle();
+  await t.tap('agent', 0);
+  await t.settle();
+  t.browser.window.history.back();
+  await t.settle();
+  t.ui.close();
+  await t.settle();
+  t.ui.open(other);
+  await t.settle();
+  t.el('sheet-text').value = 'draft meant for the other session';
+  await t.el('sheet-kill').listeners.click();
+  assert.match(t.el('sheet-kill').title, /5 秒內/);
+  t.browser.window.location.hash = '#/m/lab/%251/123/agent/0';
+  await t.settle();
+  assert.equal(t.el('reader-title').textContent, 'Agent 回覆');
+  assert.equal(t.el('sheet-text').value, '');
+  assert.doesNotMatch(t.el('sheet-kill').title, /5 秒內/);
+});
+
+test('a reloaded reader link still notices that the conversation moved on', async () => {
+  const store = new Map();
+  const storage = { getItem: key => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)) };
+  const first = readerSetup({ storage });
+  await openSheetWithPreview(first);
+  await first.tap('user', 1);
+  await first.settle();
+  const reloaded = readerSetup({ storage, startHash: '#/m/lab/%251/123/user/1' });
+  reloaded.ui.render({ agents: [reloaded.current] });
+  await reloaded.settle();
+  assert.equal(reloaded.messages()[0].body.sig, 'second prompt');
+});
+
+test('a moved-on user message offers no retry that could show a different prompt', async () => {
+  const t = readerSetup({ message: () => jsonReply({ ok: false, error: 'content changed; refresh preview' }, 409) });
+  await openSheetWithPreview(t);
+  await t.tap('user', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /重新點選/);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /data-retry/);
+});
+
+test('text still syncing from the hook is labelled as partial', async () => {
+  const t = readerSetup({ message: body => jsonReply({ ok: true, role: body.role, text: 'clipped…', chars: 8, truncated: true, partial: true }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /還在同步/);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /僅顯示前/);
+});
+
+test('reader output stays inert even if a peer relays hostile metadata', async () => {
+  const t = readerSetup({ message: () => jsonReply({
+    ok: true, role: 'agent', text: { length: '<img src=x onerror=alert(1)>' },
+    chars: '<img src=x onerror=alert(2)>', truncated: true,
+  }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /<img/i);
+  assert.doesNotMatch(t.el('reader-sub').textContent, /<img/i);
 });
