@@ -1011,8 +1011,8 @@
     const SECTIONS = [
       ['wait', '等待回覆'],
       ['review', '待看'],
-      ['running', '進行中'],
       ['idle', '閒置'],
+      ['running', '進行中'],
       ['shell', '其他 pane'],
     ];
     const SECTION_EMOJI = { wait: '🙋', review: '👀', running: '🏃', idle: '💤', shell: '💻' };
@@ -1427,8 +1427,8 @@
       document.getElementById('summary').innerHTML = [
         ['wait', '🙋', counts.wait || 0, '等待'],
         ['review', '👀', counts.review || 0, '待看'],
-        ['running', '🏃', counts.running || 0, '進行中'],
         ['idle', '💤', counts.idle || 0, '閒置'],
+        ['running', '🏃', counts.running || 0, '進行中'],
       ].map(([key, e, n, l]) => {
         const disabled = n === 0 ? ' disabled' : '';
         const active = activeGroup === key ? ' active' : '';

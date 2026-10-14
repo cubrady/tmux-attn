@@ -331,8 +331,7 @@ def discover(con, sock, live, table, attempted):
         cli_pid = candidates[0]
         existing = con.execute('SELECT * FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',(sock,pane,pane_pid)).fetchone()
         resumed = 'resume' in table[cli_pid][1].split()
-        if existing and existing['cli_pid'] == cli_pid and not resumed:
-            continue
+        same_cli = bool(existing and existing['cli_pid'] == cli_pid)
         if not existing and cli_pid in attempted and time.monotonic()-attempted[cli_pid] < 60:
             continue
         attempted[cli_pid] = time.monotonic()
@@ -340,11 +339,13 @@ def discover(con, sock, live, table, attempted):
             cwd = process_cwd(cli_pid)
             origin = 'startup'
             match = None
-            if resumed:
+            # /new and in-app resume keep the same PID and original argv.
+            # Revalidate their foreground identity just like explicit resume.
+            if resumed or existing:
                 screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
                 match = resumed_match(state_db,cwd,screen)
                 origin = 'resume'
-            if not match and not resumed:
+            if not match and not resumed and not same_cli:
                 match = startup_match(state_db,cwd,process_start(cli_pid))
                 origin = 'startup'
         except (OSError,ValueError,subprocess.SubprocessError,sqlite3.Error):
@@ -358,7 +359,7 @@ def discover(con, sock, live, table, attempted):
         latest = read_lifecycle(path)[1] if origin == 'resume' and changed else None
         with con:
             # Explicit hook registrations have priority over inferred startup matches.
-            # A uniquely verified resumed foreground thread can repair an old
+            # A uniquely verified foreground thread can repair an old
             # native registration belonging to a different root conversation.
             if existing and existing['origin'] == 'native' and origin != 'resume':
                 con.execute('UPDATE codex_sessions SET cli_pid=? WHERE socket=? AND pane=? AND pid=?',(cli_pid,sock,pane,pane_pid))
@@ -366,6 +367,13 @@ def discover(con, sock, live, table, attempted):
                 con.execute('''INSERT INTO codex_sessions(socket,pane,pid,cli_pid,thread_id,rollout_path,origin)
                     VALUES(?,?,?,?,?,?,?) ON CONFLICT(socket,pane,pid) DO UPDATE SET
                     cli_pid=excluded.cli_pid,thread_id=excluded.thread_id,rollout_path=excluded.rollout_path,origin=excluded.origin''', (sock,pane,pane_pid,cli_pid,thread,path,origin))
+                if changed:
+                    # The former root's cached conversation is a different
+                    # identity, even though the terminal PID stayed the same.
+                    con.execute("""UPDATE panes SET transcript_path=?,preview_users='[]',
+                        preview_agent='',preview_mtime=0,preview_revision=0
+                        WHERE socket=? AND pane=? AND pid=? AND agent='codex'""",
+                        (path,sock,pane,pane_pid))
                 if latest:
                     current = con.execute('SELECT agent FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pane_pid)).fetchone()
                     if current and current['agent'] == 'codex':
