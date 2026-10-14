@@ -83,11 +83,22 @@ paths = [HOME/'.tmux.conf', HOME/'.claude/settings.json', HOME/'.codex/hooks.jso
 paths.append(alias_config)
 paths.append(HOME/'.cursor/hooks.json')
 paths.append(web_index)
+paths.extend([
+    DEST/'web/icons', DEST/'install_web_service.sh',
+    DEST/'contrib/systemd/tmux-attn-web.service',
+    DEST/'contrib/launchd/ai.tmux-attn.web.plist',
+])
 manifest = []
 for i, p in enumerate(paths):
     copy = BACKUP / str(i)
-    if p.exists(): shutil.copy2(p, copy)
-    manifest.append({'path': str(p), 'backup': str(copy) if p.exists() else None})
+    directory = p.is_dir() or p == DEST/'web/icons'
+    if p.exists():
+        if directory:
+            shutil.copytree(p, copy)
+        else:
+            shutil.copy2(p, copy)
+    manifest.append({'path': str(p), 'backup': str(copy) if p.exists() else None,
+                     'directory': directory})
 (BACKUP/'manifest.json').write_text(json.dumps(manifest, indent=2))
 (BACKUP/'runtime.json').write_text(json.dumps(runtime,indent=2))
 prior_hooks = {}

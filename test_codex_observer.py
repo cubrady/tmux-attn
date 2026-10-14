@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
-from codex_observer import approval_screen,lifecycle,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli
+from codex_observer import approval_screen,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli
 from codex_observer import queued_questions_screen,sync_attention_overlay,observe_codex_unmapped
 
 class ObserverTests(unittest.TestCase):
@@ -94,7 +94,8 @@ class ObserverTests(unittest.TestCase):
   self.assertEqual(claude_screen(waiting),('RUNNING','Working',False))
   self.assertEqual(claude_screen(waiting+'\n'+done)[0],'IDLE')
   self.assertEqual(claude_screen(done)[0],'IDLE')
-  self.assertEqual(claude_screen(done.replace('Finished the update.','Which option？')),('IDLE','Response ends with a question; review suggested',True))
+  for question in ('Which option?', 'Which option？'):
+   self.assertEqual(claude_screen(done.replace('Finished the update.',question)),('IDLE','Response ends with a question; review suggested',True))
   for modal in ['Do you want to proceed?\n❯ 1. Yes\n2. No', 'Claude Code needs your approval for the plan', 'Enter to select · Esc to cancel','Submit answers','Press Enter to continue','Session paused']:
    self.assertIsNone(claude_screen(modal+'\n'+busy))
    self.assertIsNone(claude_screen(modal+'\n'+done))
@@ -129,7 +130,8 @@ class ObserverTests(unittest.TestCase):
   def screen(body,active=False):
    return body+'\n\n → Add a follow-up'+('    ctrl+c to stop' if active else '')+'\n\n Auto · 16.6%    Run Everything\n /project · main\n'
   self.assertEqual(cursor_screen(screen('Done.'),'/project'),('IDLE','Response finished; review needed',True))
-  self.assertEqual(cursor_screen(screen('Pick one？'),'/project'),('IDLE','Response ends with a question; review suggested',True))
+  for question in ('Pick one?', 'Pick one？'):
+   self.assertEqual(cursor_screen(screen(question),'/project'),('IDLE','Response ends with a question; review suggested',True))
   self.assertEqual(cursor_screen(screen('Done.',True),'/project')[0],'RUNNING')
   self.assertIsNone(cursor_screen(screen('Done.'),'/other'))
   self.assertIsNone(cursor_screen('Done.\nAdd a follow-up\n/project · main','/project'))

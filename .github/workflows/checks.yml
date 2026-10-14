@@ -1,0 +1,48 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install check dependencies and tmux 3.8
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libevent-dev libncurses-dev shellcheck
+          python -m pip install ruff
+          curl --fail --location --retry 3 https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz -o /tmp/tmux.tar.gz
+          tar -xzf /tmp/tmux.tar.gz -C /tmp
+          cd /tmp/tmux-3.8
+          ./configure
+          make -j2
+          sudo make install
+          tmux -V
+      - name: Python static checks
+        run: ruff check --select F .
+      - name: Shell checks
+        run: shellcheck bootstrap.sh install.sh install_web_service.sh
+      - name: Python tests
+        run: python -m unittest discover -v
+      - name: Dashboard tests
+        run: node --test tests/web.test.cjs
+      - name: tmux interaction tests
+        run: |
+          python tests/popup_roundtrip.py
+          python tests/status_click_roundtrip.py

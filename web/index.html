@@ -199,8 +199,9 @@
       gap: 1px;
       background: var(--line);
       border: 1px solid var(--line);
-      border-radius: var(--radius);
+      border-radius: 10px;
       overflow: hidden;
+      box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
     }
     .stat {
       appearance: none;
@@ -209,11 +210,12 @@
       margin: 0;
       border: 0;
       background: var(--card);
-      padding: 10px 6px 9px;
+      padding: 16px 8px 14px;
       text-align: center;
       color: inherit;
       font: inherit;
       cursor: pointer;
+      min-height: 4.5rem;
     }
     .stat:disabled {
       opacity: 0.42;
@@ -230,15 +232,17 @@
     }
     .stat .n {
       font-family: var(--mono);
-      font-size: 1.05rem;
-      font-weight: 500;
+      font-size: 1.45rem;
+      font-weight: 600;
       font-variant-numeric: tabular-nums;
-      letter-spacing: -0.03em;
+      letter-spacing: -0.04em;
+      line-height: 1.15;
     }
     .stat .l {
-      margin-top: 3px;
-      font-size: 0.65rem;
-      font-weight: 500;
+      margin-top: 6px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
       color: var(--muted);
     }
     .hosts {
@@ -287,17 +291,29 @@
     }
     .host-pill.active {
       box-shadow: 0 0 0 2px color-mix(in srgb, var(--host-fg, var(--accent)) 55%, transparent);
-      filter: saturate(1.15);
+      opacity: 1;
+    }
+    /* Online but idle: mute colors only — avoid filter (breaks flex wrap / overflow). */
+    .host-pill.empty:not(.active):not(.bad) {
+      --host-fg: var(--muted);
+      --host-bg: color-mix(in srgb, var(--line) 42%, var(--card));
+      --host-bd: var(--line);
+      font-weight: 500;
+      box-shadow: none;
+      opacity: 0.72;
+    }
+    .host-pill.empty:not(.active):not(.bad):hover,
+    .host-pill.empty:not(.active):not(.bad):focus-visible {
+      opacity: 0.92;
+      --host-bd: color-mix(in srgb, var(--muted) 35%, var(--line));
     }
     .host-pill.dim {
-      opacity: 0.38;
-      filter: grayscale(0.4);
+      opacity: 0.4;
       box-shadow: none;
     }
     .host-pill.dim:hover,
     .host-pill.dim:focus-visible {
-      opacity: 0.62;
-      filter: grayscale(0.15);
+      opacity: 0.7;
     }
     .host-pill .count {
       font-weight: 500;
@@ -912,14 +928,16 @@
     }
     .skel-stat {
       background: var(--card);
-      padding: 12px 8px;
+      padding: 16px 8px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
+      min-height: 4.5rem;
+      justify-content: center;
     }
-    .skel-stat .skel-n { height: 1.05rem; width: 2.6rem; }
-    .skel-stat .skel-l { height: 0.55rem; width: 1.8rem; }
+    .skel-stat .skel-n { height: 1.35rem; width: 3.2rem; }
+    .skel-stat .skel-l { height: 0.7rem; width: 2.2rem; }
     .skel-hosts {
       display: flex;
       flex-wrap: wrap;
@@ -1099,12 +1117,22 @@
       return latestAgents.filter(a => hostFilters.has(agentHostName(a)));
     }
     function hostSessionCounts(agents) {
+      // Count tracked agent sessions only — bare shell panes are not sessions.
       const counts = Object.create(null);
       for (const a of agents) {
+        if (category(a) === 'shell') continue;
         const name = agentHostName(a);
         counts[name] = (counts[name] || 0) + 1;
       }
       return counts;
+    }
+    function sortedHosts(hosts, sessionCounts) {
+      return [...hosts].sort((a, b) => {
+        const countDiff = (sessionCounts[b.name] || 0) - (sessionCounts[a.name] || 0);
+        if (countDiff) return countDiff;
+        if (!!a.ok !== !!b.ok) return a.ok ? -1 : 1;
+        return String(a.name || '').localeCompare(String(b.name || ''), 'en');
+      });
     }
     function category(agent) {
       if (!agent.tracked || agent.state === 'SHELL') return 'shell';
@@ -1371,22 +1399,23 @@
         '，約 10 秒更新';
       const hostButtons = [];
       if (hosts.length > 1) {
-        const total = latestAgents.length;
+        const total = Object.values(sessionCounts).reduce((n, v) => n + v, 0);
         const allActive = !filtered;
         const allDim = filtered ? ' dim' : '';
         hostButtons.push(
           `<button type="button" class="host-pill all${allActive ? ' active' : ''}${allDim}" data-host="" aria-pressed="${allActive ? 'true' : 'false'}">全部<span class="count">(${total})</span></button>`
         );
       }
-      for (const row of hosts) {
+      for (const row of sortedHosts(hosts, sessionCounts)) {
         const tone = hostTone(row.name);
         const active = hostFilters.has(row.name);
         const dim = filtered && !active;
         const offline = row.ok ? '' : ' bad';
         const n = sessionCounts[row.name] || 0;
+        const empty = (row.ok && n === 0) ? ' empty' : '';
         const label = escapeHtml(row.name) + (row.ok ? '' : ' offline') + `<span class="count">(${n})</span>`;
         hostButtons.push(
-          `<button type="button" class="host-pill tone-${tone}${offline}${active ? ' active' : ''}${dim ? ' dim' : ''}" data-host="${escapeHtml(row.name)}" title="${escapeHtml(row.error || row.url || row.source || '')}" aria-pressed="${active ? 'true' : 'false'}">${label}</button>`
+          `<button type="button" class="host-pill tone-${tone}${offline}${empty}${active ? ' active' : ''}${dim ? ' dim' : ''}" data-host="${escapeHtml(row.name)}" title="${escapeHtml(row.error || row.url || row.source || '')}" aria-pressed="${active ? 'true' : 'false'}">${label}</button>`
         );
       }
       document.getElementById('hosts').innerHTML = hostButtons.join('');
