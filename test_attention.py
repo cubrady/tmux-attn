@@ -10,9 +10,13 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import base64
+import http.client
 import io
+import stat
 from concurrent.futures import ThreadPoolExecutor
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 spec = importlib.util.spec_from_file_location('attention', Path(__file__).with_name('attention.py'))
 a = importlib.util.module_from_spec(spec)
@@ -421,7 +425,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(request.get_header('Title'), 'tmux-attn')
 
     def test_dispatch_send_local_and_peer(self):
-        def fake_send(pane, pid, text, submit=True):
+        def fake_send(pane, pid, text, submit=True, images=()):
             if not str(text).strip():
                 return 'empty message'
             return None
@@ -430,7 +434,7 @@ class StoreTests(unittest.TestCase):
             code, body = a.dispatch_send({'pane': '%1', 'pid': '123', 'text': 'hello', 'submit': True})
             self.assertEqual(code, 200)
             self.assertTrue(body['ok'])
-            send_mock.assert_called_once_with('%1', '123', 'hello', submit=True)
+            send_mock.assert_called_once_with('%1', '123', 'hello', submit=True, images=[])
             code, body = a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '   '})
             self.assertEqual((code, body.get('error')), (409, 'empty message'))
         with patch.object(a, 'local_host_name', return_value='home'), \
@@ -492,6 +496,455 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(a.send_to_pane('%1', '456', 'hi'), 'pane not found or pid mismatch')
             self.assertEqual(a.send_to_pane('%1', '123', '  '), 'empty message')
 
+    PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 24
+    LIVE = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj'}}
+
+    def test_store_upload_accepts_images_and_issues_server_names(self):
+        samples = {
+            'png': self.PNG,
+            'jpg': b'\xff\xd8\xff\xe0' + b'\x00' * 20,
+            'gif': b'GIF89a' + b'\x00' * 20,
+            'webp': b'RIFF\x00\x00\x00\x00WEBPVP8 ' + b'\x00' * 12,
+        }
+        for ext, data in samples.items():
+            image_id, error = a.store_upload(data)
+            self.assertIsNone(error, ext)
+            self.assertRegex(image_id, r'^[0-9a-f]{32}\.' + ext + '$')
+            path = a.upload_path(image_id)
+            self.assertEqual(path.read_bytes(), data)
+            self.assertEqual(path.parent, a.STATE / 'uploads')
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((a.STATE / 'uploads').stat().st_mode), 0o700)
+
+    def test_store_upload_rejects_non_images_empty_and_oversize(self):
+        for data in (b'<svg xmlns="http://www.w3.org/2000/svg"/>', b'#!/bin/sh\necho hi\n', b'RIFF\x00\x00\x00\x00WAVEfmt '):
+            self.assertEqual(a.store_upload(data), (None, 'unsupported image type'))
+        self.assertEqual(a.store_upload(b''), (None, 'empty image'))
+        with patch.object(a, 'MAX_UPLOAD_BYTES', 16):
+            self.assertEqual(a.store_upload(self.PNG), (None, 'image too large'))
+        self.assertEqual(list((a.STATE / 'uploads').glob('*')) if (a.STATE / 'uploads').exists() else [], [])
+
+    def test_upload_path_only_resolves_server_issued_ids(self):
+        image_id, _ = a.store_upload(self.PNG)
+        self.assertIsNotNone(a.upload_path(image_id))
+        for bad in ('../' + image_id, '/etc/passwd', 'abc.png', image_id.upper(), image_id + '/x', image_id + '\n', '', None, 7,
+                    '0' * 32 + '.png', '0' * 32 + '.svg'):
+            self.assertIsNone(a.upload_path(bad), bad)
+
+    def test_prune_uploads_drops_expired_and_keeps_newest_within_cap(self):
+        now = time.time()
+        ids = []
+        for age in (30 * 86400, 10 * 86400, 300, 200, 100):
+            image_id, _ = a.store_upload(self.PNG)
+            os.utime(a.upload_path(image_id), (now - age, now - age))
+            ids.append(image_id)
+        with patch.object(a, 'UPLOAD_MAX_FILES', 2):
+            a.prune_uploads(now=now)
+        kept = [i for i in ids if a.upload_path(i)]
+        self.assertEqual(kept, ids[3:])
+
+    def test_dispatch_upload_stores_on_live_pane_only(self):
+        encoded = base64.b64encode(self.PNG).decode()
+        base = {'pane': '%1', 'pid': '123', 'data': encoded, 'name': '../../evil.sh'}
+        self.assertEqual(a.dispatch_upload('x')[0], 400)
+        self.assertEqual(a.dispatch_upload({'pane': '%1', 'pid': '123'})[0], 400)
+        with patch.object(a, 'live_panes', return_value=self.LIVE), patch.object(a, 'local_host_name', return_value='home'):
+            code, body = a.dispatch_upload(base)
+            self.assertEqual(code, 200)
+            self.assertTrue(body['ok'])
+            self.assertEqual(body['bytes'], len(self.PNG))
+            self.assertEqual(a.upload_path(body['id']).read_bytes(), self.PNG)
+            self.assertNotIn('evil', body['id'])
+            self.assertEqual(a.dispatch_upload(base | {'data': '***not base64***'})[0], 400)
+            code, body = a.dispatch_upload(base | {'data': base64.b64encode(b'MZ-not-an-image').decode()})
+            self.assertEqual((code, body['error']), (400, 'unsupported image type'))
+            with patch.object(a, 'MAX_UPLOAD_BYTES', 8):
+                self.assertEqual(a.dispatch_upload(base)[0], 413)
+            code, body = a.dispatch_upload(base | {'pid': '999'})
+            self.assertEqual((code, body['error']), (409, 'pane not found or pid mismatch'))
+
+    def test_dispatch_upload_forwards_to_peer_with_longer_timeout(self):
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({'ok': True, 'id': 'f' * 32 + '.png'}).encode()
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+            code, body = a.dispatch_upload({'host': 'lab', 'pane': '%9', 'pid': '999', 'data': 'AAAA'})
+            self.assertEqual((code, body['id']), (200, 'f' * 32 + '.png'))
+            request = urlopen_mock.call_args.args[0]
+            self.assertEqual(request.full_url, 'http://lab:7788/api/upload')
+            self.assertEqual(json.loads(request.data.decode())['data'], 'AAAA')
+            self.assertGreaterEqual(urlopen_mock.call_args.kwargs['timeout'], 15)
+            code, body = a.dispatch_upload({'host': 'nowhere', 'pane': '%9', 'pid': '999', 'data': 'AAAA'})
+            self.assertEqual(code, 404)
+
+    def test_dispatch_send_validates_and_forwards_image_ids(self):
+        image_id = 'a' * 32 + '.png'
+        with patch.object(a, 'send_to_pane', return_value=None) as send_mock, patch.object(a, 'local_host_name', return_value='home'):
+            code, _ = a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'images': [image_id]})
+            self.assertEqual(code, 200)
+            send_mock.assert_called_once_with('%1', '123', '', submit=True, images=[image_id])
+            send_mock.reset_mock()
+            for bad in (['../x.png'], [image_id] * (a.MAX_IMAGES + 1), 'a.png', [7], [None], [image_id + '\n']):
+                code, body = a.dispatch_send({'pane': '%1', 'pid': '123', 'text': 'x', 'images': bad})
+                self.assertEqual((code, body['error']), (400, 'invalid images'), bad)
+            send_mock.assert_not_called()
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({'ok': True}).encode()
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+            a.dispatch_send({'host': 'lab', 'pane': '%9', 'pid': '999', 'text': 'yo', 'images': [image_id]})
+            self.assertEqual(json.loads(urlopen_mock.call_args.args[0].data.decode())['images'], [image_id])
+
+    def _send_events(self, text, ids, submit=True):
+        events = []
+        def fake_run(cmd, input=None, **kwargs):
+            events.append(('load', input.decode()))
+        def fake_tmux(*args, **kwargs):
+            if args[0] == 'display-message':
+                return '123'
+            if args[0] == 'paste-buffer':
+                events.append(('paste', '-p' in args))
+            elif args[0] == 'send-keys':
+                events.append(('key', args[-1]))
+            return ''
+        with patch.object(a, 'live_panes', return_value=self.LIVE), patch.object(a, 'tmux', side_effect=fake_tmux), \
+             patch.object(a.subprocess, 'run', side_effect=fake_run), patch.object(a, 'IMAGE_SETTLE_SECONDS', 0):
+            error = a.send_to_pane('%1', '123', text, submit=submit, images=ids)
+        return error, events
+
+    def test_send_to_pane_pastes_text_then_each_image_path_alone_then_enter(self):
+        first, _ = a.store_upload(self.PNG)
+        second, _ = a.store_upload(self.PNG)
+        error, events = self._send_events('look at these', [first, second])
+        self.assertIsNone(error)
+        self.assertEqual(events, [
+            ('load', 'look at these'), ('paste', True), ('key', 'Space'),
+            ('load', str(a.upload_path(first))), ('paste', True), ('key', 'Space'),
+            ('load', str(a.upload_path(second))), ('paste', True), ('key', 'Enter'),
+        ])
+        # Each path is its own paste: Codex only attaches a paste that is exactly an image path.
+        self.assertTrue(all(Path(value).is_absolute() for kind, value in events if kind == 'load' and value != 'look at these'))
+
+    def test_send_to_pane_allows_image_only_and_reports_missing_image(self):
+        image_id, _ = a.store_upload(self.PNG)
+        error, events = self._send_events('   ', [image_id])
+        self.assertIsNone(error)
+        self.assertEqual([kind for kind, _ in events], ['load', 'paste', 'key'])
+        self.assertEqual(events[0], ('load', str(a.upload_path(image_id))))
+        self.assertEqual(events[-1], ('key', 'Enter'))
+        error, events = self._send_events('hi', ['b' * 32 + '.png'])
+        self.assertEqual((error, events), ('image not found', []))
+        error, events = self._send_events('hi', [image_id], submit=False)
+        self.assertNotIn(('key', 'Enter'), events)
+
+    def test_send_to_pane_text_only_sequence_is_unchanged(self):
+        error, events = self._send_events('hello', [])
+        self.assertEqual((error, events), (None, [('load', 'hello'), ('paste', True), ('key', 'Enter')]))
+
+    def test_web_upload_endpoint_and_request_size_limit(self):
+        handler = a.make_web_handler()
+
+        class Quiet(handler):
+            def log_message(self, format, *args):
+                pass
+
+        def post(port, path, payload):
+            request = Request(f'http://127.0.0.1:{port}{path}', data=json.dumps(payload).encode(),
+                              headers={'Content-Type': 'application/json'}, method='POST')
+            return urlopen(request, timeout=2)
+
+        server = a.ThreadingHTTPServer(('127.0.0.1', 0), Quiet)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            port = server.server_address[1]
+            with patch.object(a, 'live_panes', return_value=self.LIVE), patch.object(a, 'load_peers', return_value=[]):
+                body = json.loads(post(port, '/api/upload', {
+                    'pane': '%1', 'pid': '123', 'data': base64.b64encode(self.PNG).decode()}).read())
+                self.assertTrue(body['ok'])
+                self.assertEqual(a.upload_path(body['id']).read_bytes(), self.PNG)
+                shown = {'role': 'agent', 'text': 'full', 'chars': 4, 'truncated': False}
+                with patch.object(a, 'full_message_for_pane', return_value=(shown, None)) as full_mock:
+                    body = json.loads(post(port, '/api/message', {'pane': '%1', 'pid': '123', 'role': 'agent'}).read())
+                self.assertEqual((body['ok'], body['text']), (True, 'full'))
+                self.assertEqual(full_mock.call_args.args[1:], ('%1', '123', 'agent', 0, ''))
+                with patch.object(a, 'MAX_BODY_BYTES', 64), self.assertRaises(HTTPError) as caught:
+                    post(port, '/api/send', {'pane': '%1', 'pid': '123', 'text': 'x' * 200})
+                self.assertEqual(caught.exception.code, 413)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def _message_fixture(self, users, agent_text, cached_agent=None):
+        path = Path(self.tmp.name) / 'session.jsonl'
+        rows = [{'type': 'user', 'message': {'content': text}} for text in users]
+        rows.append({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': agent_text}]}})
+        path.write_text('\n'.join(json.dumps(row) for row in rows))
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Finished', True)
+        with self.con:
+            self.con.execute('UPDATE panes SET transcript_path=?, preview_agent=? WHERE pane=?',
+                             (str(path), cached_agent or '', '%1'))
+        return path
+
+    def _full_message(self, role, index=0, sig=''):
+        with patch.object(a, 'resolve_socket', return_value='socket'), patch.object(a, 'live_panes', return_value=self.LIVE):
+            return a.full_message_for_pane(self.con, '%1', '123', role, index, sig)
+
+    LONG_REPORT = '\n'.join(f'line {n:05d} ' + 'x' * 40 for n in range(300))
+
+    def test_full_message_returns_text_beyond_the_4000_char_preview_clip(self):
+        self._message_fixture(['first', 'second', 'third', 'fourth'], self.LONG_REPORT)
+        shown = a.clip_preview(self.LONG_REPORT, a.PREVIEW_CHARS_FULL)
+        self.assertLess(len(shown), len(self.LONG_REPORT))
+        result, error = self._full_message('agent', sig=shown[:200])
+        self.assertIsNone(error)
+        self.assertEqual(result['text'], self.LONG_REPORT)
+        self.assertEqual((result['role'], result['chars'], result['truncated'], result['partial']), ('agent', len(self.LONG_REPORT), False, False))
+
+    def test_full_message_indexes_the_last_three_user_messages_and_checks_the_signature(self):
+        self._message_fixture(['first', 'second prompt ' + 'y' * 5000, 'third', 'fourth'], 'done')
+        result, error = self._full_message('user', 0, sig='second prompt ')
+        self.assertIsNone(error)
+        self.assertEqual(len(result['text']), len('second prompt ') + 5000)
+        self.assertEqual(self._full_message('user', 2, sig='fourth')[0]['text'], 'fourth')
+        # The sheet showed a different message at this slot than the transcript has now.
+        self.assertEqual(self._full_message('user', 0, sig='first'), (None, 'content changed; refresh preview'))
+        self.assertEqual(self._full_message('user', 3)[1], 'content changed; refresh preview')
+        self.assertEqual(self._full_message('user', 1)[0]['text'], 'third')  # no signature: positional
+
+    def test_full_message_falls_back_to_the_hook_cache_when_the_transcript_lags(self):
+        self._message_fixture(['go'], 'older transcript answer', cached_agent='Final answer from the hook')
+        result, error = self._full_message('agent', sig='Final answer')
+        self.assertIsNone(error)
+        self.assertEqual(result['text'], 'Final answer from the hook')
+
+    def test_full_message_is_capped_and_flags_truncation(self):
+        self._message_fixture(['go'], 'z' * 500)
+        with patch.object(a, 'MAX_MESSAGE_CHARS', 100):
+            result, error = self._full_message('agent')
+        self.assertIsNone(error)
+        self.assertEqual((len(result['text']), result['chars'], result['truncated']), (100, 500, True))
+
+    def test_full_message_rejects_unknown_roles_and_panes(self):
+        self._message_fixture(['go'], 'done')
+        self.assertEqual(self._full_message('system')[1], 'role must be user or agent')
+        with patch.object(a, 'resolve_socket', return_value='socket'), patch.object(a, 'live_panes', return_value={}):
+            self.assertEqual(a.full_message_for_pane(self.con, '%1', '123', 'agent', 0, ''), (None, 'pane is not live'))
+        with patch.object(a, 'resolve_socket', return_value='socket'), patch.object(a, 'live_panes', return_value=self.LIVE):
+            self.assertEqual(a.full_message_for_pane(self.con, '%1', '123', 'agent', 0, '')[1], None)
+            self.con.execute('DELETE FROM panes')
+            self.con.commit()
+            self.assertEqual(a.full_message_for_pane(self.con, '%1', '123', 'agent', 0, ''), (None, 'pane is not tracked'))
+
+    def test_dispatch_message_validates_input_and_forwards_to_peer(self):
+        self.assertEqual(a.dispatch_message('x')[0], 400)
+        for bad in ({'pane': '%1'}, {'pane': '%1', 'pid': '1', 'role': 'bot'},
+                    {'pane': '%1', 'pid': '1', 'role': 'user', 'index': -1},
+                    {'pane': '%1', 'pid': '1', 'role': 'user', 'index': 'x'},
+                    {'pane': '%1', 'pid': '1', 'role': 'user', 'index': True},
+                    {'pane': '%1', 'pid': '1', 'role': 'agent', 'sig': 7}):
+            self.assertEqual(a.dispatch_message(bad)[0], 400, bad)
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({'ok': True, 'text': 'hi', 'role': 'agent', 'chars': 2}).encode()
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+            code, body = a.dispatch_message({'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent', 'sig': 'ab'})
+            self.assertEqual((code, body['text']), (200, 'hi'))
+            request = urlopen_mock.call_args.args[0]
+            self.assertEqual(request.full_url, 'http://lab:7788/api/message')
+            forwarded = json.loads(request.data.decode())
+            self.assertEqual((forwarded['role'], forwarded['sig'], forwarded['_local_only']), ('agent', 'ab', True))
+            self.assertNotIn('host', forwarded)
+
+    def test_dispatch_message_maps_local_errors_to_http_codes(self):
+        self._message_fixture(['go'], 'done')
+        with patch.object(a, 'resolve_socket', return_value='socket'), patch.object(a, 'live_panes', return_value=self.LIVE), \
+             patch.object(a, 'local_host_name', return_value='home'):
+            code, body = a.dispatch_message({'pane': '%1', 'pid': '123', 'role': 'agent', 'sig': 'done'})
+            self.assertEqual((code, body['ok'], body['text'], body['host']), (200, True, 'done', 'home'))
+            code, body = a.dispatch_message({'pane': '%1', 'pid': '123', 'role': 'agent', 'sig': 'nope'})
+            self.assertEqual((code, body['error']), (409, 'content changed; refresh preview'))
+
+    def test_fleet_only_mode_requires_a_host_on_every_action_route(self):
+        handler = a.make_web_handler(fleet_only=True)
+
+        class Quiet(handler):
+            def log_message(self, format, *args):
+                pass
+
+        server = a.ThreadingHTTPServer(('127.0.0.1', 0), Quiet)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            port = server.server_address[1]
+            for path in ('/api/kill', '/api/send', '/api/upload', '/api/preview', '/api/message', '/api/ack'):
+                request = Request(f'http://127.0.0.1:{port}{path}', data=b'{"pane": "%1", "pid": "1"}',
+                                  headers={'Content-Type': 'application/json'}, method='POST')
+                with self.assertRaises(HTTPError, msg=path) as caught:
+                    urlopen(request, timeout=2)
+                self.assertEqual(caught.exception.code, 400, path)
+                self.assertEqual(json.loads(caught.exception.read())['error'], 'host required in fleet mode', path)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_prune_uploads_also_enforces_a_total_byte_cap(self):
+        now = time.time()
+        ids = []
+        for age in (300, 200, 100):
+            image_id, _ = a.store_upload(self.PNG)
+            os.utime(a.upload_path(image_id), (now - age, now - age))
+            ids.append(image_id)
+        with patch.object(a, 'UPLOAD_MAX_TOTAL_BYTES', len(self.PNG) * 2 + 1):
+            a.prune_uploads(now=now)
+        self.assertEqual([i for i in ids if a.upload_path(i)], ids[1:])
+
+    def test_store_upload_removes_a_partial_file_when_the_write_fails(self):
+        class Broken:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def write(self, data): raise OSError(28, 'No space left on device')
+        with patch.object(a.os, 'fdopen', return_value=Broken()), self.assertRaises(OSError):
+            a.store_upload(self.PNG)
+        self.assertEqual(list((a.STATE / 'uploads').glob('*')), [])
+
+    def test_peer_replies_are_reduced_to_typed_fields(self):
+        def reply(payload):
+            class FakeResp:
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return json.dumps(payload).encode()
+            return FakeResp()
+        peers = [{'name': 'lab', 'url': 'http://lab:7788'}]
+        good = {'ok': True, 'role': 'agent', 'text': 'hi', 'chars': 2, 'truncated': False, 'partial': False}
+        with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers):
+            with patch.object(a, 'urlopen', return_value=reply(good | {'extra': '<script>'})):
+                code, body = a.dispatch_message({'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent'})
+            self.assertEqual((code, body), (200, good))
+            for hostile in ({'chars': '<img src=x onerror=alert(1)>'}, {'text': {'length': '<b>'}}, {'role': 'root'}, {'chars': True}):
+                with patch.object(a, 'urlopen', return_value=reply(good | hostile)):
+                    code, body = a.dispatch_message({'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent'})
+                self.assertEqual((code, body['error']), (502, 'peer message failed: bad reply'), hostile)
+            with patch.object(a, 'urlopen', return_value=reply({'ok': True, 'id': '../../etc/passwd', 'bytes': 3})):
+                code, body = a.dispatch_upload({'host': 'lab', 'pane': '%9', 'pid': '9', 'data': 'AAAA'})
+            self.assertEqual((code, body['error']), (502, 'peer upload failed: bad reply'))
+            with patch.object(a, 'urlopen', return_value=reply({'ok': True, 'id': 'c' * 32 + '.png', 'x': 1})):
+                code, body = a.dispatch_upload({'host': 'lab', 'pane': '%9', 'pid': '9', 'data': 'AAAA'})
+            self.assertEqual((code, body), (200, {'ok': True, 'id': 'c' * 32 + '.png'}))
+
+    def test_peer_http_errors_pass_through_for_send_upload_and_message(self):
+        def http_error(code, payload):
+            return HTTPError('http://lab:7788/x', code, 'err', {}, io.BytesIO(json.dumps(payload).encode()))
+        peers = [{'name': 'lab', 'url': 'http://lab:7788'}]
+        calls = [
+            (a.dispatch_send, {'host': 'lab', 'pane': '%9', 'pid': '9', 'text': 'x'}, 409, 'image not found'),
+            (a.dispatch_upload, {'host': 'lab', 'pane': '%9', 'pid': '9', 'data': 'AAAA'}, 413, 'image too large'),
+            (a.dispatch_message, {'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent'}, 409, 'content changed; refresh preview'),
+        ]
+        with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers):
+            for dispatch, payload, code, message in calls:
+                with patch.object(a, 'urlopen', side_effect=http_error(code, {'ok': False, 'error': message})):
+                    self.assertEqual(dispatch(payload), (code, {'ok': False, 'error': message}), dispatch.__name__)
+
+    def test_peer_send_allows_extra_time_when_images_are_attached(self):
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({'ok': True}).encode()
+        peers = [{'name': 'lab', 'url': 'http://lab:7788'}]
+        with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers), \
+             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+            a.dispatch_send({'host': 'lab', 'pane': '%9', 'pid': '9', 'text': 'plain'})
+            self.assertEqual(urlopen_mock.call_args.kwargs['timeout'], 3)
+            a.dispatch_send({'host': 'lab', 'pane': '%9', 'pid': '9', 'text': 'pics', 'images': ['d' * 32 + '.png']})
+            self.assertGreaterEqual(urlopen_mock.call_args.kwargs['timeout'], 15)
+
+    def test_each_action_route_reaches_its_own_dispatcher_and_unknown_paths_404(self):
+        names = {'/api/kill': 'dispatch_kill', '/api/send': 'dispatch_send', '/api/upload': 'dispatch_upload',
+                 '/api/preview': 'dispatch_preview', '/api/message': 'dispatch_message', '/api/ack': 'dispatch_ack'}
+        patches = [patch.object(a, name, return_value=(200, {'ok': True, 'handler': name})) for name in names.values()]
+        for active in patches:
+            active.start()
+            self.addCleanup(active.stop)
+        handler = a.make_web_handler()
+
+        class Quiet(handler):
+            def log_message(self, format, *args):
+                pass
+
+        server = a.ThreadingHTTPServer(('127.0.0.1', 0), Quiet)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            port = server.server_address[1]
+            for path, name in names.items():
+                request = Request(f'http://127.0.0.1:{port}{path}', data=b'{}', method='POST')
+                self.assertEqual(json.loads(urlopen(request, timeout=2).read())['handler'], name, path)
+            with self.assertRaises(HTTPError) as caught:
+                urlopen(Request(f'http://127.0.0.1:{port}/api/nope', data=b'{}', method='POST'), timeout=2)
+            self.assertEqual(caught.exception.code, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_post_body_limits_differ_for_uploads_and_a_bad_length_is_a_400(self):
+        handler = a.make_web_handler()
+
+        class Quiet(handler):
+            def log_message(self, format, *args):
+                pass
+
+        server = a.ThreadingHTTPServer(('127.0.0.1', 0), Quiet)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        def raw_post(path, length_header, body=b''):
+            conn = http.client.HTTPConnection('127.0.0.1', server.server_address[1], timeout=2)
+            conn.putrequest('POST', path)
+            conn.putheader('Content-Type', 'application/json')
+            conn.putheader('Content-Length', length_header)
+            conn.endheaders(body)
+            response = conn.getresponse()
+            return response.status, json.loads(response.read() or b'{}')
+
+        try:
+            self.assertEqual(raw_post('/api/send', 'abc')[0], 400)
+            self.assertEqual(raw_post('/api/send', '-5')[0], 400)
+            self.assertGreater(a.MAX_UPLOAD_BODY_BYTES, a.MAX_BODY_BYTES)
+            with patch.object(a, 'MAX_BODY_BYTES', 64), patch.object(a, 'MAX_UPLOAD_BODY_BYTES', 4096), \
+                 patch.object(a, 'live_panes', return_value={}):
+                body = json.dumps({'pane': '%1', 'pid': '1', 'data': 'A' * 500}).encode()
+                self.assertEqual(raw_post('/api/send', str(len(body)), body)[0], 413)
+                self.assertEqual(raw_post('/api/upload', str(len(body)), body)[0], 409)  # accepted, then no such pane
+                big = b'x' * 5000
+                self.assertEqual(raw_post('/api/upload', str(len(big)), big)[0], 413)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_full_message_matches_what_the_sheet_showed_when_the_hook_cache_is_authoritative(self):
+        long_answer = '\n'.join(f'row {n:05d} ' + 'q' * 30 for n in range(400))
+        self._message_fixture(['go'], 'older transcript answer')
+        a.remember_preview(self.con, 'socket', '%1', '123', user='go', agent=long_answer)
+        with patch.object(a, 'resolve_socket', return_value='socket'), patch.object(a, 'live_panes', return_value=self.LIVE):
+            snapshot, error = a.local_preview_for_pane(self.con, '%1', '123', snapshot=True)
+        self.assertIsNone(error)
+        shown = snapshot['preview']['agent']
+        self.assertTrue(shown.endswith('…'))
+        result, error = self._full_message('agent', sig=shown[:200])
+        self.assertIsNone(error)
+        self.assertEqual(result['text'], shown)
+        self.assertEqual((result['truncated'], result['partial']), (True, True))
+
+    def test_full_message_user_index_skips_messages_that_normalise_to_nothing(self):
+        self._message_fixture(['go', '\x00\x01\x02', 'real one'], 'done')
+        self.assertEqual(self._full_message('user', 1, sig='real')[0]['text'], 'real one')
+
     def test_web_api_smoke(self):
         a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
         live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'}}
@@ -524,7 +977,9 @@ class StoreTests(unittest.TestCase):
             self.assertIn('jumpToGroup', page)
             self.assertIn('等待回覆', page)
             self.assertIn('sheet-form', page)
-            self.assertIn('sheet-mic', page)
+            self.assertIn('sheet-attach', page)
+            self.assertIn('/api/upload', page)
+            self.assertNotIn('sheet-mic', page)
         finally:
             server.shutdown()
             server.server_close()

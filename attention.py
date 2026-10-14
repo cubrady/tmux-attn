@@ -2,6 +2,8 @@
 """Pane-scoped, event-driven tmux inbox. Python standard library only."""
 from __future__ import annotations
 import argparse
+import base64
+import binascii
 import curses
 import fcntl
 import hashlib
@@ -12,6 +14,7 @@ import json
 import re
 import os
 from pathlib import Path
+import secrets
 import shlex
 import socket as socket_mod
 import sqlite3
@@ -206,11 +209,16 @@ PREVIEW_CHARS_FULL = 4000
 PREVIEW_USERS = 3
 
 
-def clip_preview(text, limit=PREVIEW_CHARS):
-    """Trim preview text while keeping markdown structure (newlines / indents)."""
+def normalize_preview(text):
+    """Printable text with tidy blank lines and no length limit."""
     text = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
     text = ''.join(c for c in text if c in '\n\t' or c.isprintable())
-    text = re.sub(r'\n{3,}', '\n\n', text).strip('\n')
+    return re.sub(r'\n{3,}', '\n\n', text).strip('\n')
+
+
+def clip_preview(text, limit=PREVIEW_CHARS):
+    """Trim preview text while keeping markdown structure (newlines / indents)."""
+    text = normalize_preview(text)
     if len(text) <= limit:
         return text
     cut = text[:max(0, limit - 1)]
@@ -444,22 +452,25 @@ def parse_cursor_transcript(path):
     return _parse_with_tail_fallback(path, _parse_cursor_lines)
 
 
-def conversation_preview(path, agent='', limit=PREVIEW_CHARS_FULL):
-    """Last user intents + latest agent text from a transcript. Empty if unreadable."""
+def read_transcript(path, agent=''):
+    """Raw (user messages, latest agent message) from a transcript. ([], '') if unreadable."""
     path = Path(path) if path else None
     if not path or not path.is_file():
-        return {'users': [], 'agent': ''}
+        return [], ''
     try:
-        name = path.name
         parts = {p.lower() for p in path.parts}
-        if 'rollout' in name or agent == 'codex':
-            users, agent_text = parse_codex_transcript(path)
-        elif agent == 'cursor' or 'agent-transcripts' in parts:
-            users, agent_text = parse_cursor_transcript(path)
-        else:
-            users, agent_text = parse_claude_style_transcript(path)
+        if 'rollout' in path.name or agent == 'codex':
+            return parse_codex_transcript(path)
+        if agent == 'cursor' or 'agent-transcripts' in parts:
+            return parse_cursor_transcript(path)
+        return parse_claude_style_transcript(path)
     except OSError:
-        return {'users': [], 'agent': ''}
+        return [], ''
+
+
+def conversation_preview(path, agent='', limit=PREVIEW_CHARS_FULL):
+    """Last user intents + latest agent text from a transcript. Empty if unreadable."""
+    users, agent_text = read_transcript(path, agent)
     users = [clip_preview(text, limit) for text in users[-PREVIEW_USERS:]]
     return {'users': users, 'agent': clip_preview(agent_text, limit) if agent_text else ''}
 
@@ -711,6 +722,45 @@ def local_preview_for_pane(con, pane, pid, limit=PREVIEW_CHARS_FULL, snapshot=Fa
             and preview_revision == row['revision'] and bool(preview['agent'].strip())}, None
 
 
+MAX_MESSAGE_CHARS = 200000
+
+
+def full_message_for_pane(con, pane, pid, role, index, sig):
+    """Unclipped text of one message the sheet shows. Returns (message dict, error).
+
+    `index` counts within the last PREVIEW_USERS user messages; `sig` is the start of the text the
+    sheet displayed, so a conversation that moved on is reported instead of showing a different message.
+    """
+    if role not in ('user', 'agent'):
+        return None, 'role must be user or agent'
+    sock = resolve_socket()
+    meta = live_panes(sock).get((pane, pid))
+    if not meta:
+        return None, 'pane is not live'
+    row = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
+    if not row:
+        return None, 'pane is not tracked'
+    item = dict(row) | meta
+    try:
+        cached_users = list(json.loads(row['preview_users'] if 'preview_users' in row.keys() else '[]') or [])
+    except (TypeError, ValueError):
+        cached_users = []
+    cached_agent = (row['preview_agent'] if 'preview_agent' in row.keys() else '') or ''
+    # A hook's final result can land before the transcript flushes, so the (clipped) cache is a second source.
+    sources = [read_transcript(resolve_transcript_path(con, item, meta), item.get('agent') or ''),
+               (cached_users, cached_agent)]
+    for number, (users, agent_text) in enumerate(sources):
+        # Same list the sheet builds: last messages, normalised, empties dropped.
+        shown = [text for text in (normalize_preview(t) for t in users[-PREVIEW_USERS:] if str(t).strip()) if text]
+        text = normalize_preview(agent_text) if role == 'agent' else (shown[index] if index < len(shown) else '')
+        if text and text.startswith(sig):
+            # Cached text was clipped for the sheet; say so, so the reader can ask the user to retry later.
+            partial = number == 1 and text.endswith('…') and len(text) > PREVIEW_CHARS_FULL // 3
+            return {'role': role, 'text': text[:MAX_MESSAGE_CHARS], 'chars': len(text),
+                    'truncated': len(text) > MAX_MESSAGE_CHARS or partial, 'partial': partial}, None
+    return None, 'content changed; refresh preview'
+
+
 def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event_time=None, event_key="", replace_identity=False, source='hook'):
     reason = clean(reason)
     source = clean(source or 'hook', 32) or 'hook'
@@ -831,30 +881,145 @@ def maybe_notify_wait(agent, reason, pane):
             log.write(f'{time.time():.0f} ntfy: {type(exc).__name__}: {exc}\n')
 
 
-def send_to_pane(pane, pid, text, submit=True, sock=None):
-    """Paste text into a live pane after verifying pane_pid. Returns None on success."""
+MAX_BODY_BYTES = 256 * 1024
+MAX_UPLOAD_BODY_BYTES = 12 * 1024 * 1024
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_IMAGES = 4
+UPLOAD_TTL_SECONDS = 7 * 24 * 3600
+UPLOAD_MAX_FILES = 200
+UPLOAD_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+UPLOAD_ID_RE = re.compile(r'^[0-9a-f]{32}\.(?:png|jpg|gif|webp)\Z')
+PEER_UPLOAD_TIMEOUT = 20
+# Claude Code reads a pasted image path asynchronously; give it a beat before Enter.
+IMAGE_SETTLE_SECONDS = 0.4
+
+
+def image_extension(data):
+    """File extension for the image formats we accept, judged by magic bytes only."""
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'png'
+    if data.startswith(b'\xff\xd8\xff'):
+        return 'jpg'
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return 'gif'
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'webp'
+    return ''
+
+
+def upload_dir():
+    return STATE / 'uploads'
+
+
+def upload_path(image_id):
+    """Resolve a server-issued image id to its file. Anything else is None."""
+    if not isinstance(image_id, str) or not UPLOAD_ID_RE.match(image_id):
+        return None
+    path = upload_dir() / image_id
+    return path if path.is_file() else None
+
+
+def prune_uploads(now=None):
+    """Drop uploads past their TTL, then the oldest ones beyond the file-count and total-byte caps."""
+    now = time.time() if now is None else now
+    entries = []
+    try:
+        for entry in os.scandir(upload_dir()):
+            if entry.is_file():
+                info = entry.stat()
+                entries.append((info.st_mtime, info.st_size, entry.path))
+    except OSError:
+        return
+    entries.sort()
+    keep = [row for row in entries if now - row[0] <= UPLOAD_TTL_SECONDS]
+    keep = keep[max(0, len(keep) - UPLOAD_MAX_FILES):]
+    total = sum(row[1] for row in keep)
+    while keep and total > UPLOAD_MAX_TOTAL_BYTES:
+        total -= keep.pop(0)[1]
+    survivors = {row[2] for row in keep}
+    for _, _, path in entries:
+        if path not in survivors:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def store_upload(data):
+    """Persist validated image bytes under a server-chosen name. Returns (image_id, error)."""
+    if not data:
+        return None, 'empty image'
+    if len(data) > MAX_UPLOAD_BYTES:
+        return None, 'image too large'
+    ext = image_extension(data)
+    if not ext:
+        return None, 'unsupported image type'
+    directory = upload_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    prune_uploads()
+    image_id = f'{secrets.token_hex(16)}.{ext}'
+    path = directory / image_id
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return image_id, None
+
+
+def live_pane_meta(pane, pid, sock=None):
+    return next((row for row in live_panes(sock).values() if row['pane'] == pane and row['pid'] == str(pid)), None)
+
+
+def paste_to_pane(pane, content, sock=None):
+    """Bracketed-paste content into a pane through a throwaway tmux buffer."""
+    buf = f'tmux-attn-{os.getpid()}-{time.time_ns()}'
+    subprocess.run(
+        ['tmux'] + (['-S', sock] if sock else []) + ['load-buffer', '-b', buf, '-'],
+        input=content.encode(), capture_output=True, timeout=3, check=True,
+    )
+    tmux('paste-buffer', '-b', buf, '-t', pane, '-p', '-d', sock=sock)
+
+
+def send_to_pane(pane, pid, text, submit=True, sock=None, images=()):
+    """Paste text (then uploaded images) into a live pane after verifying pane_pid. Returns None on success.
+
+    Each image goes in as its own paste of its bare absolute path, separated by a space:
+    Claude Code and Codex turn that into an attachment, Pi keeps the path as text.
+    """
     text = str(text)
-    if not text.strip():
+    if not text.strip() and not images:
         return 'empty message'
     if len(text) > 8000:
         return 'message too long'
-    live = live_panes(sock)
-    meta = next((row for row in live.values() if row['pane'] == pane and row['pid'] == str(pid)), None)
-    if not meta:
+    paths = []
+    for image_id in images:
+        path = upload_path(image_id)
+        if not path:
+            return 'image not found'
+        paths.append(str(path))
+    if not live_pane_meta(pane, pid, sock):
         return 'pane not found or pid mismatch'
     # Verify again at paste time — pane ids are reused.
     actual = tmux('display-message', '-p', '-t', pane, '#{pane_pid}', check=False, sock=sock)
     if actual != str(pid):
         return 'pane pid changed'
-    encoded = text.encode()
-    buf = f'tmux-attn-{os.getpid()}-{time.time_ns()}'
     try:
-        subprocess.run(
-            ['tmux'] + (['-S', sock] if sock else []) + ['load-buffer', '-b', buf, '-'],
-            input=encoded, capture_output=True, timeout=3, check=True,
-        )
-        tmux('paste-buffer', '-b', buf, '-t', pane, '-p', '-d', sock=sock)
-        if submit and not text.endswith('\n'):
+        pasted = False
+        if text.strip():
+            paste_to_pane(pane, text, sock)
+            pasted = True
+        for path in paths:
+            if pasted:
+                tmux('send-keys', '-t', pane, 'Space', sock=sock)
+            paste_to_pane(pane, path, sock)
+            pasted = True
+        if submit and (paths or not text.endswith('\n')):
+            if paths:
+                time.sleep(IMAGE_SETTLE_SECONDS)
             tmux('send-keys', '-t', pane, 'Enter', sock=sock)
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         return f'paste failed: {exc}'
@@ -1948,6 +2113,23 @@ def web_icon_path(name):
     return path if path.is_file() else None
 
 
+def peer_upload_reply(data):
+    """The part of a peer's /api/upload reply we relay, or None if it is malformed."""
+    if (isinstance(data, dict) and data.get('ok') is True and isinstance(data.get('id'), str)
+            and UPLOAD_ID_RE.match(data['id'])):
+        return {'ok': True, 'id': data['id']}
+    return None
+
+
+def peer_message_reply(data):
+    """The part of a peer's /api/message reply we relay, or None if it is malformed."""
+    if (not isinstance(data, dict) or data.get('ok') is not True or data.get('role') not in ('user', 'agent')
+            or not isinstance(data.get('text'), str) or type(data.get('chars')) is not int):
+        return None
+    return {'ok': True, 'role': data['role'], 'text': data['text'], 'chars': data['chars'],
+            'truncated': data.get('truncated') is True, 'partial': data.get('partial') is True}
+
+
 def dispatch_send(payload):
     """Send text to a local pane or forward to a named peer. Returns (code, body dict)."""
     if not isinstance(payload, dict):
@@ -1957,8 +2139,12 @@ def dispatch_send(payload):
     text = payload.get('text')
     host = clean(payload.get('host') or '')
     submit = payload.get('submit', True)
+    images = payload.get('images') or []
     if not pane or not pid or text is None:
         return 400, {'ok': False, 'error': 'pane, pid, and text are required'}
+    if (not isinstance(images, list) or len(images) > MAX_IMAGES
+            or not all(isinstance(i, str) and UPLOAD_ID_RE.match(i) for i in images)):
+        return 400, {'ok': False, 'error': 'invalid images'}
     local = local_host_name()
     if host and host != local and not payload.get('_local_only'):
         peer = next((row for row in load_peers() if row['name'] == host), None)
@@ -1966,7 +2152,8 @@ def dispatch_send(payload):
             return 404, {'ok': False, 'error': f'unknown host {host}'}
         try:
             body = json.dumps({
-                'pane': pane, 'pid': pid, 'text': text, 'submit': submit, '_local_only': True,
+                'pane': pane, 'pid': pid, 'text': text, 'submit': submit, 'images': images,
+                '_local_only': True,
             }).encode()
             request = Request(
                 peer['url'].rstrip('/') + '/api/send',
@@ -1974,15 +2161,70 @@ def dispatch_send(payload):
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                 method='POST',
             )
-            with urlopen(request, timeout=3) as response:
+            # Each image costs the peer several tmux calls; a timeout after delivery would invite a duplicate send.
+            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT if images else 3) as response:
                 data = json.loads(response.read().decode())
             return (200 if data.get('ok') else 502), data
+        except HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read().decode())
+            except (ValueError, UnicodeError):
+                return 502, {'ok': False, 'error': f'peer send failed: HTTP {exc.code}'}
         except Exception as exc:
             return 502, {'ok': False, 'error': f'peer send failed: {type(exc).__name__}'}
-    error = send_to_pane(pane, pid, text, submit=bool(submit))
+    error = send_to_pane(pane, pid, text, submit=bool(submit), images=images)
     if error:
         return 409, {'ok': False, 'error': error}
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local}
+
+
+def dispatch_upload(payload):
+    """Store an image on the pane's own host (local or via peer). Returns (code, body dict)."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    pane = clean(payload.get('pane') or '')
+    pid = clean(str(payload.get('pid') or ''))
+    host = clean(payload.get('host') or '')
+    data = payload.get('data')
+    if not pane or not pid or not isinstance(data, str) or not data:
+        return 400, {'ok': False, 'error': 'pane, pid, and data are required'}
+    local = local_host_name()
+    if host and host != local and not payload.get('_local_only'):
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, {'ok': False, 'error': f'unknown host {host}'}
+        try:
+            body = json.dumps({'pane': pane, 'pid': pid, 'data': data, '_local_only': True}).encode()
+            request = Request(
+                peer['url'].rstrip('/') + '/api/upload',
+                data=body,
+                headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
+                result = json.loads(response.read().decode())
+            reply = peer_upload_reply(result)
+            return (200, reply) if reply else (502, {'ok': False, 'error': 'peer upload failed: bad reply'})
+        except HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read().decode())
+            except (ValueError, UnicodeError):
+                return 502, {'ok': False, 'error': f'peer upload failed: HTTP {exc.code}'}
+        except Exception as exc:
+            return 502, {'ok': False, 'error': f'peer upload failed: {type(exc).__name__}'}
+    if not live_pane_meta(pane, pid):
+        return 409, {'ok': False, 'error': 'pane not found or pid mismatch'}
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (ValueError, binascii.Error):
+        return 400, {'ok': False, 'error': 'invalid base64'}
+    try:
+        image_id, error = store_upload(raw)
+    except OSError as exc:
+        return 500, {'ok': False, 'error': f'upload failed: {type(exc).__name__}'}
+    if error:
+        return (413 if error == 'image too large' else 400), {'ok': False, 'error': error}
+    return 200, {'ok': True, 'id': image_id, 'bytes': len(raw), 'pane': pane, 'pid': pid, 'host': local}
 
 
 def dispatch_kill(payload):
@@ -2053,6 +2295,59 @@ def dispatch_preview(payload):
     if error:
         return 409, {'ok': False, 'error': error}
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, **snapshot}
+
+
+def dispatch_message(payload):
+    """Return the full text of one sheet message, local or via peer. Returns (code, body dict)."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    pane = clean(payload.get('pane') or '')
+    pid = clean(str(payload.get('pid') or ''))
+    host = clean(payload.get('host') or '')
+    role = payload.get('role')
+    index = payload.get('index', 0)
+    sig = payload.get('sig') or ''
+    if not pane or not pid:
+        return 400, {'ok': False, 'error': 'pane and pid are required'}
+    if role not in ('user', 'agent'):
+        return 400, {'ok': False, 'error': 'role must be user or agent'}
+    if type(index) is not int or index < 0:
+        return 400, {'ok': False, 'error': 'index must be a non-negative integer'}
+    if not isinstance(sig, str) or len(sig) > 400:
+        return 400, {'ok': False, 'error': 'invalid sig'}
+    local = local_host_name()
+    if host and host != local and not payload.get('_local_only'):
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, {'ok': False, 'error': f'unknown host {host}'}
+        try:
+            body = json.dumps({'pane': pane, 'pid': pid, 'role': role, 'index': index, 'sig': sig,
+                               '_local_only': True}).encode()
+            request = Request(
+                peer['url'].rstrip('/') + '/api/message',
+                data=body,
+                headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
+                data = json.loads(response.read().decode())
+            reply = peer_message_reply(data)
+            return (200, reply) if reply else (502, {'ok': False, 'error': 'peer message failed: bad reply'})
+        except HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read().decode())
+            except (ValueError, UnicodeError):
+                return 502, {'ok': False, 'error': f'peer message failed: HTTP {exc.code}'}
+        except Exception as exc:
+            return 502, {'ok': False, 'error': f'peer message failed: {type(exc).__name__}'}
+    try:
+        with closing(db()) as con:
+            message, error = full_message_for_pane(con, pane, pid, role, index, sig)
+    except Exception as exc:
+        return 500, {'ok': False, 'error': f'{type(exc).__name__}'}
+    if error:
+        return 409, {'ok': False, 'error': error}
+    return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, **message}
 
 
 def dispatch_ack(payload):
@@ -2126,7 +2421,14 @@ def make_web_handler(fleet_only=False):
     if not index.is_file():
         raise SystemExit(f'Missing web UI: {index}')
 
+    actions = {
+        '/api/kill': dispatch_kill, '/api/send': dispatch_send, '/api/upload': dispatch_upload,
+        '/api/preview': dispatch_preview, '/api/message': dispatch_message, '/api/ack': dispatch_ack,
+    }
+
     class Handler(BaseHTTPRequestHandler):
+        timeout = 30  # a stalled client must not hold a thread forever
+
         def log_message(self, format, *args):
             sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
@@ -2182,7 +2484,16 @@ def make_web_handler(fleet_only=False):
 
         def do_POST(self):
             path = urlparse(self.path).path
-            length = int(self.headers.get('Content-Length') or 0)
+            try:
+                length = int(self.headers.get('Content-Length') or 0)
+            except ValueError:
+                length = -1
+            if length < 0:
+                self._send(400, json.dumps({'ok': False, 'error': 'invalid content-length'}), 'application/json; charset=utf-8')
+                return
+            if length > (MAX_UPLOAD_BODY_BYTES if path == '/api/upload' else MAX_BODY_BYTES):
+                self._send(413, json.dumps({'ok': False, 'error': 'request too large'}), 'application/json; charset=utf-8')
+                return
             raw = self.rfile.read(length) if length > 0 else b'{}'
             try:
                 payload = json.loads(raw.decode() or '{}')
@@ -2198,36 +2509,13 @@ def make_web_handler(fleet_only=False):
                 code, body = dispatch_peer_register(payload)
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
-            if path == '/api/kill':
+            action = actions.get(path)
+            if action:
                 if fleet_only and not payload.get('host'):
                     self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
                                'application/json; charset=utf-8')
                     return
-                code, body = dispatch_kill(payload)
-                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
-                return
-            if path == '/api/send':
-                if fleet_only and not payload.get('host'):
-                    self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
-                               'application/json; charset=utf-8')
-                    return
-                code, body = dispatch_send(payload)
-                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
-                return
-            if path == '/api/preview':
-                if fleet_only and not payload.get('host'):
-                    self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
-                               'application/json; charset=utf-8')
-                    return
-                code, body = dispatch_preview(payload)
-                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
-                return
-            if path == '/api/ack':
-                if fleet_only and not payload.get('host'):
-                    self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
-                               'application/json; charset=utf-8')
-                    return
-                code, body = dispatch_ack(payload)
+                code, body = action(payload)
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
@@ -2236,6 +2524,7 @@ def make_web_handler(fleet_only=False):
 
 
 def serve_web(host='0.0.0.0', port=7788, fleet_only=False):
+    prune_uploads()
     server = ThreadingHTTPServer((host, port), make_web_handler(fleet_only=fleet_only))
     print(json.dumps({
         'web': f'http://{host}:{port}/',

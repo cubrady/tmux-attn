@@ -424,6 +424,35 @@
     }
     .emoji { font-size: 1.05rem; line-height: 1; }
     .project { min-width: 0; overflow-wrap: anywhere; }
+    .cli {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: var(--bg);
+      flex: 0 0 auto;
+    }
+    .cli img { width: 16px; height: 16px; display: block; }
+    @media (prefers-color-scheme: dark) {
+      .cli.agent img { filter: invert(1); }
+    }
+    .cli.broken::after {
+      content: attr(title);
+      font-family: var(--mono);
+      font-size: 0.55rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: var(--muted);
+      max-width: 26px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding: 0 2px;
+    }
     .age {
       font-family: var(--mono);
       font-size: 0.72rem;
@@ -733,11 +762,6 @@
       padding: 0;
     }
     .icon-btn svg { width: 18px; height: 18px; display: block; }
-    .icon-btn.listening {
-      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-      background: color-mix(in srgb, var(--accent) 14%, var(--bg));
-      color: var(--accent);
-    }
     .sheet-reason {
       font-size: 0.88rem;
       color: color-mix(in srgb, var(--fg) 82%, var(--muted));
@@ -787,6 +811,79 @@
       align-items: center;
     }
     .sheet-actions-right { margin-left: auto; }
+    .attachments {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+      padding-bottom: 2px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .attachments[hidden] { display: none; }
+    .attachment {
+      position: relative;
+      flex: 0 0 auto;
+      width: 64px;
+      height: 64px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: var(--bg);
+      overflow: hidden;
+    }
+    .attachment img { width: 100%; height: 100%; object-fit: cover; display: block; transition: opacity 160ms var(--ease); }
+    .attachment.uploading img { opacity: 0.4; }
+    .attachment.uploading::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      margin: auto;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid var(--line);
+      border-top-color: var(--accent);
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .attachment.uploading::after { animation: attachment-spin 800ms linear infinite; }
+    }
+    @keyframes attachment-spin { to { transform: rotate(360deg); } }
+    .attachment.error { border-color: var(--danger); }
+    .attachment.error img { opacity: 0.35; }
+    .attachment.error::before {
+      content: '!';
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      color: var(--danger);
+    }
+    .attachment-remove {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      z-index: 1;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: #fff;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+    }
+    .attachment-remove::before {
+      content: '';
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: rgb(0 0 0 / 0.62);
+    }
+    .attachment-remove svg { position: relative; width: 12px; height: 12px; }
+    .attachment-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .icon-btn.send {
       border: 0;
       background: var(--accent);
@@ -818,10 +915,126 @@
     }
     .sheet-feedback.bad { color: var(--danger); }
     .sheet-feedback.ok { color: var(--running); }
-    .voice-hint {
-      margin-top: 4px;
+
+    .sheet-preview .preview-line[data-role] { cursor: pointer; }
+    .open-full {
+      grid-column: 2;
+      justify-self: start;
+      margin: 0;
+      padding: 4px 0;
+      border: 0;
+      background: none;
+      color: var(--accent);
+      font: 500 0.72rem var(--mono);
+      cursor: pointer;
+    }
+    .open-full::after { content: ' ›'; }
+    .open-full:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    @media (hover: hover) {
+      .sheet-preview .preview-line[data-role]:hover .open-full { text-decoration: underline; }
+    }
+    body.reader-open { overflow: hidden; }
+    .reader-root[hidden] { display: none !important; }
+    .reader-root {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      justify-content: center;
+      background: var(--bg);
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .reader-root { animation: reader-in 200ms var(--ease); }
+    }
+    @keyframes reader-in {
+      from { transform: translateX(14px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    .reader {
+      position: relative;
+      width: min(100%, 46rem);
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+    .reader-top {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--bg-elevated);
+    }
+    .reader-heading { flex: 1 1 auto; min-width: 0; }
+    .reader-heading h2 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .reader-sub {
+      font-family: var(--mono);
       font-size: 0.7rem;
       color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .reader-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 18px 16px calc(92px + env(safe-area-inset-bottom));
+      outline: none;
+    }
+    .reader-line { display: block; font-size: 1rem; line-height: 1.7; }
+    .reader-line .text { color: var(--fg); overflow-wrap: anywhere; }
+    .reader-loading,
+    .reader-error { margin: 0; font-size: 0.9rem; color: var(--muted); }
+    .reader-error button {
+      display: block;
+      margin-top: 12px;
+      padding: 8px 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--bg-elevated);
+      color: var(--fg);
+      font: 500 0.88rem var(--font);
+      cursor: pointer;
+    }
+    .reader-note {
+      margin: 18px 0 0;
+      padding-top: 10px;
+      border-top: 1px dashed var(--line);
+      font: 0.75rem var(--mono);
+      color: var(--muted);
+    }
+    .reader-status {
+      position: absolute;
+      left: 16px;
+      bottom: calc(30px + env(safe-area-inset-bottom));
+      font: 0.75rem var(--mono);
+      color: var(--muted);
+    }
+    .reader-reply {
+      position: absolute;
+      right: 16px;
+      bottom: calc(18px + env(safe-area-inset-bottom));
+      height: 46px;
+      padding: 0 22px;
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      font: 600 0.95rem var(--font);
+      box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
+      cursor: pointer;
+    }
+    .reader-reply:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
+    @media (prefers-reduced-motion: no-preference) {
+      .reader-reply:active { transform: scale(0.97); }
     }
 
     /* Skeleton placeholders for first load + refresh */
@@ -973,16 +1186,18 @@
       <div class="sheet-preview" id="sheet-preview"></div>
       <button type="button" class="host-pill" id="sheet-refresh">重新整理內容</button>
       <form class="sheet-compose" id="sheet-form">
-        <textarea id="sheet-text" placeholder="輸入訊息，或按麥克風語音輸入" enterkeyhint="send"></textarea>
+        <textarea id="sheet-text" placeholder="輸入訊息" enterkeyhint="send"></textarea>
+        <div class="attachments" id="sheet-attachments" aria-label="已加入的圖片" hidden></div>
         <div class="sheet-actions">
           <div class="sheet-actions-left">
-            <button type="button" class="icon-btn" id="sheet-mic" aria-label="語音輸入" title="語音輸入">
+            <button type="button" class="icon-btn" id="sheet-attach" aria-label="加入圖片" title="加入圖片">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="9" y="3" width="6" height="11" rx="3"/>
-                <path d="M5 11a7 7 0 0 0 14 0"/>
-                <path d="M12 18v3"/>
+                <rect x="3" y="4" width="18" height="16" rx="3"/>
+                <circle cx="9" cy="10" r="1.6"/>
+                <path d="M21 16l-5-5-8 8"/>
               </svg>
             </button>
+            <input type="file" id="sheet-file" accept="image/*" multiple hidden>
           </div>
           <div class="sheet-actions-right">
             <button type="button" class="icon-btn kill" id="sheet-kill" aria-label="關閉 pane" title="關閉 pane（需按兩次）">
@@ -1002,9 +1217,28 @@
           </div>
         </div>
         <div class="sheet-feedback" id="sheet-status" aria-live="polite"></div>
-        <div class="voice-hint" id="voice-hint" hidden></div>
       </form>
     </div>
+  </div>
+
+  <div class="reader-root" id="reader-root" hidden>
+    <section class="reader" role="dialog" aria-modal="true" aria-labelledby="reader-title">
+      <header class="reader-top">
+        <button type="button" class="icon-btn" id="reader-back" aria-label="返回" title="返回">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <div class="reader-heading">
+          <h2 id="reader-title">訊息</h2>
+          <div class="reader-sub" id="reader-sub"></div>
+        </div>
+        <button type="button" class="icon-btn" id="reader-copy" aria-label="複製全文" title="複製全文" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+        </button>
+      </header>
+      <div class="reader-body" id="reader-body" tabindex="0"></div>
+      <span class="reader-status" id="reader-status" aria-live="polite"></span>
+      <button type="button" class="reader-reply" id="reader-reply">回覆</button>
+    </section>
   </div>
 
   <script>
@@ -1016,7 +1250,6 @@
       ['shell', '其他 pane'],
     ];
     const SECTION_EMOJI = { wait: '🙋', review: '👀', running: '🏃', idle: '💤', shell: '💻' };
-    const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
     let selectedKey = '';
     let latestAgents = [];
     let latestHosts = [];
@@ -1031,64 +1264,25 @@
     let sheetPreviewToken = 0;
     const acknowledgedVersions = new Map();
     const acknowledgementsInFlight = new Map();
-    let recognition = null;
-    let listening = false;
-    let speechBase = '';
-    let micPermissionGranted = false;
-    let micRequestInFlight = false;
-    let micPromptAttempted = false;
+    const READER_PREFIX = '#/m/';
+    const READER_SIG_CHARS = 200;
+    let sheetPreviewData = { users: [], agent: '' };
+    let readerOpen = false;
+    let readerHash = '';
+    let readerPushed = false;
+    let readerToken = 0;
+    let readerText = '';
+    let routeSettled = false;
+    const readerSigs = new Map();
+    const READER_SIG_STORE = 'attn.readerSigs';
+    const MAX_IMAGES = 4;
+    const MAX_IMAGE_EDGE = 2048;
+    const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+    const UPLOADING_NOTICE = '圖片上傳中，請稍候再送出';
+    let attachments = []; // { key, name, previewUrl, status: 'uploading' | 'ready' | 'error', imageId, error }
+    let attachmentSeq = 0;
     const STALE_HOST_TTL_MS = 35000;
     const lastGoodByHost = new Map();
-
-    function isMicSecureContext() {
-      if (typeof window !== 'undefined' && window.isSecureContext === false) return false;
-      const loc = (typeof window !== 'undefined' && window.location) || (typeof location !== 'undefined' ? location : null);
-      if (loc && loc.protocol === 'http:') {
-        const host = String(loc.hostname || '').toLowerCase();
-        if (host && host !== 'localhost' && host !== '127.0.0.1' && host !== '::1' && host !== '[::1]' && !host.endsWith('.localhost')) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    function micBlockedMessage() {
-      if (!isMicSecureContext()) {
-        return '瀏覽器限制：非本機 HTTP 無法要求麥克風權限，請改用 HTTPS（如 tailscale serve）、localhost 或系統聽寫';
-      }
-      return '麥克風權限已被瀏覽器封鎖，請點網址列左側圖示允許麥克風後重試';
-    }
-
-    function getNavigator() {
-      if (typeof window !== 'undefined' && window.navigator) return window.navigator;
-      if (typeof navigator !== 'undefined' && navigator) return navigator;
-      return null;
-    }
-
-    async function requestMicPermission() {
-      if (!isMicSecureContext()) {
-        const err = new Error(micBlockedMessage());
-        err.code = 'insecure-context';
-        throw err;
-      }
-      if (micPermissionGranted) return true;
-      const nav = getNavigator();
-      if (nav && nav.mediaDevices && typeof nav.mediaDevices.getUserMedia === 'function') {
-        micPromptAttempted = true;
-        const status = document.getElementById('sheet-status');
-        status.className = 'sheet-feedback';
-        status.textContent = '正在要求麥克風權限…';
-        const stream = await nav.mediaDevices.getUserMedia({ audio: true });
-        if (stream && typeof stream.getTracks === 'function') {
-          stream.getTracks().forEach(track => {
-            try { track.stop(); } catch (_) {}
-          });
-        }
-        micPermissionGranted = true;
-        if (status.textContent === '正在要求麥克風權限…') status.textContent = '';
-      }
-      return true;
-    }
 
     function agentKey(a) {
       return [a.host || '', a.pane || '', a.pid || ''].join('|');
@@ -1142,6 +1336,13 @@
       if (Number.isInteger(agent.revision) && agent.revision > 0) return agent.revision > acknowledged;
       return agent.unread ?? agent.pending ?? !agent.reviewed;
     }
+    const CLI_ICONS = { claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi' };
+    function cliBadge(cli) {
+      const name = String(cli || '').toLowerCase();
+      if (!Object.hasOwn(CLI_ICONS, name)) return '';
+      const icon = escapeHtml(CLI_ICONS[name]);
+      return `<span class="cli ${icon}" title="${escapeHtml(name)}"><img src="/icons/${icon}.svg" alt="${escapeHtml(name)}" loading="lazy" onerror="this.closest('.cli').classList.add('broken');this.remove()"></span>`;
+    }
     function renderMarkdown(text) {
       const raw = String(text ?? '');
       if (!raw) return '';
@@ -1160,13 +1361,15 @@
       } catch (_) { /* fall through */ }
       return escapeHtml(raw).replace(/\n/g, '<br>');
     }
-    function previewHtml(preview) {
+    function previewHtml(preview, { actionable = false } = {}) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
       const agentLine = preview?.agent || '';
       if (!users.length && !agentLine) return '';
+      const target = (role, index) => actionable ? ` data-role="${role}" data-index="${index}"` : '';
+      const openFull = actionable ? '<button type="button" class="open-full">全文</button>' : '';
       return `<div class="preview">${
-        users.map(text => `<div class="preview-line user"><span class="who">you</span><span class="text md">${renderMarkdown(text)}</span></div>`).join('')
-      }${agentLine ? `<div class="preview-line agent"><span class="who">agent</span><span class="text md">${renderMarkdown(agentLine)}</span></div>` : ''}</div>`;
+        users.map((text, i) => `<div class="preview-line user"${target('user', i)}><span class="who">you</span><span class="text md">${renderMarkdown(text)}</span>${openFull}</div>`).join('')
+      }${agentLine ? `<div class="preview-line agent"${target('agent', 0)}><span class="who">agent</span><span class="text md">${renderMarkdown(agentLine)}</span>${openFull}</div>` : ''}</div>`;
     }
     function clipBranch(branch, limit = 36) {
       const text = String(branch || '');
@@ -1214,6 +1417,7 @@
         <div class="row1">
           <div class="title">
             <span class="emoji" aria-hidden="true">${emoji}</span>
+            ${cliBadge(a.cli || a.agent)}
             <span class="project">${escapeHtml(a.project || a.window || '未命名專案')}</span>
             ${reviewState}
           </div>
@@ -1223,14 +1427,6 @@
         <div class="reason">${escapeHtml(reason)}</div>
         ${previewHtml(a.preview)}
       </article>`;
-    }
-    function stopListening() {
-      if (recognition && listening) {
-        try { recognition.stop(); } catch (_) {}
-      }
-      listening = false;
-      document.getElementById('sheet-mic').classList.remove('listening');
-      document.getElementById('voice-hint').hidden = true;
     }
     let killArmedUntil = 0;
     function resetKillArm() {
@@ -1244,7 +1440,8 @@
       }
     }
     function closeSheet() {
-      stopListening();
+      closeReader();
+      clearAttachments();
       resetKillArm();
       sheetOpen = false;
       selectedKey = '';
@@ -1252,6 +1449,7 @@
       sheetPreviewFull = false;
       sheetPreviewUpdated = 0;
       sheetPreviewRevision = 0;
+      sheetPreviewData = { users: [], agent: '' };
       sheetPreviewToken += 1;
       document.getElementById('sheet-root').hidden = true;
       document.body.classList.remove('sheet-open');
@@ -1260,6 +1458,276 @@
       document.getElementById('sheet-status').className = 'sheet-feedback';
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
       if (latestPayload) render(latestPayload);
+    }
+    function setSheetStatus(message, kind = '') {
+      const status = document.getElementById('sheet-status');
+      status.className = kind ? `sheet-feedback ${kind}` : 'sheet-feedback';
+      status.textContent = message;
+    }
+    async function prepareImage(file) {
+      // Downscale and re-encode: keeps uploads small on mobile data and drops EXIF (incl. GPS).
+      const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const ctx = canvas.getContext('2d');
+      const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+      if (type === 'image/jpeg') {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      if (bitmap.close) bitmap.close();
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, type, 0.85));
+      if (!blob) throw new Error('無法處理這張圖片');
+      return blob;
+    }
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+        reader.onerror = () => reject(new Error('讀取圖片失敗'));
+        reader.readAsDataURL(blob);
+      });
+    }
+    function attachmentHtml(item) {
+      const label = item.status === 'error' ? `${item.name}：${item.error || '上傳失敗'}` : item.name;
+      return `<div class="attachment ${item.status}" data-key="${escapeHtml(item.key)}">
+        <img src="${escapeHtml(item.previewUrl)}" alt="${escapeHtml(label)}">
+        <button type="button" class="attachment-remove" data-remove aria-label="移除 ${escapeHtml(item.name)}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>`;
+    }
+    function renderAttachments() {
+      const box = document.getElementById('sheet-attachments');
+      box.hidden = attachments.length === 0;
+      box.innerHTML = attachments.map(attachmentHtml).join('');
+      document.getElementById('sheet-attach').disabled = attachments.length >= MAX_IMAGES;
+    }
+    function patchAttachment(key, patch) {
+      if (!attachments.some(item => item.key === key)) return false;
+      attachments = attachments.map(item => item.key === key ? { ...item, ...patch } : item);
+      renderAttachments();
+      return true;
+    }
+    function clearAttachments() {
+      attachments.forEach(item => URL.revokeObjectURL(item.previewUrl));
+      attachments = [];
+      renderAttachments();
+    }
+    function removeAttachment(key) {
+      const item = attachments.find(row => row.key === key);
+      if (!item) return;
+      URL.revokeObjectURL(item.previewUrl);
+      attachments = attachments.filter(row => row.key !== key);
+      renderAttachments();
+    }
+    async function uploadAttachment(agent, key, file) {
+      const sheetKey = agentKey(agent);
+      const stillWanted = () => sheetOpen && selectedKey === sheetKey && attachments.some(item => item.key === key);
+      try {
+        const blob = await prepareImage(file);
+        if (!stillWanted()) return;
+        if (blob.size > MAX_IMAGE_BYTES) throw new Error('圖片太大（上限 8MB）');
+        const data = await blobToBase64(blob);
+        if (!stillWanted()) return;
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, data }),
+        });
+        const body = await res.json();
+        if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+        if (stillWanted()) patchAttachment(key, { status: 'ready', imageId: body.id });
+      } catch (e) {
+        if (stillWanted()) patchAttachment(key, { status: 'error', error: (e && e.message) || '上傳失敗' });
+      }
+      const status = document.getElementById('sheet-status');
+      if (status.textContent === UPLOADING_NOTICE && !attachments.some(item => item.status === 'uploading')) setSheetStatus('');
+    }
+    function addImages(fileList) {
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      if (!sheetOpen || !agent) return;
+      const files = Array.from(fileList || []);
+      const images = files.filter(file => String(file.type).startsWith('image/'));
+      const room = Math.max(0, MAX_IMAGES - attachments.length);
+      const accepted = images.slice(0, room);
+      if (images.length < files.length) setSheetStatus('只支援圖片檔', 'bad');
+      else if (accepted.length < images.length) setSheetStatus(`最多 ${MAX_IMAGES} 張圖片`, 'bad');
+      else if (accepted.length) setSheetStatus('');
+      const added = accepted.map(file => ({
+        key: `img-${++attachmentSeq}`, name: file.name || 'image',
+        previewUrl: URL.createObjectURL(file), status: 'uploading', imageId: '', error: '',
+      }));
+      if (!added.length) return;
+      attachments = attachments.concat(added);
+      renderAttachments();
+      added.forEach((item, index) => uploadAttachment(agent, item.key, accepted[index]));
+    }
+    function readerHashFor(agent, role, index) {
+      return READER_PREFIX + [agent.host || '', agent.pane, agent.pid, role, index]
+        .map(part => encodeURIComponent(String(part))).join('/');
+    }
+    function parseReaderHash(hash) {
+      if (!String(hash).startsWith(READER_PREFIX)) return null;
+      const parts = hash.slice(READER_PREFIX.length).split('/');
+      if (parts.length !== 5 || !/^\d+$/.test(parts[4])) return null;
+      let host, pane, pid, role;
+      try {
+        [host, pane, pid, role] = parts.slice(0, 4).map(decodeURIComponent);
+      } catch (_) {
+        return null;
+      }
+      if ((role !== 'user' && role !== 'agent') || !pane || !pid) return null;
+      return { host, pane, pid, role, index: Number(parts[4]) };
+    }
+    function storedReaderSigs() {
+      try {
+        return JSON.parse(sessionStorage.getItem(READER_SIG_STORE) || '{}');
+      } catch (_) {
+        return {};
+      }
+    }
+    function rememberReaderSig(hash, sig) {
+      readerSigs.set(hash, sig);
+      try {
+        sessionStorage.setItem(READER_SIG_STORE, JSON.stringify({ ...storedReaderSigs(), [hash]: sig }));
+      } catch (_) { /* a reload then loses the staleness check; the reader still works */ }
+    }
+    function recallReaderSig(hash) {
+      return readerSigs.get(hash) || storedReaderSigs()[hash] || '';
+    }
+    function clearRoute() {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+    function hideReader() {
+      readerOpen = false;
+      readerHash = '';
+      readerPushed = false;
+      readerText = '';
+      readerToken += 1;
+      document.getElementById('reader-root').hidden = true;
+      document.body.classList.remove('reader-open');
+      document.getElementById('reader-body').innerHTML = '';
+      document.getElementById('reader-status').textContent = '';
+    }
+    function closeReader() {
+      if (!readerOpen) return;
+      if (readerPushed) {
+        window.history.back();
+      } else {
+        clearRoute();
+      }
+      hideReader();
+    }
+    function readerErrorHtml(error, role) {
+      const moved = error === 'content changed; refresh preview';
+      // A user message is addressed by position, so "latest" could be a different prompt; make them re-tap instead.
+      if (moved && role === 'user') {
+        return '<p class="reader-error" role="alert">對話已有新內容，這則訊息的位置已改變。請返回後重新點選要看的訊息。</p>';
+      }
+      const message = moved ? '對話已有新內容，這則訊息可能已不同。' : `載入失敗：${error || '未知錯誤'}`;
+      return `<p class="reader-error" role="alert">${escapeHtml(message)}<button type="button" data-retry>${moved ? '載入最新內容' : '重試'}</button></p>`;
+    }
+    function readerBodyHtml(text, data) {
+      let note = '';
+      if (data.partial) note = '<p class="reader-note">完整內容還在同步，稍後重新開啟即可看到全文。</p>';
+      else if (data.truncated) note = `<p class="reader-note">內容過長，僅顯示前 ${text.length} 字（共 ${Number(data.chars) || 0} 字）。</p>`;
+      return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text)}</div></div>${note}`;
+    }
+    async function loadReaderMessage(agent, route, sig) {
+      const token = ++readerToken;
+      const body = document.getElementById('reader-body');
+      const copy = document.getElementById('reader-copy');
+      readerText = '';
+      copy.disabled = true;
+      body.innerHTML = '<p class="reader-loading" role="status">載入中…</p>';
+      const failed = (error) => {
+        if (token !== readerToken || !readerOpen) return;
+        body.innerHTML = readerErrorHtml(error, route.role);
+      };
+      try {
+        const res = await fetch('/api/message', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: route.host, pane: route.pane, pid: route.pid, role: route.role, index: route.index, sig }),
+        });
+        const data = await res.json();
+        if (token !== readerToken || !readerOpen) return;
+        if (!res.ok || !data.ok) return failed(data && data.error);
+        readerText = String(data.text);
+        copy.disabled = false;
+        body.innerHTML = readerBodyHtml(readerText, data);
+        document.getElementById('reader-sub').textContent =
+          `${agent.project || agent.window || '未命名專案'} · ${Number(data.chars) || 0} 字`;
+      } catch (e) {
+        failed(e && e.message);
+      }
+    }
+    function showReader(agent, route) {
+      readerOpen = true;
+      readerHash = window.location.hash;
+      document.getElementById('reader-title').textContent = route.role === 'user' ? '你的訊息' : 'Agent 回覆';
+      document.getElementById('reader-sub').textContent = agent.project || agent.window || '未命名專案';
+      document.getElementById('reader-status').textContent = '';
+      document.getElementById('reader-root').hidden = false;
+      document.body.classList.add('reader-open');
+      loadReaderMessage(agent, route, recallReaderSig(readerHash));
+      requestAnimationFrame(() => document.getElementById('reader-body').focus());
+    }
+    function applyRoute() {
+      const hash = window.location.hash;
+      const route = parseReaderHash(hash);
+      if (!route) {
+        if (String(hash).startsWith(READER_PREFIX)) clearRoute();
+        hideReader();
+        return;
+      }
+      const agent = latestAgents.find(a => a.tracked && (a.host || '') === route.host
+        && a.pane === route.pane && String(a.pid) === route.pid);
+      if (!agent) {
+        clearRoute();
+        hideReader();
+        return;
+      }
+      if (readerOpen && readerHash === hash) return;
+      if (!sheetOpen || selectedKey !== agentKey(agent)) openSheet(agent);
+      showReader(agent, route);
+    }
+    function openReaderFromSheet(role, index) {
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      const text = role === 'agent' ? sheetPreviewData.agent : sheetPreviewData.users[index];
+      if (!sheetOpen || !agent || !text) return;
+      const hash = readerHashFor(agent, role, index);
+      rememberReaderSig(hash, Array.from(text).slice(0, READER_SIG_CHARS).join(''));
+      readerPushed = true;
+      window.location.hash = hash;
+    }
+    function legacyCopy(text) {
+      const box = document.createElement('textarea');
+      box.value = text;
+      box.setAttribute('readonly', '');
+      box.style.position = 'fixed';
+      box.style.opacity = '0';
+      document.body.appendChild(box);
+      box.select();
+      const copied = document.execCommand('copy');
+      box.remove();
+      if (!copied) throw new Error('copy failed');
+    }
+    async function copyReaderText() {
+      if (!readerText) return;
+      const status = document.getElementById('reader-status');
+      try {
+        // The async clipboard API only exists on secure origins; plain-HTTP Tailscale needs the fallback.
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(readerText);
+        else legacyCopy(readerText);
+        status.textContent = '已複製';
+      } catch (_) {
+        status.textContent = '無法複製';
+      }
     }
     function emptyPreviewHtml() {
       return '<div class="preview-line agent"><span class="who">—</span><span class="text">尚無對話預覽</span></div>';
@@ -1286,6 +1754,7 @@
       const box = document.getElementById('sheet-preview');
       if (sheetPreviewKey !== key || !sheetPreviewFull) {
         box.innerHTML = previewHtml(agent.preview) || emptyPreviewHtml();
+        sheetPreviewData = { users: [], agent: '' };
         sheetPreviewKey = key;
         sheetPreviewFull = false;
         sheetPreviewUpdated = 0;
@@ -1307,7 +1776,8 @@
           }
           return;
         }
-        box.innerHTML = previewHtml(data.preview) || emptyPreviewHtml();
+        box.innerHTML = previewHtml(data.preview, { actionable: true }) || emptyPreviewHtml();
+        sheetPreviewData = { users: (data.preview?.users || []).filter(Boolean), agent: data.preview?.agent || '' };
         sheetPreviewFull = true;
         sheetPreviewKey = key;
         sheetPreviewUpdated = agent.updated || 0;
@@ -1383,6 +1853,11 @@
       if (refreshPreview) loadSheetPreview(agent);
     }
     function openSheet(agent) {
+      clearAttachments();
+      if (agentKey(agent) !== selectedKey) {
+        document.getElementById('sheet-text').value = '';
+        resetKillArm();
+      }
       selectedKey = agentKey(agent);
       sheetOpen = true;
       sheetPreviewKey = '';
@@ -1398,16 +1873,6 @@
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
       const card = document.querySelector(`.card[data-key="${CSS.escape(selectedKey)}"]`);
       if (card) card.classList.add('selected');
-      const mic = document.getElementById('sheet-mic');
-      if (SpeechAPI) {
-        mic.disabled = false;
-        mic.title = '語音輸入';
-      } else {
-        mic.disabled = true;
-        mic.title = '此瀏覽器不支援語音辨識';
-        document.getElementById('voice-hint').hidden = false;
-        document.getElementById('voice-hint').textContent = '此瀏覽器不支援語音辨識，可用鍵盤輸入。';
-      }
       requestAnimationFrame(() => document.getElementById('sheet-text').focus());
     }
     function syncSheetFromData() {
@@ -1478,6 +1943,10 @@
         }
       }
       latestAgents = mergedAgents;
+      if (!routeSettled) {
+        routeSettled = true;
+        applyRoute();
+      }
       const known = new Set(hosts.map(h => h.name));
       for (const name of [...hostFilters]) {
         if (!known.has(name)) hostFilters.delete(name);
@@ -1564,66 +2033,6 @@
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       }[c]));
     }
-    function setupSpeech() {
-      if (!SpeechAPI) return;
-      recognition = new SpeechAPI();
-      const nav = getNavigator();
-      recognition.lang = ((nav && nav.language) || 'zh-TW').startsWith('zh') ? 'zh-TW' : ((nav && nav.language) || 'en-US');
-      recognition.interimResults = true;
-      recognition.continuous = false;
-      recognition.onstart = () => {
-        listening = true;
-        document.getElementById('sheet-mic').classList.add('listening');
-        document.getElementById('voice-hint').hidden = false;
-        document.getElementById('voice-hint').textContent = '聆聽中…再點麥克風結束';
-      };
-      recognition.onend = () => {
-        listening = false;
-        document.getElementById('sheet-mic').classList.remove('listening');
-        document.getElementById('voice-hint').hidden = true;
-      };
-      recognition.onerror = async (event) => {
-        listening = false;
-        document.getElementById('sheet-mic').classList.remove('listening');
-        const status = document.getElementById('sheet-status');
-        document.getElementById('voice-hint').hidden = true;
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          micPermissionGranted = false;
-          const nav = getNavigator();
-          if (isMicSecureContext() && !micPromptAttempted && nav && nav.mediaDevices && typeof nav.mediaDevices.getUserMedia === 'function') {
-            const wasOpen = sheetOpen;
-            const targetKey = selectedKey;
-            try {
-              await requestMicPermission();
-              if ((wasOpen && !sheetOpen) || (targetKey && selectedKey !== targetKey)) return;
-              recognition.start();
-              return;
-            } catch (_) {
-              // Fall through to actionable blocked message.
-            }
-          }
-          status.className = 'sheet-feedback bad';
-          status.textContent = micBlockedMessage();
-          return;
-        }
-        status.className = 'sheet-feedback bad';
-        status.textContent = '語音錯誤: ' + event.error;
-      };
-      recognition.onresult = (event) => {
-        let interim = '';
-        let finalText = '';
-        for (let i = 0; i < event.results.length; i++) {
-          const piece = event.results[i][0].transcript;
-          if (event.results[i].isFinal) finalText += piece;
-          else interim += piece;
-        }
-        const box = document.getElementById('sheet-text');
-        const joined = (speechBase + (finalText || interim)).replace(/\s+/g, ' ').trimStart();
-        box.value = joined;
-        if (finalText) speechBase = (speechBase + finalText).replace(/\s+/g, ' ');
-        if (!speechBase.endsWith(' ') && speechBase) speechBase += ' ';
-      };
-    }
     document.getElementById('summary').addEventListener('click', (event) => {
       const btn = event.target.closest('.stat[data-group]');
       if (!btn || btn.disabled) return;
@@ -1658,70 +2067,81 @@
       fillSheet(agent);
     });
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && sheetOpen) closeSheet();
+      if (event.key !== 'Escape') return;
+      if (readerOpen) closeReader();
+      else if (sheetOpen) closeSheet();
     });
-    document.getElementById('sheet-mic').addEventListener('click', async () => {
-      if (!recognition || micRequestInFlight) return;
-      if (listening) {
-        stopListening();
-        return;
-      }
-      const status = document.getElementById('sheet-status');
-      if (!isMicSecureContext()) {
-        status.className = 'sheet-feedback bad';
-        status.textContent = micBlockedMessage();
-        return;
-      }
-      micRequestInFlight = true;
-      const wasOpen = sheetOpen;
-      const targetKey = selectedKey;
-      try {
-        await requestMicPermission();
-        if ((wasOpen && !sheetOpen) || (targetKey && selectedKey !== targetKey)) return;
-        speechBase = document.getElementById('sheet-text').value;
-        if (speechBase && !speechBase.endsWith(' ')) speechBase += ' ';
-        recognition.start();
-      } catch (e) {
-        status.className = 'sheet-feedback bad';
-        if (e && (e.code === 'insecure-context' || e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError')) {
-          status.textContent = micBlockedMessage();
-        } else if (e && (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError')) {
-          status.textContent = '找不到可用的麥克風裝置';
-        } else {
-          status.textContent = (e && e.message) || '無法開始語音';
-        }
-      } finally {
-        micRequestInFlight = false;
-      }
+    window.addEventListener('hashchange', applyRoute);
+    document.getElementById('sheet-preview').addEventListener('click', (event) => {
+      if (event.target.closest('a[href]')) return;
+      const picked = typeof window.getSelection === 'function' ? String(window.getSelection()) : '';
+      if (picked.trim()) return;
+      const line = event.target.closest('.preview-line[data-role]');
+      if (line) openReaderFromSheet(line.dataset.role, Number(line.dataset.index));
+    });
+    document.getElementById('reader-back').addEventListener('click', closeReader);
+    document.getElementById('reader-copy').addEventListener('click', copyReaderText);
+    document.getElementById('reader-reply').addEventListener('click', () => {
+      closeReader();
+      requestAnimationFrame(() => document.getElementById('sheet-text').focus());
+    });
+    document.getElementById('reader-body').addEventListener('click', (event) => {
+      if (!event.target.closest('[data-retry]')) return;
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      const route = parseReaderHash(window.location.hash);
+      if (!agent || !route) return;
+      loadReaderMessage(agent, route, '');
+    });
+    document.getElementById('sheet-attach').addEventListener('click', () => document.getElementById('sheet-file').click());
+    const fileInput = document.getElementById('sheet-file');
+    fileInput.addEventListener('change', () => {
+      addImages(fileInput.files);
+      fileInput.value = '';
+    });
+    document.getElementById('sheet-attachments').addEventListener('click', (event) => {
+      if (!event.target.closest('[data-remove]')) return;
+      const chip = event.target.closest('.attachment[data-key]');
+      if (chip) removeAttachment(chip.dataset.key);
     });
     document.getElementById('sheet-form').addEventListener('submit', async (event) => {
       event.preventDefault();
-      stopListening();
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
       const status = document.getElementById('sheet-status');
       const button = document.getElementById('sheet-send');
       const text = document.getElementById('sheet-text').value;
       if (!agent) return;
+      if (attachments.some(item => item.status === 'uploading')) {
+        setSheetStatus(UPLOADING_NOTICE);
+        return;
+      }
+      if (attachments.some(item => item.status === 'error')) {
+        setSheetStatus('有圖片上傳失敗，請移除後再送出', 'bad');
+        return;
+      }
+      const images = attachments.map(item => item.imageId);
       button.disabled = true;
+      document.getElementById('sheet-attach').disabled = true;
       status.className = 'sheet-feedback';
       status.textContent = '送出中…';
       try {
         const res = await fetch('/api/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, text, submit: true }),
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, text, submit: true, images }),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
         status.className = 'sheet-feedback ok';
         status.textContent = '已貼上';
         document.getElementById('sheet-text').value = '';
+        clearAttachments();
         setTimeout(closeSheet, 280);
       } catch (e) {
         status.className = 'sheet-feedback bad';
         status.textContent = e.message;
       } finally {
         button.disabled = false;
+        renderAttachments();
       }
     });
     document.getElementById('sheet-kill').addEventListener('click', async () => {
@@ -1831,7 +2251,6 @@
         refreshInFlight = false;
       }
     }
-    setupSpeech();
     refresh();
     setInterval(refresh, POLL_MS);
   </script>

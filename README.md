@@ -16,7 +16,7 @@ tmux Attention 讓你一眼知道：誰在問你、誰做完還沒看、誰還�
 | --- | --- |
 | 多 agent 並行，注意力被打散 | 狀態分組：🙋 等你 · 👀 做完未讀 · 🏃 進行中 · 💤 閒置 |
 | 人不在電腦前，錯過批准／問句 | 手機開網頁面板；可選 ntfy 只在新進入 🙋 時推播 |
-| 想快速回一句，卻要先找對 pane | 點卡片 → 輸入／語音 → 貼進正確 pane |
+| 想快速回一句，卻要先找對 pane | 點卡片 → 輸入文字（可附圖片）→ 貼進正確 pane |
 | 多台工作機（本機 + CI / 實驗室） | 一台 server 聚合多 client，一頁看完整 fleet |
 
 **不是**遠端遙控 IDE，也**不是**再包一層 LLM。狀態來自各 CLI 的 hooks（observer 只做交叉驗證），資料留在你的機器上。
@@ -125,10 +125,15 @@ Report: install JSON (status_control_clicks), web health, peers, tmux status lin
 | Prefix → `a` | Popup：分組清單、預覽、標記已看、暫緩 |
 | Prefix → `N` | 跳到第一個待處理 |
 | 底列 🙋／👀／🏃／💤 | 點擊循環跳到該狀態 pane |
-| 網頁卡片 | 開 sheet：看完整 Markdown、回覆、語音、關 pane（兩次確認） |
+| 網頁卡片 | 開 sheet：回覆、附圖片、關 pane（兩次確認）；點任一則訊息的「全文」開全頁閱讀（返回鍵關閉） |
 
 狀態語意：🙋 要你介入 · 👀 做完未讀（含 soft `?`）· 🏃 進行中 · 💤 已看／等待新任務。
 成功切換到結果所在 pane 或開啟可確認版本的 web 內容，會自動標已看。
+
+**網頁附圖片**：圖片在手機端先縮到長邊 2048px 並重新編碼（同時去除 EXIF），上傳到該 pane
+所在主機的 `~/.local/state/tmux-attn/uploads/`（保留 7 天、最多 200 張／256MB），送出時以絕對路徑
+各自貼上一次。Claude Code、Codex 會變成附件（`[Image #n]`）；Pi 沒有附件功能，只收到文字路徑。
+多主機時，每台 client 都要更新到同一版，舊版沒有 `/api/upload` 與 `/api/message`。
 
 ---
 
