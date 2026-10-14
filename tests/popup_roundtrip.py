@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory() as directory:
             return subprocess.Popen(command+['display-popup','-E','-w','90%','-h','85%','-t',name,launch],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         popup=open_popup()
         screen=drain(1.5)
-        for label in ['等待回覆','閒置','運行中','claude']:
+        for label in ['等待回覆','閒置','工作進行中','claude']:
             assert label in screen,(label,screen)
         os.write(master,b'd')
         feedback=drain(.5)

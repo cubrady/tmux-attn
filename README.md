@@ -6,7 +6,7 @@ tmux Attention 讓你一眼知道：誰在問你、誰做完還沒看、誰還�
 
 支援 **Claude Code** · **Codex** · **Cursor CLI** · **Pi**。
 
-開源：[`cubrady/tmux-attn`](https://github.com/cubrady/tmux-attn)
+主 repo：[`cubrady/tmux-attn`](https://github.com/cubrady/tmux-attn)。所有更新與 issue 集中在此；舊私人 repo `tmux-attention` 已封存。
 
 ---
 
@@ -56,7 +56,7 @@ client B ── /api/agents ──┼──▶ server /api/fleet ──▶ 手�
 需要 Python ≥ 3.11、tmux ≥ 3.7、已登入的 agent CLI。
 
 ```sh
-git clone git@github.com:cubrady/tmux-attn.git
+git clone https://github.com/cubrady/tmux-attn.git
 cd tmux-attn
 sh install.sh --solo          # 單機
 # 多機 client：
@@ -81,7 +81,7 @@ tmux attach                   # Prefix → a 開清單
 Install tmux-attn on THIS machine. Tailscale/LAN only; never expose :7788 publicly. Never guess IPs.
 
 Ask: SETUP=solo|multi
-  solo → clone git@github.com:cubrady/tmux-attn.git && cd tmux-attn && sh install.sh --solo
+  solo → clone https://github.com/cubrady/tmux-attn.git && cd tmux-attn && sh install.sh --solo
   multi client → PEER_NAME, LOCAL_FEED_URL=http://$(tailscale ip -4):7788, SERVER_URL=http://<server>:7788
        clone … && cd tmux-attn
        PEER_NAME='…' LOCAL_FEED_URL='…' SERVER_URL='…' sh install.sh
@@ -144,5 +144,18 @@ Codex 的 hooks 可能由共用 app-server 執行，無法從程序祖先直接�
 別名、移植、ntfy、還原：見 `project-aliases.example.json`、`peers.example.json`、`notify.example.json`、`migrate.py`、`rollback.py`。
 
 ```sh
-python3 -m unittest test_attention.py test_codex_observer.py test_migration.py test_observer_recovery.py
+python3 -m unittest discover -v
+node --test tests/web.test.cjs
+python3 tests/popup_roundtrip.py
+python3 tests/status_click_roundtrip.py
 ```
+
+開發檢查（需另裝 Ruff、ShellCheck）：
+
+```sh
+ruff check --select F .
+shellcheck bootstrap.sh install.sh install_web_service.sh
+```
+
+GitHub Actions 會在 push／PR 自動執行上述檢查，涵蓋 Python 3.11 與 3.14。
+Python 整合測試使用臨時 HOME 和獨立 tmux server，驗證安裝、hooks、遷移與還原。

@@ -31,7 +31,7 @@ for arg in "$@"; do
   esac
 done
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 bin="${HOME}/.local/bin/tmux-attn"
 uid=$(id -u)
 

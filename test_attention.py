@@ -372,9 +372,15 @@ class StoreTests(unittest.TestCase):
 
 
     def test_dispatch_preview_requires_live_tracked_pane(self):
-        code, body = a.dispatch_preview({'pane': '%1', 'pid': '123'})
-        self.assertEqual(code, 409)
-        self.assertFalse(body['ok'])
+        with patch.object(a, 'resolve_socket', return_value='socket'), \
+             patch.object(a, 'live_panes') as live_mock:
+            for live, error in [({}, 'pane is not live'), (self.live, 'pane is not tracked')]:
+                with self.subTest(error=error):
+                    live_mock.return_value = live
+                    code, body = a.dispatch_preview({'pane': '%1', 'pid': '123'})
+                    self.assertEqual(code, 409)
+                    self.assertFalse(body['ok'])
+                    self.assertEqual(body['error'], error)
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
              patch.object(a, 'urlopen') as urlopen_mock:
@@ -683,6 +689,17 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'🏃')
                 # Switch to popup, remove only marked panes, then restore sidebar mode.
                 original_app = app.read_text()
+                installed_assets = [
+                    app.parent/'install_web_service.sh',
+                    app.parent/'contrib/systemd/tmux-attn-web.service',
+                    app.parent/'contrib/launchd/ai.tmux-attn.web.plist',
+                ]
+                for asset in installed_assets:
+                    asset.write_text('custom prior asset: '+asset.name+'\n')
+                icons = app.parent/'web/icons'
+                (icons/'custom.svg').write_text('<svg>custom icon</svg>')
+                old_assets = {path: path.read_bytes() for path in installed_assets}
+                old_icons = {path.name: path.read_bytes() for path in icons.iterdir()}
                 alias_path=home/'.config/tmux-attn/project-aliases.json'
                 aliases=json.loads(alias_path.read_text())
                 aliases['aliases'][project]='fixture'
@@ -693,17 +710,23 @@ class IntegrationTests(unittest.TestCase):
                 again=json.loads(subprocess.check_output([sys.executable,'install.py'],env=env,text=True))
                 self.assertEqual(json.loads(alias_path.read_text()),aliases)
                 self.assertNotIn('1',run('list-panes','-a','-F','#{@tmux_attn_sidebar}').splitlines())
+                self.assertFalse((icons/'custom.svg').exists())
                 self.assertEqual(work_before,set(run('list-panes','-a','-F','#{pane_id} #{pane_pid} #{?@tmux_attn_sidebar,1,0}').splitlines()))
                 self.assertIn('display-popup',run('list-keys','-T','prefix'))
                 self.assertNotEqual(again['backup'],backup)
                 app.write_text(original_app+'\n# temporary upgrade marker\n')
                 subprocess.run([sys.executable,'rollback.py',again['backup']],env=env,check=True,capture_output=True)
                 self.assertEqual(app.read_text(),original_app)
+                self.assertEqual({path: path.read_bytes() for path in installed_assets}, old_assets)
+                self.assertEqual({path.name: path.read_bytes() for path in icons.iterdir()}, old_icons)
                 wait(lambda:run('list-panes','-a','-F','#{@tmux_attn_sidebar}').splitlines().count('1')==2)
                 self.assertIn('echo unrelated',(home/'.claude/settings.json').read_text())
                 subprocess.run([sys.executable,'rollback.py',backup],env=env,check=True,capture_output=True)
                 self.assertEqual((home/'.claude/settings.json').read_text(),old)
                 self.assertFalse(alias_path.exists())
+                self.assertFalse(icons.exists())
+                for asset in installed_assets:
+                    self.assertFalse(asset.exists())
                 self.assertEqual(run('show-options','-gwv','window-status-format'),old_window_format)
                 self.assertNotIn('1',run('list-panes','-a','-F','#{@tmux_attn_sidebar}').splitlines())
                 self.assertEqual(run('list-panes','-a','-F','#{pane_id}').splitlines().__len__(),2)

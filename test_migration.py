@@ -30,6 +30,9 @@ class MigrationTests(unittest.TestCase):
             with tarfile.open(bundle) as archive:
                 names = archive.getnames()
                 self.assertNotIn('tmux-attn/tasks/state-accuracy-audit.json',names)
+                self.assertIn('tmux-attn/LICENSE', names)
+                self.assertIn('tmux-attn/test_join_peer.py', names)
+                self.assertIn('tmux-attn/tests/web.test.cjs', names)
                 self.assertFalse(any('.claude' in name or 'sqlite' in name for name in names))
                 for member in archive.getmembers():
                     target = extracted/member.name
