@@ -4,13 +4,13 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
-function dashboard() {
+function dashboard(fetchRequest, animationFrame = callback => callback()) {
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, {
     innerHTML: '', textContent: '', hidden: false, dataset: {}, listeners: {},
     classList: { add() {}, remove() {}, toggle() {} },
     addEventListener(type, listener) { this.listeners[type] = listener; },
-    setAttribute() {},
+    setAttribute() {}, focus() {},
   }]));
   const document = {
     body: elements.get('list'),
@@ -24,11 +24,16 @@ function dashboard() {
   };
   const context = vm.createContext({
     window: {}, document, performance: { now: () => 0 },
-    fetch: () => new Promise(() => {}), setInterval() {},
+    fetch: (url, options) => url === '/api/fleet' ? new Promise(() => {}) : fetchRequest(url, options),
+    setInterval() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => value },
   });
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
   vm.runInContext(script, context);
-  return { elements, render: data => context.render(data) };
+  return { elements, render: data => context.render(data),
+    open: agent => context.openSheet(agent), close: () => context.closeSheet(),
+    refreshPreview: () => elements.get('sheet-refresh').listeners.click(),
+    visibility: state => { document.visibilityState = state; },
+  };
 }
 
 function agent(host, state, tracked = true, pending = false) {
@@ -95,4 +100,277 @@ test('host labels and attributes escape HTML', () => {
   const pills = ui.elements.get('hosts').innerHTML;
   assert.match(pills, /data-host="&lt;work&gt;&quot;&amp;"/);
   assert.doesNotMatch(pills, /<work>/);
+});
+
+test('review cards retain review labels without restoring removed terminal metadata', () => {
+  const ui = dashboard(() => new Promise(() => {}));
+  const current = { ...agent('work-machine', 'IDLE', true, true), cli: 'codex', session: 'build-session' };
+  ui.render({ agents: [current] });
+  const card = ui.elements.get('list').innerHTML;
+  assert.doesNotMatch(card, /class="host tone-|class="cli |\/icons\/codex.svg/);
+  assert.match(card, /class="project">未命名專案<\/span>/);
+  assert.match(card, /class="review-state unread">未看<\/span>/);
+  assert.doesNotMatch(card, /class="project">%1<\/span>/);
+  ui.open(current);
+  assert.equal(ui.elements.has('sheet-target'), false);
+  assert.equal(ui.elements.get('sheet-title').textContent, '未命名專案');
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.doesNotMatch(html, /\.host\.tone-7|\.cli\.broken::after|\.sheet-sub \{|function cliBadge/);
+});
+
+function review(project, revision, acknowledged, updated = revision) {
+  return { ...agent('work', 'IDLE'), project, pane: `%${project}`, needs_review: true,
+    revision, acknowledged, unread: revision > acknowledged, reviewed: revision <= acknowledged,
+    pending: revision > acknowledged, updated, preview: { agent: `result ${revision}` } };
+}
+
+function response(data, ok = true) {
+  return { ok, status: ok ? 200 : 409, json: async () => data };
+}
+
+async function settle() {
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+}
+
+test('review groups put unread first and sort newest messages inside each group', () => {
+  const ui = dashboard();
+  ui.render({ agents: [review('seen-old', 1, 1, 10), review('unread-old', 2, 0, 20),
+    review('seen-new', 3, 3, 40), review('unread-new', 4, 0, 30)] });
+  const list = ui.elements.get('list').innerHTML;
+  assert.ok(list.indexOf('data-review="unread"') < list.indexOf('data-review="reviewed"'));
+  const projects = [...list.matchAll(/<span class="project">([^<]+)<\/span>/g)].map(([, value]) => value);
+  assert.deepEqual(projects, ['unread-new', 'unread-old', 'seen-new', 'seen-old']);
+  assert.match(list, /class="card review unread newest"/);
+  assert.match(list, /class="card review reviewed"/);
+  assert.match(list, /class="review-state unread">未看/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 2/);
+  assert.match(ui.elements.get('summary').innerHTML, /已看 2/);
+  assert.match(ui.elements.get('summary').innerHTML, /aria-label="跳到待看，未看 2，已看 2"/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 0/);
+});
+
+test('review navigation remains enabled with only seen results and legacy pending remains unread', () => {
+  const ui = dashboard();
+  ui.render({ agents: [review('seen', 1, 1)] });
+  const summary = ui.elements.get('summary').innerHTML;
+  assert.match(summary, /data-group="review" title="跳到待看"/);
+  assert.match(summary, /👀 0/);
+  assert.match(summary, /已看 1/);
+  ui.render({ agents: [agent('legacy', 'IDLE', true, true)] });
+  assert.match(ui.elements.get('list').innerHTML, /data-review="unread"/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+});
+
+test('successful rendered preview acknowledges its exact version and newer fleet content stays unread', async () => {
+  const calls = [];
+  let resolvePreview;
+  const ui = dashboard((url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    if (url === '/api/preview') return new Promise(resolve => { resolvePreview = resolve; });
+    assert.match(ui.elements.get('sheet-preview').innerHTML, /displayed version 2/);
+    return Promise.resolve(response({ ok: true, revision: 3, acknowledged: 2 }));
+  });
+  const current = review('task', 2, 0);
+  ui.render({ agents: [current] });
+  ui.open(current);
+  ui.render({ agents: [review('task', 3, 0)] });
+  resolvePreview(response({ ok: true, preview: { agent: 'displayed version 2' }, revision: 2, viewable: true }));
+  await settle();
+  assert.deepEqual(calls.map(call => call.url), ['/api/preview', '/api/ack']);
+  assert.equal(calls[1].body.revision, 2);
+  assert.deepEqual(calls[1].body, { host: 'work', pane: '%task', pid: '123', revision: 2 });
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.match(ui.elements.get('sheet-preview').innerHTML, /displayed version 2/);
+  ui.close();
+  assert.match(ui.elements.get('list').innerHTML, /review unread/);
+});
+
+test('successful acknowledgement moves result into seen group, survives stale fleet and does not repeat', async () => {
+  const calls = [];
+  const ui = dashboard(async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return response(url === '/api/preview'
+      ? { ok: true, preview: { agent: 'result' }, revision: 2, viewable: true }
+      : { ok: true, acknowledged: 2 });
+  });
+  const current = { ...review('task', 2, 0), emoji: '👀', reason: '已完成，尚未查看（背景工作仍在運行）' };
+  ui.render({ agents: [current] });
+  ui.open(current);
+  await settle();
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /已看 1/);
+  assert.match(ui.elements.get('list').innerHTML, /review reviewed/);
+  assert.match(ui.elements.get('list').innerHTML, /aria-hidden="true">✓<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /已完成，已查看（背景工作仍在運行）/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /尚未查看|👀<\/span>/);
+  assert.equal(current.reason, '已完成，尚未查看（背景工作仍在運行）');
+  assert.equal(current.emoji, '👀');
+  assert.equal(ui.elements.get('sheet-reason').textContent, current.reason);
+  ui.render({ agents: [current] });
+  ui.refreshPreview();
+  await settle();
+  assert.equal(calls.filter(call => call.url === '/api/ack').length, 1);
+});
+
+test('failed acknowledgement stays unread and retries only on explicit refresh or reopen', async () => {
+  let ackAttempts = 0;
+  const ui = dashboard(async url => {
+    if (url === '/api/preview') return response({ ok: true, preview: { agent: 'result' }, revision: 2, viewable: true });
+    ackAttempts += 1;
+    return response({ ok: ackAttempts > 1, error: 'offline', acknowledged: 2 }, ackAttempts > 1);
+  });
+  const current = review('task', 2, 0);
+  ui.render({ agents: [current] });
+  ui.open(current);
+  await settle();
+  assert.match(ui.elements.get('sheet-status').textContent, /儲存失敗/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  ui.render({ agents: [current] });
+  await settle();
+  assert.equal(ackAttempts, 1);
+  ui.refreshPreview();
+  await settle();
+  assert.equal(ackAttempts, 2);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+});
+
+test('failed, cached, empty or action-needed previews never acknowledge', async () => {
+  for (const data of [
+    { ok: false, error: 'changed', revision: 2, viewable: true },
+    { ok: true, preview: {}, revision: 2, viewable: false },
+    { ok: true, preview: { agent: 'cached old result' }, revision: 2, viewable: false },
+    { ok: true, preview: { agent: 'waiting approval' }, revision: 2, viewable: false },
+    { ok: true, preview: { agent: 'legacy result' } },
+  ]) {
+    const calls = [];
+    const ui = dashboard(async url => {
+      calls.push(url);
+      return response(data, data.ok);
+    });
+    const current = review('task', 2, 0);
+    ui.render({ agents: [current] });
+    ui.open(current);
+    await settle();
+    assert.deepEqual(calls, ['/api/preview']);
+    assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+    if (data.viewable === false) {
+      assert.equal(ui.elements.get('sheet-status').textContent, '最新內容尚未就緒，請稍後重新整理。');
+      assert.equal(ui.elements.get('sheet-status').className, 'sheet-feedback');
+    }
+  }
+});
+
+test('not-ready feedback only appears for unread review results with explicit viewable false', async () => {
+  for (const current of [agent('work', 'WAIT', true, true), review('seen', 1, 1)]) {
+    const ui = dashboard(async () => response({ ok: true, preview: { agent: 'content' }, revision: 1, viewable: false }));
+    ui.render({ agents: [current] });
+    ui.open(current);
+    await settle();
+    assert.equal(ui.elements.get('sheet-status').textContent, '');
+  }
+  const current = agent('legacy', 'IDLE', true, true);
+  const ui = dashboard(async () => response({ ok: true, preview: { agent: 'legacy content' } }));
+  ui.render({ agents: [current] });
+  ui.open(current);
+  await settle();
+  assert.equal(ui.elements.get('sheet-status').textContent, '');
+});
+
+test('closed and switched sheets ignore late preview responses without acknowledging or showing errors', async () => {
+  for (const switchSheet of [false, true]) {
+    const calls = [];
+    const pending = [];
+    const ui = dashboard((url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      return new Promise(resolve => pending.push(resolve));
+    });
+    const first = review('first', 1, 0);
+    const second = review('second', 2, 0);
+    ui.render({ agents: [first, second] });
+    ui.open(first);
+    if (switchSheet) ui.open(second);
+    else ui.close();
+    pending[0](response({ ok: true, preview: { agent: 'stale first' }, revision: 1, viewable: true }));
+    await settle();
+    assert.equal(calls.filter(call => call.url === '/api/ack').length, 0);
+    assert.doesNotMatch(ui.elements.get('sheet-preview').innerHTML, /stale first/);
+    assert.equal(ui.elements.get('sheet-status').textContent, '');
+  }
+});
+
+test('polling keeps open sheet content and metadata stable until explicit refresh', async () => {
+  let revision = 1;
+  let previews = 0;
+  const ui = dashboard(async url => {
+    if (url === '/api/ack') return response({ ok: true, acknowledged: revision });
+    previews += 1;
+    return response({ ok: true, preview: { agent: `full result ${revision}` }, revision, viewable: true });
+  });
+  const current = { ...review('task', 1, 0), reason: 'first reason', branch: 'first branch' };
+  ui.render({ agents: [current] });
+  ui.open(current);
+  await settle();
+  revision = 2;
+  ui.render({ agents: [{ ...review('task', 2, 0), reason: 'second reason', branch: 'second branch' }] });
+  assert.equal(previews, 1);
+  assert.match(ui.elements.get('sheet-preview').innerHTML, /full result 1/);
+  assert.equal(ui.elements.get('sheet-reason').textContent, 'first reason');
+  assert.match(ui.elements.get('sheet-env').innerHTML, /first branch/);
+  assert.match(ui.elements.get('sheet-refresh').textContent, /有新訊息/);
+  ui.refreshPreview();
+  await settle();
+  assert.equal(previews, 2);
+  assert.match(ui.elements.get('sheet-preview').innerHTML, /full result 2/);
+  assert.equal(ui.elements.get('sheet-reason').textContent, 'second reason');
+});
+
+test('acknowledgement waits for content to paint and skips hidden or closed sheets', async () => {
+  for (const state of ['open', 'closed', 'hidden']) {
+    const frames = [];
+    const calls = [];
+    const ui = dashboard(async url => {
+      calls.push(url);
+      return response(url === '/api/preview'
+        ? { ok: true, preview: { agent: 'rendered result' }, revision: 1, viewable: true }
+        : { ok: true, acknowledged: 1 });
+    }, callback => frames.push(callback));
+    const current = review('task', 1, 0);
+    ui.render({ agents: [current] });
+    ui.open(current);
+    await settle();
+    assert.match(ui.elements.get('sheet-preview').innerHTML, /rendered result/);
+    assert.deepEqual(calls, ['/api/preview']);
+    // Opening also schedules textarea focus; no acknowledgement until two content frames.
+    while (frames.length > 1) frames.shift()();
+    frames.shift()();
+    if (state === 'closed') ui.close();
+    if (state === 'hidden') ui.visibility('hidden');
+    frames.shift()();
+    await settle();
+    assert.equal(calls.filter(url => url === '/api/ack').length, state === 'open' ? 1 : 0);
+  }
+});
+
+test('preview network failure preserves unread and can retry on reopen', async () => {
+  let attempts = 0;
+  const calls = [];
+  const ui = dashboard(async url => {
+    calls.push(url);
+    if (url === '/api/preview' && attempts++ === 0) throw new Error('offline');
+    return response(url === '/api/preview'
+      ? { ok: true, preview: { agent: 'result' }, revision: 1, viewable: true }
+      : { ok: true, acknowledged: 1 });
+  });
+  const current = review('task', 1, 0);
+  ui.render({ agents: [current] });
+  ui.open(current);
+  await settle();
+  assert.match(ui.elements.get('sheet-status').textContent, /預覽載入失敗/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.deepEqual(calls, ['/api/preview']);
+  ui.close();
+  ui.open(current);
+  await settle();
+  assert.deepEqual(calls, ['/api/preview', '/api/preview', '/api/ack']);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
 });

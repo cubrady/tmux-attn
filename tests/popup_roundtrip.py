@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory() as directory:
             return subprocess.Popen(command+['display-popup','-E','-w','90%','-h','85%','-t',name,launch],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         popup=open_popup()
         screen=drain(1.5)
-        for label in ['等待回覆','閒置','工作進行中','claude']:
+        for label in ['等待回覆','待看 · 未看','待看 · 已看','閒置','工作進行中','claude']:
             assert label in screen,(label,screen)
         os.write(master,b'd')
         feedback=drain(.5)
@@ -83,7 +83,22 @@ with tempfile.TemporaryDirectory() as directory:
         drain(.4)
         assert popup.wait(timeout=3)==0,popup.communicate()
         assert tmux('display-message','-p','-c',name,'#{pane_id}')==wait_pane
-        print('Popup: three groups; d updates DB and reviewed labels; new completion restores unread emoji; q closes; Enter jumps; agent panes preserved.')
+        popup=open_popup()
+        drain(1)
+        os.write(master,b'j\r')
+        drain(.5)
+        assert popup.wait(timeout=3)==0,popup.communicate()
+        with a.db() as con:
+            row=con.execute("SELECT * FROM panes WHERE state='IDLE'").fetchone()
+            assert row['acknowledged']==row['revision']
+            assert tmux('display-message','-p','-c',name,'#{pane_id}')==row['pane']
+        popup=open_popup()
+        screen=drain(1)
+        assert '已查看' in screen,screen
+        os.write(master,b'q')
+        drain(.4)
+        assert popup.wait(timeout=3)==0,popup.communicate()
+        print('Popup: unread/viewed review groups; d updates DB; new completion restores unread; Enter confirms completion; reviewed popup reopens; agent panes preserved.')
     finally:
         if popup and popup.poll() is None:
             popup.terminate()
