@@ -201,19 +201,25 @@ class RecoveryIntegrationTests(unittest.TestCase):
             self.assertEqual(caller.returncode, 0, stderr)
         pid = self.wait_for(self.lock_pid)
         self.assertEqual(self.wait_for(self.registered)[0], 'IDLE')
-        observers = []
-        for entry in Path('/proc').iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                environment = (entry / 'environ').read_bytes().split(b'\0')
-                command = (entry / 'cmdline').read_bytes().split(b'\0')
-                if (f'TMUX_ATTN_STATE_DIR={self.state}'.encode() in environment
-                        and command[-3:-1] == [str(a.ROOT / 'attention.py').encode(), b'observe']):
-                    observers.append(int(entry.name))
-            except (OSError, PermissionError):
-                continue
-        self.assertEqual(observers, [pid])
+        def observer_pids():
+            observers = []
+            for entry in Path('/proc').iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    environment = (entry / 'environ').read_bytes().split(b'\0')
+                    command = (entry / 'cmdline').read_bytes().split(b'\0')
+                    if (f'TMUX_ATTN_STATE_DIR={self.state}'.encode() in environment
+                            and command[-3:-1] == [str(a.ROOT / 'attention.py').encode(), b'observe']):
+                        observers.append(int(entry.name))
+                except (OSError, PermissionError):
+                    continue
+            return observers
+
+        # Status callers return before detached contenders finish starting.
+        # Wait for those children to reject the held lock and exit.
+        self.wait_for(lambda: observer_pids() == [pid])
+        self.assertEqual(observer_pids(), [pid])
 
 
 if __name__ == '__main__':
