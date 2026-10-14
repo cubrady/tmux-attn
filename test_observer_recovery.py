@@ -1,6 +1,7 @@
 import fcntl
 import io
 import os
+from contextlib import closing
 from pathlib import Path
 import shlex
 import shutil
@@ -9,9 +10,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import attention as a
 import codex_observer as observer
@@ -98,6 +100,96 @@ class RecoveryTests(unittest.TestCase):
             a.log_observer_error(OSError('missing socket'))
         self.assertEqual(path.read_bytes(), original)
 
+    def test_wal_activation_retries_real_contention_until_lock_released(self):
+        path = self.state / 'contended.sqlite3'
+        release = threading.Event()
+        attempts = []
+
+        class ContendedConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql == 'PRAGMA journal_mode=WAL':
+                    attempts.append(sql)
+                try:
+                    return super().execute(sql, *args)
+                except sqlite3.OperationalError:
+                    release.set()
+                    raise
+
+        with closing(sqlite3.connect(path, check_same_thread=False)) as holder:
+            holder.execute('CREATE TABLE test(value)')
+            holder.execute('BEGIN EXCLUSIVE')
+
+            def unlock():
+                if release.wait(2):
+                    holder.rollback()
+
+            thread = threading.Thread(target=unlock)
+            thread.start()
+            try:
+                with closing(sqlite3.connect(path, timeout=0, factory=ContendedConnection)) as con:
+                    a.enable_wal(con, timeout=1)
+                    self.assertEqual(con.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+                    self.assertEqual(con.execute('PRAGMA busy_timeout').fetchone()[0], 3000)
+                self.assertGreaterEqual(len(attempts), 2)
+            finally:
+                release.set()
+                thread.join(timeout=2)
+
+    def test_wal_activation_permanent_lock_respects_total_deadline(self):
+        path = self.state / 'locked.sqlite3'
+        with closing(sqlite3.connect(path)) as holder:
+            holder.execute('CREATE TABLE test(value)')
+            holder.execute('BEGIN EXCLUSIVE')
+            with closing(sqlite3.connect(path, timeout=0.05)) as con:
+                started = time.monotonic()
+                with self.assertRaises(sqlite3.OperationalError) as raised:
+                    a.enable_wal(con, timeout=0.2)
+                elapsed = time.monotonic() - started
+                self.assertEqual(raised.exception.sqlite_errorcode & 0xff, sqlite3.SQLITE_BUSY)
+                self.assertGreaterEqual(elapsed, 0.18)
+                self.assertLess(elapsed, 0.5)
+
+    def test_wal_unrelated_error_propagates_and_db_closes_connection(self):
+        path = self.state / 'inbox.sqlite3'
+        with closing(sqlite3.connect(path)) as source:
+            source.execute('CREATE TABLE test(value)')
+        con = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+        self.addCleanup(con.close)
+        with patch.object(a.sqlite3, 'connect', return_value=con), \
+                patch.object(a.time, 'sleep') as sleep:
+            with self.assertRaises(sqlite3.OperationalError) as raised:
+                a.db()
+            self.assertEqual(raised.exception.sqlite_errorcode, sqlite3.SQLITE_READONLY)
+            sleep.assert_not_called()
+        with self.assertRaises(sqlite3.ProgrammingError):
+            con.execute('SELECT 1')
+
+    def test_wal_activation_handles_extended_contention_codes(self):
+        for code in (sqlite3.SQLITE_BUSY_RECOVERY, sqlite3.SQLITE_LOCKED_SHAREDCACHE):
+            with self.subTest(code=code):
+                exc = sqlite3.OperationalError('contention')
+                exc.sqlite_errorcode = code
+                con = Mock()
+                wal_attempts = []
+
+                def execute(sql):
+                    if sql == 'PRAGMA journal_mode=WAL':
+                        wal_attempts.append(sql)
+                        if len(wal_attempts) == 1:
+                            raise exc
+
+                con.execute.side_effect = execute
+                with patch.object(a.time, 'sleep'):
+                    a.enable_wal(con)
+                self.assertEqual(len(wal_attempts), 2)
+
+    def test_wal_activation_without_contention_uses_one_pragma(self):
+        with closing(sqlite3.connect(self.state / 'healthy.sqlite3')) as con:
+            statements = []
+            con.set_trace_callback(statements.append)
+            a.enable_wal(con)
+            self.assertEqual(statements, ['PRAGMA journal_mode=WAL'])
+
 
 @unittest.skipUnless(shutil.which('tmux') and Path('/proc').exists(), 'requires tmux and Linux process inspection')
 class RecoveryIntegrationTests(unittest.TestCase):
@@ -133,6 +225,9 @@ class RecoveryIntegrationTests(unittest.TestCase):
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
+            for stream in (child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
         if self.state.exists():
             for lock in self.state.glob('codex-observer-*.lock'):
                 try:
@@ -218,8 +313,8 @@ class RecoveryIntegrationTests(unittest.TestCase):
             [sys.executable, str(a.ROOT / 'attention.py'), 'status'],
             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True) for _ in range(4)]
+        self.children.extend(callers)
         for caller in callers:
-            self.children.append(caller)
             _, stderr = caller.communicate(timeout=5)
             self.assertEqual(caller.returncode, 0, stderr)
         pid = self.wait_for(self.lock_pid)
