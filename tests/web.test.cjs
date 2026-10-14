@@ -156,9 +156,10 @@ test('review groups put unread first and sort newest messages inside each group'
   assert.match(list, /class="card review unread newest"/);
   assert.match(list, /class="card review reviewed"/);
   assert.match(list, /class="review-state unread">未看/);
-  assert.match(ui.elements.get('summary').innerHTML, /👀 2/);
-  assert.match(ui.elements.get('summary').innerHTML, /已看 2/);
-  assert.match(ui.elements.get('summary').innerHTML, /aria-label="跳到待看，未看 2，已看 2"/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 4/);
+  assert.match(ui.elements.get('summary').innerHTML, />未看 2<\/span>/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, />已看|>結果|class="secondary"/);
+  assert.match(ui.elements.get('summary').innerHTML, /aria-label="跳到待看，共 4，未看 2，已看 2"/);
   assert.match(ui.elements.get('summary').innerHTML, /💤 0/);
 });
 
@@ -167,11 +168,42 @@ test('review navigation remains enabled with only seen results and legacy pendin
   ui.render({ agents: [review('seen', 1, 1)] });
   const summary = ui.elements.get('summary').innerHTML;
   assert.match(summary, /data-group="review" title="跳到待看"/);
-  assert.match(summary, /👀 0/);
-  assert.match(summary, /已看 1/);
+  assert.match(summary, /👀 1/);
+  assert.doesNotMatch(summary, /review-unread/);
+  assert.match(summary, /aria-label="跳到待看，共 1，未看 0，已看 1"/);
   ui.render({ agents: [agent('legacy', 'IDLE', true, true)] });
   assert.match(ui.elements.get('list').innerHTML, /data-review="unread"/);
   assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
+  ui.render({ agents: [] });
+  assert.match(ui.elements.get('summary').innerHTML, /data-group="review" disabled/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
+});
+
+test('review total and unread hint reflect only the selected hosts', () => {
+  const ui = dashboard();
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [
+    { ...review('alpha-unread', 2, 0), host: 'alpha' },
+    { ...review('alpha-seen', 1, 1), host: 'alpha' },
+    { ...review('beta-seen', 1, 1), host: 'beta' },
+  ] });
+  const click = name => ui.elements.get('hosts').listeners.click({
+    target: { closest: () => ({ dataset: { host: name } }) },
+  });
+  assert.match(ui.elements.get('summary').innerHTML, /👀 3/);
+  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
+  click('alpha');
+  assert.match(ui.elements.get('summary').innerHTML, /👀 2/);
+  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
+  click('alpha');
+  click('beta');
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /alpha-unread|alpha-seen/);
+  click('');
+  assert.match(ui.elements.get('summary').innerHTML, /👀 3/);
+  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
 });
 
 test('successful rendered preview acknowledges its exact version and newer fleet content stays unread', async () => {
@@ -210,8 +242,9 @@ test('successful acknowledgement moves result into seen group, survives stale fl
   ui.render({ agents: [current] });
   ui.open(current);
   await settle();
-  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
-  assert.match(ui.elements.get('summary').innerHTML, /已看 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
+  assert.match(ui.elements.get('summary').innerHTML, /aria-label="跳到待看，共 1，未看 0，已看 1"/);
   assert.match(ui.elements.get('list').innerHTML, /review reviewed/);
   assert.match(ui.elements.get('list').innerHTML, /aria-hidden="true">✓<\/span>/);
   assert.match(ui.elements.get('list').innerHTML, /已完成，已查看（背景工作仍在運行）/);
@@ -244,7 +277,8 @@ test('failed acknowledgement stays unread and retries only on explicit refresh o
   ui.refreshPreview();
   await settle();
   assert.equal(ackAttempts, 2);
-  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
 });
 
 test('failed, cached, empty or action-needed previews never acknowledge', async () => {
@@ -385,7 +419,8 @@ test('preview network failure preserves unread and can retry on reopen', async (
   ui.open(current);
   await settle();
   assert.deepEqual(calls, ['/api/preview', '/api/preview', '/api/ack']);
-  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
 });
 
 test('transient host failure retains last-known-good sessions until stale TTL expires', () => {
