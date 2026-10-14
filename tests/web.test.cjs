@@ -469,7 +469,7 @@ test('acknowledgement waits for content to paint and skips hidden or closed shee
     await settle();
     assert.match(ui.elements.get('sheet-preview').innerHTML, /rendered result/);
     assert.deepEqual(calls, ['/api/preview']);
-    // Opening also schedules textarea focus; no acknowledgement until two content frames.
+    // Opening also schedules transcript focus; no acknowledgement until two content frames.
     while (frames.length > 1) frames.shift()();
     frames.shift()();
     if (state === 'closed') ui.close();
@@ -478,6 +478,19 @@ test('acknowledgement waits for content to paint and skips hidden or closed shee
     await settle();
     assert.equal(calls.filter(url => url === '/api/ack').length, state === 'open' ? 1 : 0);
   }
+});
+
+test('opening the sheet focuses the transcript, not the reply box, so no keyboard pops up', () => {
+  const ui = dashboard();
+  const focused = [];
+  for (const id of ['sheet-text', 'sheet-preview']) ui.elements.get(id).focus = () => focused.push(id);
+  const current = review('task', 1, 0);
+  ui.render({ agents: [current] });
+  ui.open(current);
+  assert.deepEqual(focused, ['sheet-preview']);
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /<div class="sheet-preview" id="sheet-preview" tabindex="0"/);
+  assert.doesNotMatch(html, /<textarea[^>]*\bautofocus\b/);
 });
 
 test('preview network failure preserves unread and can retry on reopen', async () => {
