@@ -1,0 +1,98 @@
+[
+  {
+    "id": "wait-unread",
+    "row": {"tracked": true, "state": "WAIT", "needs_review": false, "unread": true, "pending": true, "reviewed": false, "revision": 3, "acknowledged": 2},
+    "category": "wait",
+    "emoji": "🙋"
+  },
+  {
+    "id": "wait-acknowledged",
+    "row": {"tracked": true, "state": "WAIT", "needs_review": false, "unread": false, "pending": false, "reviewed": true, "revision": 3, "acknowledged": 3},
+    "category": "wait",
+    "emoji": "🙋"
+  },
+  {
+    "id": "running",
+    "row": {"tracked": true, "state": "RUNNING", "needs_review": false, "unread": false, "pending": false, "reviewed": false, "revision": 3, "acknowledged": 0},
+    "category": "running",
+    "emoji": "🏃"
+  },
+  {
+    "id": "running-lingering-unread",
+    "row": {"tracked": true, "state": "RUNNING", "needs_review": true, "unread": true, "pending": true, "reviewed": false, "revision": 3, "acknowledged": 2},
+    "category": "running",
+    "emoji": "🏃"
+  },
+  {
+    "id": "running-lingering-reviewed",
+    "row": {"tracked": true, "state": "RUNNING", "needs_review": true, "unread": false, "pending": false, "reviewed": true, "revision": 3, "acknowledged": 3},
+    "category": "running",
+    "emoji": "🏃"
+  },
+  {
+    "id": "idle-unread-completion",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": true, "unread": true, "pending": true, "reviewed": false, "revision": 3, "acknowledged": 2},
+    "category": "review",
+    "emoji": "👀"
+  },
+  {
+    "id": "idle-reviewed-completion",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": true, "unread": false, "pending": false, "reviewed": true, "revision": 3, "acknowledged": 3},
+    "category": "idle",
+    "emoji": "💤"
+  },
+  {
+    "id": "idle-without-completion-has-newer-revision",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": false, "unread": false, "pending": false, "reviewed": false, "revision": 3, "acknowledged": 0},
+    "category": "idle",
+    "emoji": "💤"
+  },
+  {
+    "id": "idle-snoozed-unread",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": true, "unread": true, "pending": false, "reviewed": false, "revision": 3, "acknowledged": 2, "snoozed_revision": 3, "snoozed_until": 9999999999},
+    "category": "review",
+    "emoji": "👀"
+  },
+  {
+    "id": "idle-settling-unread",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": true, "unread": true, "pending": false, "reviewed": false, "revision": 3, "acknowledged": 2, "updated": 100},
+    "category": "review",
+    "emoji": "👀"
+  },
+  {
+    "id": "idle-explicit-read-overrides-stale-pending",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": true, "unread": false, "pending": true, "reviewed": true, "revision": 3, "acknowledged": 3},
+    "category": "idle",
+    "emoji": "💤"
+  },
+  {
+    "id": "legacy-idle-pending",
+    "row": {"tracked": true, "state": "IDLE", "pending": true},
+    "category": "review",
+    "emoji": "👀"
+  },
+  {
+    "id": "legacy-idle-reviewed",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": true, "pending": false, "reviewed": true},
+    "category": "idle",
+    "emoji": "💤"
+  },
+  {
+    "id": "legacy-completion-without-version",
+    "row": {"tracked": true, "state": "IDLE", "needs_review": true},
+    "category": "review",
+    "emoji": "👀"
+  },
+  {
+    "id": "untracked-wait",
+    "row": {"tracked": false, "state": "WAIT", "needs_review": true, "unread": true, "pending": true, "reviewed": false, "revision": 3, "acknowledged": 2},
+    "category": "shell",
+    "emoji": "💻"
+  },
+  {
+    "id": "shell",
+    "row": {"tracked": true, "state": "SHELL", "needs_review": false, "unread": false, "pending": false, "reviewed": false},
+    "category": "shell",
+    "emoji": "💻"
+  }
+]

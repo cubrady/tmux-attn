@@ -10,11 +10,17 @@ import sys
 import tempfile
 import termios
 import time
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 import attention as a
 ROOT=Path(__file__).resolve().parent.parent
-with tempfile.TemporaryDirectory() as directory:
+with tempfile.TemporaryDirectory() as directory, patch.dict(
+    os.environ,
+    {key: value for key, value in os.environ.items()
+     if not key.startswith('TMUX_ATTN_') and key not in ('TMUX', 'TMUX_PANE')} | {'HOME': directory},
+    clear=True,
+):
     home=Path(directory)
     command=['tmux','-L','attn-click-'+str(os.getpid())]
     def tmux(*args):return subprocess.check_output(command+list(args),text=True).strip()
@@ -71,6 +77,7 @@ with tempfile.TemporaryDirectory() as directory:
         def active():return tmux('display-message','-p','-c',name,'#{pane_id}')
         def click(x,expected):
             os.write(master,f'\x1b[<0;{x};35M\x1b[<0;{x};35m'.encode())
+            drain(.15)
             end=time.monotonic()+3
             while active()!=expected and time.monotonic()<end:drain(.05)
             assert active()==expected,(x,expected,active())
@@ -80,9 +87,9 @@ with tempfile.TemporaryDirectory() as directory:
         click(97,pane_b)
         click(97,pane_a)
         click(97,pane_b)
+        click(118,targets[4])
         click(104,targets[2])
         click(111,targets[3])
-        click(118,targets[4])
         click(97,pane_a)  # independent category cursor survives other categories
         with a.db() as con:
             after=[dict(row) for row in con.execute('SELECT * FROM panes ORDER BY pane')]
@@ -91,21 +98,28 @@ with tempfile.TemporaryDirectory() as directory:
                 if row['pane']==targets[2]:
                     expected['acknowledged']=row['revision']
                 assert row==expected,(old,row)
-            # The viewed completion remains navigable in review, without unread count.
+            # The viewed completion moves into idle, retaining its result identity.
             rows,_=a.items(con,sock,a.live_panes(sock),True)
-            review=a.status_groups(rows)['review']
-            assert len(review)==1 and review[0]['reviewed']
-            assert '👀 0' in a.status_text(a.status_groups(rows))
+            groups=a.status_groups(rows)
+            assert groups['review']==[]
+            assert len(groups['idle'])==2 and any(row['reviewed'] for row in groups['idle'])
+            assert a.status_text(groups)=='🙋 2 · 👀 0 · 🏃 1 · 💤 2'
+        drain(2.2)
+        click(104,pane_a)  # review 0 cannot navigate to the viewed completion
+        click(118,targets[2])  # idle cycles through both normal and viewed idle panes
+        click(118,targets[4])
+        click(118,targets[2])
+        with a.db() as con:
             con.execute("UPDATE panes SET state='IDLE',needs_review=0 WHERE state='WAIT'")
             con.commit()
         drain(2.2)
-        click(97,pane_a)  # zero count leaves current pane unchanged
+        click(97,targets[2])  # wait 0 leaves current pane unchanged
         subprocess.run([sys.executable,str(ROOT/'rollback.py'),result['backup']],env=env,check=True,capture_output=True)
         assert tmux('show-option','-gv','mouse')=='off'
         assert 'original-control' in tmux('list-keys','-T','root')
         assert 'original-double' in tmux('list-keys','-T','root')
         assert 'original-prefix' in tmux('list-keys','-T','prefix')
-        print('PASS: real mouse clicks, four groups, cross-session/pane, wraparound, rapid clicks, exact completion acknowledgement, viewed group, zero count and rollback')
+        print('PASS: real mouse clicks, four groups, cross-session/pane, wraparound, rapid clicks, exact completion acknowledgement, viewed idle navigation, zero review/wait counts and rollback')
     finally:
         client.terminate()
         try:client.wait(timeout=3)

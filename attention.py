@@ -1061,7 +1061,7 @@ def items(con, sock, live, all_states=False, now=None):
         item = dict(row) | meta
         running += row['state'] == 'RUNNING'
         reviewable = row['state'] == 'WAIT' or bool(row['needs_review'])
-        item['unread'] = reviewable and row['revision'] > row['acknowledged']
+        item['unread'] = is_unread(item)
         item['reviewed'] = reviewable and not item['unread']
         pending = item['unread']
         snoozed = row['snoozed_revision'] == row['revision'] and row['snoozed_until'] > now
@@ -1086,27 +1086,48 @@ def acknowledge(con, item, seconds=0):
 
 
 STATUS_GROUPS = [('wait','🙋'),('review','👀'),('running','🏃'),('idle','💤')]
+STATUS_EMOJI = dict(STATUS_GROUPS) | {'shell': '💻'}
+STATUS_ORDER = {key: index for index, (key, _) in enumerate(STATUS_GROUPS)}
+
+
+def is_unread(row):
+    reviewable = row['state'] == 'WAIT' or row.get('needs_review', row.get('unread', row.get('pending', False)))
+    if not reviewable:
+        return False
+    revision = row.get('revision')
+    if isinstance(revision, int) and revision > 0:
+        return revision > (row.get('acknowledged') or 0)
+    return bool(row.get('unread', row.get('pending', not row.get('reviewed', False))))
+
+
+def attention_category(row):
+    """One policy for counts, icons, lists and navigation; viewing keeps history."""
+    if not row.get('tracked', True) or row['state'] == 'SHELL':
+        return 'shell'
+    if row['state'] == 'WAIT':
+        return 'wait'
+    if row['state'] == 'RUNNING':
+        return 'running'
+    return 'review' if is_unread(row) else 'idle'
 
 
 def status_groups(rows):
     groups = {key:[] for key,_ in STATUS_GROUPS}
     for row in rows:
-        category = ('wait' if row['state'] == 'WAIT' else
-                    'running' if row['state'] == 'RUNNING' else
-                    'review' if row.get('needs_review') or row['pending'] else 'idle')
-        groups[category].append(row)
+        category = attention_category(row)
+        if category in groups:
+            groups[category].append(row)
     for group in groups.values():
         # Keep stable navigation for working/waiting panes; review follows recency below.
         group.sort(key=lambda row:(row['session'],int(row['window_id'][1:]),int(row['pane'][1:])))
-    groups['review'].sort(key=lambda row: (not row.get('unread', row['pending']),
-                                          -float(row.get('updated') or 0), row['pane']))
+    groups['review'].sort(key=lambda row: (-float(row.get('updated') or 0), row['pane']))
     return groups
 
 
 def status_text(groups, clickable=False):
     labels = []
     for index,(key,emoji) in enumerate(STATUS_GROUPS):
-        count = sum(row.get('unread', row['pending']) for row in groups[key]) if key == 'review' else len(groups[key])
+        count = len(groups[key])
         label = f'{emoji} {count}'
         if clickable:
             label = f'#[range=control|{index}]'+label+'#[norange]'
@@ -1137,13 +1158,8 @@ def cycle_category(con, sock, client, category):
 
 
 def window_badge(rows):
-    if any(x['state'] == 'WAIT' for x in rows):
-        return '🙋'
-    if any(x['state'] == 'IDLE' and x.get('unread', x['pending']) for x in rows):
-        return '👀'
-    if any(x['state'] == 'RUNNING' for x in rows):
-        return '🏃'
-    return '💤' if rows else ''
+    categories = {attention_category(row) for row in rows}
+    return next((emoji for key, emoji in STATUS_GROUPS if key in categories), '')
 
 
 def window_project_path(rows):
@@ -1318,13 +1334,7 @@ def age(stamp):
 
 
 def agent_emoji(row):
-    if row['state'] == 'WAIT':
-        return '🙋'
-    if row['state'] == 'RUNNING':
-        return '🏃'
-    if row.get('pending'):
-        return '👀'
-    return '💤'
+    return STATUS_EMOJI[attention_category(row)]
 
 
 def agent_severity(row):
@@ -1373,17 +1383,9 @@ def command_cli(command):
 def agent_sort_key(row):
     """Band by attention need; within a band, newest activity first."""
     host = row.get('host') or ''
-    if not row.get('tracked', True):
-        return (4, host, row.get('session', ''), row.get('window_id', ''), row['pane'])
     # Negate updated so the most recently completed / active pane floats up.
     fresh = -float(row.get('updated') or 0)
-    if row['state'] == 'WAIT':
-        return (0, fresh, host, row['pane'])
-    if row.get('needs_review') or row.get('pending'):
-        return (1, not row.get('unread', row.get('pending', False)), fresh, host, row['pane'])
-    if row['state'] == 'RUNNING':
-        return (2, fresh, host, row['pane'])
-    return (3, fresh, host, row['pane'])
+    return (STATUS_ORDER.get(attention_category(row), len(STATUS_GROUPS)), fresh, host, row['pane'])
 
 
 def local_host_name():
@@ -1481,6 +1483,18 @@ def empty_summary():
     return {'wait': 0, 'review': 0, 'review_seen': 0, 'running': 0, 'idle': 0, 'tracked': 0, 'untracked': 0}
 
 
+def attention_summary(rows):
+    summary = empty_summary()
+    for row in rows:
+        category = attention_category(row)
+        if category == 'shell':
+            summary['untracked'] += 1
+        else:
+            summary[category] += 1
+            summary['tracked'] += 1
+    return summary
+
+
 def merge_summaries(parts):
     summary = empty_summary()
     for part in parts:
@@ -1494,8 +1508,11 @@ def tag_host(payload, host):
     for row in payload.get('agents') or []:
         item = dict(row)
         item['host'] = host
+        item['category'] = attention_category(item)
+        item['emoji'] = STATUS_EMOJI[item['category']]
         agents.append(item)
-    return agents, payload.get('summary') or empty_summary()
+    # Reclassify older peers too; their summary may still count viewed results as review.
+    return agents, attention_summary(agents)
 
 
 def _remember_fleet_host(cache_key, now, tagged, summary):
@@ -1656,7 +1673,6 @@ def agents_payload(con, sock=None, live=None, now=None):
             if not live and sock and Path(sock).exists():
                 raise RuntimeError('transient empty live_panes while socket exists')
     rows, _ = items(con, sock, live, True, now=now)
-    groups = status_groups(rows)
     tracked_keys = {(row['pane'], row['pid']) for row in rows}
     paths = [row['path'] for row in rows if row.get('path')]
     paths += [meta['path'] for key, meta in live.items() if key not in tracked_keys and meta.get('path')]
@@ -1683,6 +1699,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'branch': env['branch'],
             'dirty': bool(env['dirty']),
             'state': row['state'],
+            'category': attention_category(row),
             'pending': bool(row['pending']),
             'needs_review': bool(row['needs_review']),
             'unread': bool(row['unread']),
@@ -1719,6 +1736,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'branch': env['branch'],
             'dirty': bool(env['dirty']),
             'state': 'SHELL',
+            'category': 'shell',
             'pending': False,
             'emoji': '💻',
             'severity': '',
@@ -1731,23 +1749,13 @@ def agents_payload(con, sock=None, live=None, now=None):
     agents.sort(key=agent_sort_key)
     return {
         'ok': True,
-        'summary': {
-            'wait': len(groups['wait']),
-            'review': sum(row['unread'] for row in groups['review']),
-            'review_seen': sum(not row['unread'] for row in groups['review']),
-            'running': len(groups['running']),
-            'idle': len(groups['idle']),
-            'tracked': len(rows),
-            'untracked': max(0, len(live) - len(rows)),
-        },
+        'summary': attention_summary(agents),
         'agents': agents,
     }
 
 
 def grouped_rows(rows):
-    return sorted(rows, key=lambda x: (('WAIT', 'IDLE', 'RUNNING').index(x['state']),
-                                      not x.get('needs_review', False) if x['state'] == 'IDLE' else False,
-                                      not x.get('unread', x['pending']), -x['updated'], x['pane']))
+    return sorted(rows, key=agent_sort_key)
 
 
 def display_reason(item, reviewed):
@@ -1774,14 +1782,10 @@ def display_reason(item, reviewed):
 
 def inbox_lines(rows):
     lines = []
-    groups = [
-        ('🙋 等待回覆', [x for x in rows if x['state'] == 'WAIT']),
-        ('👀 待看 · 未看', [x for x in rows if x['state'] == 'IDLE' and x.get('needs_review') and x['unread']]),
-        ('👀 待看 · 已看', [x for x in rows if x['state'] == 'IDLE' and x.get('needs_review') and not x['unread']]),
-        ('💤 閒置', [x for x in rows if x['state'] == 'IDLE' and not x.get('needs_review')]),
-        ('🏃 工作進行中', [x for x in rows if x['state'] == 'RUNNING']),
-    ]
-    for title, group in groups:
+    groups = status_groups(rows)
+    titles = {'wait': '等待回覆', 'review': '待看', 'running': '工作進行中', 'idle': '閒置'}
+    for key, emoji in STATUS_GROUPS:
+        title, group = f'{emoji} {titles[key]}', sorted(groups[key], key=agent_sort_key)
         lines.append((None, f'── {title} ({len(group)}) ──'))
         for item in group:
             identity = (item['pane'], item['pid'])
@@ -1816,10 +1820,9 @@ def sidebar(win, popup=False, client=None):
     message_until = 0
     while True:
         live = live_panes()
-        rows, running = items(con, sock, live, show_all)
+        rows, _ = items(con, sock, live, show_all)
         rows = grouped_rows(rows)
         registered, _ = items(con, sock, live, True)
-        idle = sum(x['state'] == 'IDLE' and not x['needs_review'] for x in registered)
         ids = [(x['pane'], x['pid']) for x in rows]
         if selected not in ids:
             selected = ids[0] if ids else None
@@ -1827,9 +1830,7 @@ def sidebar(win, popup=False, client=None):
         h, w = win.getmaxyx()
         win.erase()
         draw(win, 0, 1, '待處理清單', curses.A_BOLD)
-        waiting = sum(x['state'] == 'WAIT' for x in registered)
-        review = sum(x['unread'] and x['state'] == 'IDLE' for x in registered)
-        draw(win, 1, 1, f'🙋 {waiting} · 👀 {review} · 🏃 {running} · 💤 {idle}', curses.A_BOLD)
+        draw(win, 1, 1, status_text(status_groups(registered)), curses.A_BOLD)
         draw(win, 2, 1, '全部 agent · 👀 表示尚未查看' if show_all else '僅顯示待處理項目')
         lines = inbox_lines(rows)
         slots = max(1, (h//2 if preview else h-4)-4)

@@ -41,7 +41,7 @@ jobs:
       - name: Python tests
         run: python -m unittest discover -v
       - name: Dashboard tests
-        run: node --test tests/web.test.cjs
+        run: node --test tests/*.test.cjs
       - name: tmux interaction tests
         run: |
           python tests/popup_roundtrip.py
