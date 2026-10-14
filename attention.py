@@ -65,7 +65,14 @@ def log_observer_error(exc):
             fcntl.flock(log, fcntl.LOCK_EX)
             log.seek(0, os.SEEK_END)
             size = log.tell()
-            log.seek(max(0, size - 4096))
+            offset = max(0, size - 4096)
+            if offset:
+                log.seek(offset - 1)
+                if log.read(1) != b'\n':
+                    # A partial timestamp/message is not a diagnostic record.
+                    log.readline()
+            else:
+                log.seek(0)
             lines = log.read().decode('utf-8', errors='replace').splitlines()
             now = time.time()
             for line in reversed(lines):

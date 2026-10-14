@@ -78,6 +78,26 @@ class RecoveryTests(unittest.TestCase):
         a.log_observer_error(OSError('missing socket'))
         self.assertEqual(len((self.state / 'observer-errors.log').read_text().splitlines()), 2)
 
+    def test_partial_diagnostic_line_cannot_prevent_logging(self):
+        line = b'bad OSError: missing socket\n'
+        tail = line + b'x' * (4096 - len(line) - 1) + b'\n'
+        original = b'1000 ' + tail
+        path = self.state / 'observer-errors.log'
+        path.write_bytes(original)
+        with patch.object(a.time, 'time', return_value=2000):
+            a.log_observer_error(OSError('missing socket'))
+        self.assertEqual(path.read_bytes(), original + b'2000 OSError: missing socket\n')
+
+    def test_diagnostic_tail_preserves_complete_line_at_exact_boundary(self):
+        line = b'2000 OSError: missing socket\n'
+        tail = line + b'x' * (4096 - len(line) - 1) + b'\n'
+        original = b'1000 older diagnostic\n' + tail
+        path = self.state / 'observer-errors.log'
+        path.write_bytes(original)
+        with patch.object(a.time, 'time', return_value=2000):
+            a.log_observer_error(OSError('missing socket'))
+        self.assertEqual(path.read_bytes(), original)
+
 
 @unittest.skipUnless(shutil.which('tmux') and Path('/proc').exists(), 'requires tmux and Linux process inspection')
 class RecoveryIntegrationTests(unittest.TestCase):
