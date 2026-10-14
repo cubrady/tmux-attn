@@ -126,13 +126,14 @@ test('review cards retain review labels without restoring removed terminal metad
   assert.doesNotMatch(card, /class="project">%1<\/span>/);
   ui.open(current);
   assert.equal(ui.elements.has('sheet-target'), false);
-  assert.equal(ui.elements.get('sheet-title').textContent, '未命名專案');
+  assert.equal(ui.elements.get('sheet-title').textContent, '👀 未命名專案');
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   assert.doesNotMatch(html, /\.host\.tone-7|\.cli\.broken::after|\.sheet-sub \{|function cliBadge/);
 });
 
 function review(project, revision, acknowledged, updated = revision) {
   return { ...agent('work', 'IDLE'), project, pane: `%${project}`, needs_review: true,
+    category: revision > acknowledged ? 'review' : 'idle',
     revision, acknowledged, unread: revision > acknowledged, reviewed: revision <= acknowledged,
     pending: revision > acknowledged, updated, preview: { agent: `result ${revision}` } };
 }
@@ -145,43 +146,44 @@ async function settle() {
   for (let i = 0; i < 12; i++) await Promise.resolve();
 }
 
-test('review groups put unread first and sort newest messages inside each group', () => {
+test('unread results stay in review and viewed results move to idle, newest first', () => {
   const ui = dashboard();
   ui.render({ agents: [review('seen-old', 1, 1, 10), review('unread-old', 2, 0, 20),
     review('seen-new', 3, 3, 40), review('unread-new', 4, 0, 30)] });
   const list = ui.elements.get('list').innerHTML;
-  assert.ok(list.indexOf('data-review="unread"') < list.indexOf('data-review="reviewed"'));
+  assert.ok(list.indexOf('id="group-review"') < list.indexOf('id="group-idle"'));
   const projects = [...list.matchAll(/<span class="project">([^<]+)<\/span>/g)].map(([, value]) => value);
   assert.deepEqual(projects, ['unread-new', 'unread-old', 'seen-new', 'seen-old']);
   assert.match(list, /class="card review unread newest"/);
-  assert.match(list, /class="card review reviewed"/);
+  assert.match(list, /class="card idle"/);
   assert.match(list, /class="review-state unread">未看/);
-  assert.match(ui.elements.get('summary').innerHTML, /👀 4/);
-  assert.match(ui.elements.get('summary').innerHTML, />未看 2<\/span>/);
-  assert.doesNotMatch(ui.elements.get('summary').innerHTML, />已看|>結果|class="secondary"/);
-  assert.match(ui.elements.get('summary').innerHTML, /aria-label="跳到待看，共 4，未看 2，已看 2"/);
-  assert.match(ui.elements.get('summary').innerHTML, /💤 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 2/);
+  assert.match(ui.elements.get('summary').innerHTML, /class="l">待看<\/div>/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, />未看|>已看|>結果|class="secondary"/);
+  assert.match(ui.elements.get('summary').innerHTML, /aria-label="待看 2，跳到待看"/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 2/);
 });
 
-test('review navigation remains enabled with only seen results and legacy pending remains unread', () => {
+test('only viewed results disable review navigation and enable idle; legacy pending stays unread', () => {
   const ui = dashboard();
   ui.render({ agents: [review('seen', 1, 1)] });
   const summary = ui.elements.get('summary').innerHTML;
-  assert.match(summary, /data-group="review" title="跳到待看"/);
-  assert.match(summary, /👀 1/);
-  assert.doesNotMatch(summary, /review-unread/);
-  assert.match(summary, /aria-label="跳到待看，共 1，未看 0，已看 1"/);
+  assert.match(summary, /data-group="review" disabled/);
+  assert.match(summary, /👀 0/);
+  assert.match(summary, /💤 1/);
+  assert.match(summary, /data-group="idle" title="跳到閒置"/);
+  assert.match(summary, /class="l">待看<\/div>/);
   ui.render({ agents: [agent('legacy', 'IDLE', true, true)] });
-  assert.match(ui.elements.get('list').innerHTML, /data-review="unread"/);
+  assert.match(ui.elements.get('list').innerHTML, /class="card review unread newest"/);
   assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
-  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 0/);
   ui.render({ agents: [] });
   assert.match(ui.elements.get('summary').innerHTML, /data-group="review" disabled/);
   assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
-  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
+  assert.match(ui.elements.get('summary').innerHTML, /class="l">待看<\/div>/);
 });
 
-test('review total and unread hint reflect only the selected hosts', () => {
+test('review and idle counts reflect only selected hosts', () => {
   const ui = dashboard();
   ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [
     { ...review('alpha-unread', 2, 0), host: 'alpha' },
@@ -191,19 +193,19 @@ test('review total and unread hint reflect only the selected hosts', () => {
   const click = name => ui.elements.get('hosts').listeners.click({
     target: { closest: () => ({ dataset: { host: name } }) },
   });
-  assert.match(ui.elements.get('summary').innerHTML, /👀 3/);
-  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 2/);
   click('alpha');
-  assert.match(ui.elements.get('summary').innerHTML, /👀 2/);
-  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
   click('alpha');
   click('beta');
-  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
-  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /alpha-unread|alpha-seen/);
   click('');
-  assert.match(ui.elements.get('summary').innerHTML, /👀 3/);
-  assert.match(ui.elements.get('summary').innerHTML, />未看 1<\/span>/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 2/);
 });
 
 test('successful rendered preview acknowledges its exact version and newer fleet content stays unread', async () => {
@@ -226,11 +228,12 @@ test('successful rendered preview acknowledges its exact version and newer fleet
   assert.deepEqual(calls[1].body, { host: 'work', pane: '%task', pid: '123', revision: 2 });
   assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
   assert.match(ui.elements.get('sheet-preview').innerHTML, /displayed version 2/);
+  assert.match(ui.elements.get('sheet-title').textContent, /^💤 task/);
   ui.close();
   assert.match(ui.elements.get('list').innerHTML, /review unread/);
 });
 
-test('successful acknowledgement moves result into seen group, survives stale fleet and does not repeat', async () => {
+test('successful acknowledgement moves result into idle, survives stale fleet and does not repeat', async () => {
   const calls = [];
   const ui = dashboard(async (url, options) => {
     calls.push({ url, body: JSON.parse(options.body) });
@@ -242,20 +245,27 @@ test('successful acknowledgement moves result into seen group, survives stale fl
   ui.render({ agents: [current] });
   ui.open(current);
   await settle();
-  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
-  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
-  assert.match(ui.elements.get('summary').innerHTML, /aria-label="跳到待看，共 1，未看 0，已看 1"/);
-  assert.match(ui.elements.get('list').innerHTML, /review reviewed/);
-  assert.match(ui.elements.get('list').innerHTML, /aria-hidden="true">✓<\/span>/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /data-group="review" disabled/);
+  assert.match(ui.elements.get('list').innerHTML, /class="card idle selected"/);
+  assert.match(ui.elements.get('list').innerHTML, /aria-hidden="true">💤<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="review-state">已看<\/span>/);
   assert.match(ui.elements.get('list').innerHTML, /已完成，已查看（背景工作仍在運行）/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /尚未查看|👀<\/span>/);
   assert.equal(current.reason, '已完成，尚未查看（背景工作仍在運行）');
   assert.equal(current.emoji, '👀');
-  assert.equal(ui.elements.get('sheet-reason').textContent, current.reason);
+  assert.equal(ui.elements.get('sheet-reason').textContent, '已完成，已查看（背景工作仍在運行）');
+  assert.match(ui.elements.get('sheet-title').textContent, /^💤 task/);
   ui.render({ agents: [current] });
   ui.refreshPreview();
   await settle();
   assert.equal(calls.filter(call => call.url === '/api/ack').length, 1);
+  ui.close();
+  ui.open(current);
+  await settle();
+  assert.match(ui.elements.get('sheet-title').textContent, /^💤 task/);
+  assert.equal(ui.elements.get('sheet-reason').textContent, '已完成，已查看（背景工作仍在運行）');
 });
 
 test('failed acknowledgement stays unread and retries only on explicit refresh or reopen', async () => {
@@ -277,8 +287,8 @@ test('failed acknowledgement stays unread and retries only on explicit refresh o
   ui.refreshPreview();
   await settle();
   assert.equal(ackAttempts, 2);
-  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
-  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
 });
 
 test('failed, cached, empty or action-needed previews never acknowledge', async () => {
@@ -343,6 +353,60 @@ test('closed and switched sheets ignore late preview responses without acknowled
     assert.doesNotMatch(ui.elements.get('sheet-preview').innerHTML, /stale first/);
     assert.equal(ui.elements.get('sheet-status').textContent, '');
   }
+});
+
+test('refreshing or reopening the same version waits for its in-flight acknowledgement', async () => {
+  for (const reopen of [false, true]) {
+    for (const ok of [false, true]) {
+      let resolveAck;
+      let ackCalls = 0;
+      const current = { ...review('task', 2, 0), reason: '已完成，尚未查看' };
+      const ui = dashboard(url => {
+        if (url === '/api/ack') {
+          ackCalls += 1;
+          return new Promise(resolve => { resolveAck = resolve; });
+        }
+        return Promise.resolve(response({ ok: true, preview: { agent: 'version 2' }, revision: 2, viewable: true }));
+      });
+      ui.render({ agents: [current] });
+      ui.open(current);
+      await settle();
+      if (reopen) { ui.close(); ui.open(current); }
+      else ui.refreshPreview();
+      await settle();
+      resolveAck(response({ ok, acknowledged: ok ? 2 : 0 }, ok));
+      await settle();
+      assert.equal(ackCalls, 1);
+      assert.equal(ui.elements.get('sheet-title').textContent, `${ok ? '💤' : '👀'} task`);
+      assert.equal(ui.elements.get('sheet-reason').textContent, ok ? '已完成，已查看' : current.reason);
+      assert.match(ui.elements.get('sheet-preview').innerHTML, /version 2/);
+      if (!ok) assert.match(ui.elements.get('sheet-status').textContent, /儲存失敗/);
+    }
+  }
+});
+
+test('late acknowledgement updates its result without changing a different open sheet', async () => {
+  let resolveAck;
+  const first = { ...review('first', 1, 0), reason: 'first reason' };
+  const second = { ...review('second', 2, 0), reason: 'second reason' };
+  const ui = dashboard((url, options) => {
+    const body = JSON.parse(options.body);
+    if (url === '/api/ack') return new Promise(resolve => { resolveAck = resolve; });
+    return Promise.resolve(response({ ok: true, preview: { agent: body.pane },
+      revision: body.pane === first.pane ? 1 : 2, viewable: body.pane === first.pane }));
+  });
+  ui.render({ agents: [first, second] });
+  ui.open(first);
+  await settle();
+  ui.open(second);
+  await settle();
+  resolveAck(response({ ok: true, acknowledged: 1 }));
+  await settle();
+  assert.equal(ui.elements.get('sheet-title').textContent, '👀 second');
+  assert.equal(ui.elements.get('sheet-reason').textContent, 'second reason');
+  assert.match(ui.elements.get('sheet-preview').innerHTML, /%second/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
 });
 
 test('polling keeps open sheet content and metadata stable until explicit refresh', async () => {
@@ -419,8 +483,8 @@ test('preview network failure preserves unread and can retry on reopen', async (
   ui.open(current);
   await settle();
   assert.deepEqual(calls, ['/api/preview', '/api/preview', '/api/ack']);
-  assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
-  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /review-unread/);
+  assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
+  assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
 });
 
 test('transient host failure retains last-known-good sessions until stale TTL expires', () => {

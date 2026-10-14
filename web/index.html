@@ -247,14 +247,6 @@
       letter-spacing: 0.02em;
       color: var(--muted);
     }
-    .stat .review-unread {
-      padding: 1px 4px;
-      border-radius: 999px;
-      font-size: 0.72rem;
-      color: var(--review);
-      background: color-mix(in srgb, var(--review) 10%, var(--card));
-      white-space: nowrap;
-    }
     .hosts {
       display: flex;
       flex-wrap: wrap;
@@ -373,8 +365,6 @@
       background: color-mix(in srgb, var(--review) 16%, transparent);
       opacity: 1;
     }
-    .review-group { display: flex; gap: 8px; margin: 6px 0 0; font-size: 0.72rem; color: var(--muted); }
-    .review-group.unread { color: var(--review); }
     .review-state { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 500; color: var(--muted); }
     .review-state.unread { color: var(--review); font-weight: 600; }
     .review-state.unread::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
@@ -1020,7 +1010,7 @@
   <script>
     const SECTIONS = [
       ['wait', '等待回覆'],
-      ['review', '待查看'],
+      ['review', '待看'],
       ['running', '進行中'],
       ['idle', '閒置'],
       ['shell', '其他 pane'],
@@ -1040,7 +1030,7 @@
     let sheetPreviewRevision = 0;
     let sheetPreviewToken = 0;
     const acknowledgedVersions = new Map();
-    const acknowledgementsInFlight = new Set();
+    const acknowledgementsInFlight = new Map();
     let recognition = null;
     let listening = false;
     let speechBase = '';
@@ -1135,13 +1125,19 @@
       });
     }
     function category(agent) {
-      if (!agent.tracked || agent.state === 'SHELL') return 'shell';
+      if (agent.tracked === false || agent.state === 'SHELL') return 'shell';
+      // The server owns classification; a just-confirmed version moves immediately.
+      if (['wait', 'review', 'running', 'idle'].includes(agent.category)) {
+        return agent.category === 'review' && !isUnread(agent) ? 'idle' : agent.category;
+      }
+      // Compatibility with older peers that do not publish a category yet.
       if (agent.state === 'WAIT') return 'wait';
       if (agent.state === 'RUNNING') return 'running';
-      if (agent.needs_review ?? agent.pending) return 'review';
-      return 'idle';
+      return isUnread(agent) ? 'review' : 'idle';
     }
     function isUnread(agent) {
+      const reviewable = agent.state === 'WAIT' || (agent.needs_review ?? agent.unread ?? agent.pending ?? false);
+      if (!reviewable) return false;
       const acknowledged = Math.max(Number(agent.acknowledged) || 0, acknowledgedVersions.get(agentKey(agent)) || 0);
       if (Number.isInteger(agent.revision) && agent.revision > 0) return agent.revision > acknowledged;
       return agent.unread ?? agent.pending ?? !agent.reviewed;
@@ -1198,15 +1194,20 @@
       return `<div class="path">${escapeHtml(path || (a.repo || ''))}</div>` +
         (bits.length ? `<div class="row">${bits.join('')}</div>` : '');
     }
-    function cardHtml(a, opts = {}) {
+    function attentionDisplay(a) {
       const cat = category(a);
+      const reviewed = cat === 'idle' && (a.needs_review || a.reviewed) && !isUnread(a);
+      const emoji = SECTION_EMOJI[cat];
+      const reason = reviewed ? String(a.reason || '').replace('尚未查看', '已查看') : a.reason;
+      return { cat, reviewed, emoji, reason };
+    }
+    function cardHtml(a, opts = {}) {
+      const { cat, reviewed, emoji, reason } = attentionDisplay(a);
       const errorClass = a.severity === 'error' ? ' error' : '';
       const newestClass = opts.newest ? ' newest' : '';
-      const reviewed = cat === 'review' && !isUnread(a);
-      const emoji = reviewed ? '✓' : a.emoji;
-      const reason = reviewed ? String(a.reason || '').replace('尚未查看', '已查看') : a.reason;
-      const reviewClass = cat === 'review' ? (reviewed ? ' reviewed' : ' unread') : '';
-      const reviewState = cat === 'review' ? `<span class="review-state${isUnread(a) ? ' unread' : ''}">${isUnread(a) ? '未看' : '已看'}</span>` : '';
+      const reviewClass = cat === 'review' ? ' unread' : '';
+      const reviewState = cat === 'review' ? '<span class="review-state unread">未看</span>' :
+        reviewed ? '<span class="review-state">已看</span>' : '';
       const selected = agentKey(a) === selectedKey ? ' selected' : '';
       const selectable = a.tracked ? ' tabindex="0" role="button"' : '';
       return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}" data-key="${escapeHtml(agentKey(a))}"${selectable}>
@@ -1264,13 +1265,21 @@
       return '<div class="preview-line agent"><span class="who">—</span><span class="text">尚無對話預覽</span></div>';
     }
     function fillSheetMeta(agent) {
+      const { emoji, reason } = attentionDisplay(agent);
       document.getElementById('sheet-title').textContent =
-        `${agent.emoji || ''} ${agent.project || agent.window || '未命名專案'}`.trim();
+        `${emoji} ${agent.project || agent.window || '未命名專案'}`.trim();
       const env = document.getElementById('sheet-env');
       const envHtml = sheetEnvHtml(agent);
       env.hidden = !envHtml;
       env.innerHTML = envHtml;
-      document.getElementById('sheet-reason').textContent = agent.reason || '';
+      document.getElementById('sheet-reason').textContent = reason || '';
+    }
+    function confirmSheetMeta(agent, revision, token) {
+      if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== agentKey(agent) || sheetPreviewRevision !== revision) return;
+      // Describe the viewed result, even if the latest fleet already has a newer turn.
+      fillSheetMeta({ ...agent, state: 'IDLE', category: 'review', needs_review: true,
+        revision, acknowledged: revision,
+        reason: agent.state === 'IDLE' ? agent.reason : '已完成，已查看' });
     }
     async function loadSheetPreview(agent) {
       const key = agentKey(agent);
@@ -1330,8 +1339,20 @@
       const key = agentKey(agent);
       const attempt = `${key}|${revision}`;
       const acknowledged = Math.max(Number(agent.acknowledged) || 0, acknowledgedVersions.get(key) || 0);
-      if (revision <= acknowledged || acknowledgementsInFlight.has(attempt)) return;
-      acknowledgementsInFlight.add(attempt);
+      if (revision <= acknowledged) {
+        confirmSheetMeta(agent, revision, token);
+        return;
+      }
+      const existing = acknowledgementsInFlight.get(attempt);
+      if (existing) {
+        if (await existing) confirmSheetMeta(agent, revision, token);
+        else showAcknowledgementFailure(key, token);
+        return;
+      }
+      let finishAttempt;
+      let succeeded = false;
+      const completion = new Promise(resolve => { finishAttempt = resolve; });
+      acknowledgementsInFlight.set(attempt, completion);
       try {
         const res = await fetch('/api/ack', {
           method: 'POST',
@@ -1341,15 +1362,21 @@
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
         acknowledgedVersions.set(key, Math.max(acknowledgedVersions.get(key) || 0, revision));
+        succeeded = true;
+        confirmSheetMeta(agent, revision, token);
         if (latestPayload) render(latestPayload);
       } catch (_) {
-        if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== key) return;
-        const status = document.getElementById('sheet-status');
-        status.className = 'sheet-feedback bad';
-        status.textContent = '已看狀態儲存失敗，請重新整理內容重試。';
+        showAcknowledgementFailure(key, token);
       } finally {
         acknowledgementsInFlight.delete(attempt);
+        finishAttempt(succeeded);
       }
+    }
+    function showAcknowledgementFailure(key, token) {
+      if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== key) return;
+      const status = document.getElementById('sheet-status');
+      status.className = 'sheet-feedback bad';
+      status.textContent = '已看狀態儲存失敗，請重新整理內容重試。';
     }
     function fillSheet(agent, { refreshPreview = true } = {}) {
       fillSheetMeta(agent);
@@ -1403,22 +1430,18 @@
         ['running', '🏃', counts.running || 0, '進行中'],
         ['idle', '💤', counts.idle || 0, '閒置'],
       ].map(([key, e, n, l]) => {
-        const seen = key === 'review' ? counts.reviewed || 0 : 0;
-        const total = n + seen;
-        const disabled = total === 0 ? ' disabled' : '';
+        const disabled = n === 0 ? ' disabled' : '';
         const active = activeGroup === key ? ' active' : '';
-        const title = total === 0 ? '目前沒有此狀態' : `跳到${l}`;
-        const ariaLabel = key === 'review' ? `${title}，共 ${total}，未看 ${n}，已看 ${seen}` : title;
-        const label = key === 'review' ? (n ? `<span class="review-unread">未看 ${n}</span>` : '') : l;
-        return `<button type="button" class="stat${active}" data-group="${key}"${disabled} title="${title}" aria-label="${ariaLabel}"><div class="n">${e} ${total}</div><div class="l">${label}</div></button>`;
+        const title = n === 0 ? '目前沒有此狀態' : `跳到${l}`;
+        const ariaLabel = `${l} ${n}，${title}`;
+        return `<button type="button" class="stat${active}" data-group="${key}"${disabled} title="${title}" aria-label="${ariaLabel}"><div class="n">${e} ${n}</div><div class="l">${l}</div></button>`;
       }).join('');
     }
     function visibleSummaryCounts(agents) {
-      const counts = { wait: 0, review: 0, reviewed: 0, running: 0, idle: 0 };
+      const counts = { wait: 0, review: 0, running: 0, idle: 0 };
       for (const a of agents) {
         const key = category(a);
-        if (key === 'review' && !isUnread(a)) counts.reviewed += 1;
-        else if (key in counts) counts[key] += 1;
+        if (key in counts) counts[key] += 1;
       }
       return counts;
     }
@@ -1523,13 +1546,7 @@
         const rows = grouped[key];
         if (!rows.length) return '';
         const heading = `<div class="section" id="group-${key}" data-group="${key}"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>`;
-        if (key !== 'review') return heading + rows.map(a => cardHtml(a)).join('');
-        return heading + [true, false].map(unread => {
-          const subgroup = rows.filter(a => isUnread(a) === unread);
-          if (!subgroup.length) return '';
-          return `<div class="review-group${unread ? ' unread' : ''}" data-review="${unread ? 'unread' : 'reviewed'}"><span>${unread ? '未看' : '已看'}</span><span>${subgroup.length}</span></div>` +
-            subgroup.map((a, i) => cardHtml(a, { newest: unread && i === 0 })).join('');
-        }).join('');
+        return heading + rows.map((a, i) => cardHtml(a, { newest: key === 'review' && i === 0 })).join('');
       }).join('');
       syncSheetFromData();
     }

@@ -34,9 +34,9 @@ tmux 底列    minday 🏃 · wallet 👀 · lending 🙋
 - **動**：跳到該 pane、標記已看、從手機貼回覆
 - **穩**：web 可用 launchd / systemd 常駐，掛掉會自己起來
 
-「待看」保留 **未看 → 已看** 兩組，各組按最新訊息排序。網頁 header 的 👀 主數字
-合計未看與已看，只在仍有未看時顯示「未看 N」；tmux 主計數仍只計未看。
-已看的結果仍留在待看，新一輪工作會更新該 pane 的狀態。
+tmux 底列、視窗圖示、popup 與網頁使用相同分類：🙋 等待介入、👀 完成未看、
+🏃 進行中、💤 已看／等待新任務。查看結果後移到「閒置」，回覆內容與版本仍保留；
+有新結果時回到「待看」。👀 主計數只計尚未看的結果，web 下方文案為「待看」。
 點 tmux 底部視窗標籤、切換 pane／session，或從底列計數、清單 Enter、
 `tmux-attn next` 跳轉後，會自動標記實際顯示的 pane 結果已看。多 pane 視窗只確認
 選到的那個 pane。Web 開啟卡片並成功顯示可確認版本的內容，也會同步保存。
@@ -127,7 +127,8 @@ Report: install JSON (status_control_clicks), web health, peers, tmux status lin
 | 底列 🙋／👀／🏃／💤 | 點擊循環跳到該狀態 pane |
 | 網頁卡片 | 開 sheet：看完整 Markdown、回覆、語音、關 pane（兩次確認） |
 
-狀態語意：🙋 要你介入 · 👀 做完未讀（含 soft `?`）· 🏃 進行中 · 💤 已看／真閒置。跳過去**不會**自動標已看。
+狀態語意：🙋 要你介入 · 👀 做完未讀（含 soft `?`）· 🏃 進行中 · 💤 已看／等待新任務。
+成功切換到結果所在 pane 或開啟可確認版本的 web 內容，會自動標已看。
 
 ---
 
@@ -161,7 +162,7 @@ Codex 的 hooks 可能由共用 app-server 執行，無法從程序祖先直接�
 
 ```sh
 python3 -m unittest discover -v
-node --test tests/web.test.cjs
+node --test tests/*.test.cjs
 python3 tests/popup_roundtrip.py
 python3 tests/status_click_roundtrip.py
 ```

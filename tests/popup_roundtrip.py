@@ -12,12 +12,18 @@ import sys
 import tempfile
 import termios
 import time
+from unittest.mock import patch
 
 root = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location('attention', root/'attention.py')
 a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
-with tempfile.TemporaryDirectory() as directory:
+with tempfile.TemporaryDirectory() as directory, patch.dict(
+    os.environ,
+    {key: value for key, value in os.environ.items()
+     if not key.startswith('TMUX_ATTN_') and key not in ('TMUX', 'TMUX_PANE')} | {'HOME': directory},
+    clear=True,
+):
     command = ['tmux', '-L', 'attn-popup-'+str(os.getpid())]
     def tmux(*args):
         return subprocess.check_output(command+list(args),text=True).strip()
@@ -50,8 +56,10 @@ with tempfile.TemporaryDirectory() as directory:
             return subprocess.Popen(command+['display-popup','-E','-w','90%','-h','85%','-t',name,launch],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         popup=open_popup()
         screen=drain(1.5)
-        for label in ['等待回覆','待看 · 未看','待看 · 已看','閒置','工作進行中','claude']:
+        for label in ['等待回覆 (1)','待看 (1)','工作進行中 (1)','閒置 (0)','claude']:
             assert label in screen,(label,screen)
+        assert '待看 · 未看' not in screen and '待看 · 已看' not in screen,screen
+        assert '🙋 1 · 👀 1 · 🏃 1 · 💤 0' in screen,screen
         os.write(master,b'd')
         feedback=drain(.5)
         assert '已查看' in feedback,feedback
@@ -64,13 +72,28 @@ with tempfile.TemporaryDirectory() as directory:
         with a.db() as con:
             row=con.execute("SELECT * FROM panes WHERE state='IDLE'").fetchone()
             assert row['acknowledged']==row['revision']
+            items,_=a.items(con,sock,a.live_panes(sock),True)
+            reviewed=next(item for item in items if item['pane']==row['pane'])
+            assert row['needs_review'] and a.attention_category(reviewed)=='idle'
+        os.write(master,b'q')
+        drain(.4)
+        assert popup.wait(timeout=3)==0,popup.communicate()
+        popup=open_popup()
+        screen=drain(1)
+        assert '待看 (0)' in screen and '閒置 (1)' in screen,screen
+        assert '🙋 1 · 👀 0 · 🏃 1 · 💤 1' in screen,screen
+        assert '💤 · 已查看' in screen,screen
+        with a.db() as con:
             a.record(con,sock,row['pane'],row['pid'],'claude','IDLE','Fixture IDLE',True,event_time=time.time()-3,event_key='next-turn')
         feedback=drain(1.2)
-        # Curses emits only the changed emoji of the existing idle label.
+        # The completion moves from idle back to review when a new result arrives.
         assert '👀' in feedback,feedback
         with a.db() as con:
             row=con.execute("SELECT * FROM panes WHERE state='IDLE'").fetchone()
             assert row['revision']>row['acknowledged']
+            items,_=a.items(con,sock,a.live_panes(sock),True)
+            unread=next(item for item in items if item['pane']==row['pane'])
+            assert a.attention_category(unread)=='review'
         os.write(master,b'q')
         drain(.4)
         assert popup.wait(timeout=3)==0,popup.communicate()
@@ -95,10 +118,13 @@ with tempfile.TemporaryDirectory() as directory:
         popup=open_popup()
         screen=drain(1)
         assert '已查看' in screen,screen
+        assert '待看 (0)' in screen and '閒置 (1)' in screen,screen
+        assert '🙋 1 · 👀 0 · 🏃 1 · 💤 1' in screen,screen
+        assert '💤 · 已查看' in screen,screen
         os.write(master,b'q')
         drain(.4)
         assert popup.wait(timeout=3)==0,popup.communicate()
-        print('Popup: unread/viewed review groups; d updates DB; new completion restores unread; Enter confirms completion; reviewed popup reopens; agent panes preserved.')
+        print('PASS: popup has four groups; acknowledgement moves review to idle; new completion restores review; Enter acknowledges completion; reviewed result stays visible; agent panes preserved.')
     finally:
         if popup and popup.poll() is None:
             popup.terminate()

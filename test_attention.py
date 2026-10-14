@@ -96,8 +96,15 @@ class StoreTests(unittest.TestCase):
         self.assertIn('#[range=control|1]👀 1#[norange]',a.status_text(groups,True))
         a.acknowledge(self.con,rows[0])
         rows,_=a.items(self.con,'socket',self.live,True,now=time.time()+3)
-        self.assertEqual(a.status_text(a.status_groups(rows)),'🙋 0 · 👀 0 · 🏃 0 · 💤 0')
-        self.assertEqual(len(a.status_groups(rows)['review']), 1)
+        groups=a.status_groups(rows)
+        self.assertEqual(a.status_text(groups),'🙋 0 · 👀 0 · 🏃 0 · 💤 1')
+        self.assertEqual(groups['review'], [])
+        self.assertEqual(groups['idle'], rows)
+        with patch.object(a,'live_panes',return_value=self.live),patch.object(a,'jump',return_value=True) as jump:
+            a.cycle_category(self.con,'socket','client-a','review')
+            jump.assert_not_called()
+            a.cycle_category(self.con,'socket','client-a','idle')
+            self.assertEqual(jump.call_args.args[0]['pane'],'%1')
 
     def test_verified_identity_replacement_is_new_unread_even_for_same_state(self):
         a.record(self.con,'socket','%1','123','codex','WAIT','Answer needed',event_time=2000000000)
@@ -198,6 +205,8 @@ class StoreTests(unittest.TestCase):
         })
         emojis = [row['emoji'] for row in payload['agents'] if row['tracked']]
         self.assertEqual(emojis, ['🙋', '👀', '🏃', '💤'])
+        self.assertEqual([row['category'] for row in payload['agents'] if row['tracked']],
+                         ['wait', 'review', 'running', 'idle'])
         self.assertEqual([row['project'] for row in payload['agents'] if row['tracked']], ['wallet', 'minday', 'lending', 'idle-box'])
         self.assertEqual([row['cli'] for row in payload['agents'] if row['tracked']], ['claude', 'codex', 'agent', 'pi'])
         self.assertEqual(payload['agents'][0]['pane'], '%1')
@@ -325,8 +334,8 @@ class StoreTests(unittest.TestCase):
         self.assertIn('redirect URI', preview['agent'])
 
     def test_agent_sort_key_newest_pending_first(self):
-        older = {'tracked': True, 'state': 'IDLE', 'pending': True, 'updated': 100, 'host': 'a', 'pane': '%1'}
-        newer = {'tracked': True, 'state': 'IDLE', 'pending': True, 'updated': 200, 'host': 'a', 'pane': '%2'}
+        older = {'tracked': True, 'state': 'IDLE', 'needs_review': True, 'unread': True, 'pending': True, 'updated': 100, 'host': 'a', 'pane': '%1'}
+        newer = {'tracked': True, 'state': 'IDLE', 'needs_review': True, 'unread': True, 'pending': True, 'updated': 200, 'host': 'a', 'pane': '%2'}
         wait = {'tracked': True, 'state': 'WAIT', 'pending': True, 'updated': 50, 'host': 'a', 'pane': '%3'}
         rows = [older, newer, wait]
         rows.sort(key=a.agent_sort_key)

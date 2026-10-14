@@ -58,30 +58,43 @@ class ReviewAcknowledgementTests(unittest.TestCase):
             revision = self.item()['revision']
         return dict(host='home', pane='%1', pid='123', revision=revision) | changes
 
-    def test_reviewed_completion_stays_in_review_group_and_payload(self):
+    def test_reviewed_completion_moves_to_idle_and_preserves_result(self):
         self.record()
+        a.remember_preview(self.con, 'socket', '%1', '123',
+                           user='Please finish', agent='Finished successfully')
+        before = dict(self.con.execute('SELECT * FROM panes').fetchone())
         unread = self.item()
         self.assertTrue(unread['unread'])
         self.assertFalse(unread['reviewed'])
+        self.assertEqual(a.attention_category(unread), 'review')
         a.acknowledge(self.con, unread)
+        after = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual(after, before | {'acknowledged': before['revision']})
         reviewed = self.item()
         self.assertFalse(reviewed['unread'])
         self.assertTrue(reviewed['reviewed'])
+        self.assertTrue(reviewed['needs_review'])
+        self.assertEqual(a.attention_category(reviewed), 'idle')
         groups = a.status_groups([reviewed])
-        self.assertEqual(groups['review'], [reviewed])
-        self.assertEqual(groups['idle'], [])
+        self.assertEqual(groups['review'], [])
+        self.assertEqual(groups['idle'], [reviewed])
+        self.assertEqual(a.status_text(groups), '🙋 0 · 👀 0 · 🏃 0 · 💤 1')
         payload = a.agents_payload(self.con, 'socket', self.live, now=time.time() + 3)
         row = payload['agents'][0]
-        for field in ('needs_review', 'unread', 'reviewed', 'revision', 'acknowledged'):
+        for field in ('category', 'needs_review', 'unread', 'reviewed', 'revision', 'acknowledged'):
             self.assertIn(field, row)
         self.assertTrue(row['reviewed'])
         self.assertFalse(row['unread'])
+        self.assertTrue(row['needs_review'])
+        self.assertEqual(row['category'], 'idle')
+        self.assertEqual(row['emoji'], '💤')
+        self.assertEqual(row['preview'], {'users': ['Please finish'], 'agent': 'Finished successfully'})
         self.assertEqual(row['revision'], row['acknowledged'])
         self.assertEqual(payload['summary']['review'], 0)
-        self.assertEqual(payload['summary']['review_seen'], 1)
-        self.assertEqual(payload['summary']['idle'], 0)
+        self.assertEqual(payload['summary']['review_seen'], 0)
+        self.assertEqual(payload['summary']['idle'], 1)
 
-    def test_unread_review_sorts_before_newer_reviewed_then_latest_within_group(self):
+    def test_wait_review_running_idle_sort_with_newest_idle_first(self):
         rows = [
             dict(pane='%1', state='IDLE', needs_review=True, unread=True, updated=100),
             dict(pane='%2', state='IDLE', needs_review=True, unread=True, updated=200),
@@ -89,9 +102,12 @@ class ReviewAcknowledgementTests(unittest.TestCase):
             dict(pane='%4', state='IDLE', needs_review=True, unread=False, reviewed=True, updated=300),
             dict(pane='%5', state='RUNNING', needs_review=False, updated=500),
             dict(pane='%6', state='IDLE', needs_review=False, updated=600),
+            dict(pane='%7', state='WAIT', needs_review=False, unread=False, reviewed=True, updated=50),
         ]
         self.assertEqual([row['pane'] for row in sorted(rows, key=a.agent_sort_key)],
-                         ['%2', '%1', '%3', '%4', '%5', '%6'])
+                         ['%7', '%2', '%1', '%5', '%6', '%3', '%4'])
+        self.assertEqual([row['pane'] for row in a.grouped_rows(rows)],
+                         ['%7', '%2', '%1', '%5', '%6', '%3', '%4'])
 
     def test_new_completion_returns_to_unread_after_persisted_ack(self):
         old = self.record()
@@ -101,11 +117,20 @@ class ReviewAcknowledgementTests(unittest.TestCase):
         with closing(a.db()) as reopened:
             persisted, _ = a.items(reopened, 'socket', self.live, True, now=time.time() + 3)
         self.assertTrue(persisted[0]['reviewed'])
+        self.assertEqual(a.attention_category(persisted[0]), 'idle')
         self.record('New result')
         current = self.item()
         self.assertTrue(current['unread'])
         self.assertFalse(current['reviewed'])
         self.assertEqual(current['acknowledged'], old['revision'])
+        self.assertEqual(a.attention_category(current), 'review')
+        self.assertEqual(a.status_groups([current])['review'], [current])
+        payload = a.agents_payload(self.con, 'socket', self.live, now=time.time() + 3)
+        self.assertEqual(payload['summary']['review'], 1)
+        self.assertEqual(payload['summary']['review_seen'], 0)
+        self.assertEqual(payload['summary']['idle'], 0)
+        self.assertEqual(payload['agents'][0]['category'], 'review')
+        self.assertEqual(payload['agents'][0]['emoji'], '👀')
 
     def test_old_web_ack_leaves_new_completion_unread(self):
         old = self.record()
@@ -223,6 +248,7 @@ class ReviewAcknowledgementTests(unittest.TestCase):
         self.assertTrue(body['ok'])
         item = self.item()
         self.assertTrue(item['reviewed'])
+        self.assertEqual(a.attention_category(item), 'wait')
         self.assertEqual(a.status_groups([item])['wait'], [item])
 
     def test_peer_ack_forwards_exact_version_and_cannot_mark_local_pane(self):
@@ -266,8 +292,11 @@ class ReviewAcknowledgementTests(unittest.TestCase):
                 feed = json.loads(response.read())
             self.assertTrue(feed['agents'][0]['reviewed'])
             self.assertFalse(feed['agents'][0]['unread'])
+            self.assertEqual(feed['agents'][0]['category'], 'idle')
+            self.assertEqual(feed['agents'][0]['emoji'], '💤')
             self.assertEqual(feed['summary']['review'], 0)
-            self.assertEqual(feed['summary']['review_seen'], 1)
+            self.assertEqual(feed['summary']['review_seen'], 0)
+            self.assertEqual(feed['summary']['idle'], 1)
         finally:
             server.shutdown()
             server.server_close()
@@ -453,12 +482,16 @@ class ReviewAcknowledgementTests(unittest.TestCase):
         self.assertFalse(body['viewable'])
         self.assertTrue(self.item()['unread'])
 
-    def test_reviewed_inbox_lines_render_read_group_and_label(self):
+    def test_reviewed_inbox_lines_render_four_groups_with_idle_label(self):
         self.record()
         a.acknowledge(self.con, self.item())
         lines = a.inbox_lines([self.item()])
-        self.assertTrue(any(identity is None and '待看 · 已看 (1)' in text for identity, text in lines))
-        self.assertTrue(any(identity == ('%1', '123') and '已查看' in text for identity, text in lines))
+        self.assertEqual([text for identity, text in lines if identity is None], [
+            '── 🙋 等待回覆 (0) ──', '── 👀 待看 (0) ──',
+            '── 🏃 工作進行中 (0) ──', '── 💤 閒置 (1) ──',
+        ])
+        self.assertTrue(any(identity == ('%1', '123') and '💤 · 已查看' in text for identity, text in lines))
+        self.assertTrue(any(identity == ('%1', '123') and '已完成，已查看' in text for identity, text in lines))
 
     def test_pending_items_choose_newest_completion_first(self):
         self.live[('%2', '456')] = dict(pane='%2', pid='456', session='work', window='two',
