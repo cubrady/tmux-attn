@@ -372,9 +372,15 @@ class StoreTests(unittest.TestCase):
 
 
     def test_dispatch_preview_requires_live_tracked_pane(self):
-        code, body = a.dispatch_preview({'pane': '%1', 'pid': '123'})
-        self.assertEqual(code, 409)
-        self.assertFalse(body['ok'])
+        with patch.object(a, 'resolve_socket', return_value='socket'), \
+             patch.object(a, 'live_panes') as live_mock:
+            for live, error in [({}, 'pane is not live'), (self.live, 'pane is not tracked')]:
+                with self.subTest(error=error):
+                    live_mock.return_value = live
+                    code, body = a.dispatch_preview({'pane': '%1', 'pid': '123'})
+                    self.assertEqual(code, 409)
+                    self.assertFalse(body['ok'])
+                    self.assertEqual(body['error'], error)
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
              patch.object(a, 'urlopen') as urlopen_mock:
