@@ -123,6 +123,16 @@ sh install_web_service.sh --status
 curl -s http://127.0.0.1:7788/api/health
 ```
 
+若 Codex 視窗只有專案名、沒有狀態 emoji，先跑 `tmux-attn status`，再用
+`tmux-attn dump` 確認 pane 是否已登記。status 刷新會自動恢復停止的 observer，
+通常幾秒內就能重新建立對應；不需要重開 agent。observer 使用每個 tmux socket
+各自的鎖，避免重複啟動及跨 server 讀錯 pane。
+
+Codex 的 hooks 可能由共用 app-server 執行，無法從程序祖先直接找到 tmux pane；
+這時需要 observer 驗證 CLI 與 session 的對應，再讓 hooks 更新正確的 pane。
+若仍未恢復，檢查 `~/.local/state/tmux-attn/hook-errors.log` 與
+`~/.local/state/tmux-attn/observer-errors.log`，並確認已重新載入 hooks。
+
 | 路徑 | 用途 |
 | --- | --- |
 | `~/.local/bin/tmux-attn` | CLI |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import curses
+import fcntl
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
@@ -51,58 +52,144 @@ def resolve_socket():
     return socket()
 
 
+def observer_lock_path(sock):
+    return STATE / ('codex-observer-' + hashlib.sha256(sock.encode()).hexdigest()[:12] + '.lock')
+
+
+def log_observer_error(exc):
+    """Persist diagnostics without repeating the same failure on each status tick."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        message = f'{type(exc).__name__}: {exc}'.replace('\n', ' ')
+        with (STATE / 'observer-errors.log').open('a+b') as log:
+            fcntl.flock(log, fcntl.LOCK_EX)
+            log.seek(0, os.SEEK_END)
+            size = log.tell()
+            offset = max(0, size - 4096)
+            if offset:
+                log.seek(offset - 1)
+                if log.read(1) != b'\n':
+                    # A partial timestamp/message is not a diagnostic record.
+                    log.readline()
+            else:
+                log.seek(0)
+            lines = log.read().decode('utf-8', errors='replace').splitlines()
+            now = time.time()
+            for line in reversed(lines):
+                stamp, _, previous = line.partition(' ')
+                if previous == message and now - float(stamp) < 60:
+                    return
+            log.write(f'{now:.0f} {message}\n'.encode('utf-8'))
+    except (OSError, ValueError):
+        pass
+
+
+def ensure_observer(sock):
+    """Probe the kernel lock; PID text is diagnostic and may be stale."""
+    try:
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with observer_lock_path(sock).open('a') as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+        # The observer acquires the same lock itself, so concurrent status calls
+        # can launch contenders but only one child can become the observer.
+        env = os.environ.copy()
+        env.pop('TMUX', None)
+        env['TMUX_ATTN_SOCKET'] = sock
+        env['TMUX_ATTN_STATE_DIR'] = str(STATE)
+        subprocess.Popen(
+            [sys.executable, str(ROOT / 'attention.py'), 'observe'], env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+        )
+    except Exception as exc:
+        log_observer_error(exc)
+
+
+def enable_wal(con, timeout=3):
+    """Retry WAL activation contention within one total busy-wait budget."""
+    deadline = time.monotonic() + timeout
+    changed_timeout = False
+    try:
+        while True:
+            try:
+                con.execute('PRAGMA journal_mode=WAL')
+                return
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, 'sqlite_errorcode', 0) & 0xff
+                remaining = deadline - time.monotonic()
+                if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or remaining <= 0:
+                    raise
+                # SQLite may skip its busy handler during a journal transition.
+                time.sleep(min(0.025, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                con.execute(f'PRAGMA busy_timeout={int(remaining * 1000)}')
+                changed_timeout = True
+    finally:
+        if changed_timeout:
+            con.execute('PRAGMA busy_timeout=3000')
+
+
 def db():
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     con = sqlite3.connect(STATE / 'inbox.sqlite3', timeout=3)
-    con.row_factory = sqlite3.Row
-    con.execute('PRAGMA journal_mode=WAL')
-    con.execute('''CREATE TABLE IF NOT EXISTS panes (
-        socket TEXT, pane TEXT, pid TEXT, agent TEXT, state TEXT, reason TEXT,
-        updated REAL, revision INTEGER, acknowledged INTEGER DEFAULT 0,
-        snoozed_revision INTEGER DEFAULT 0, snoozed_until REAL DEFAULT 0, needs_review INTEGER DEFAULT 0,
-        PRIMARY KEY(socket,pane,pid))''')
-    if 'needs_review' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
-        try:
-            con.execute('ALTER TABLE panes ADD COLUMN needs_review INTEGER DEFAULT 0')
-        except sqlite3.OperationalError as exc:
-            if 'duplicate column' not in str(exc):
-                raise
-    if 'event_key' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
-        try:
-            con.execute("ALTER TABLE panes ADD COLUMN event_key TEXT DEFAULT ''")
-        except sqlite3.OperationalError as exc:
-            if 'duplicate column' not in str(exc): raise
-    if 'last_event_time' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
-        try:
-            con.execute('ALTER TABLE panes ADD COLUMN last_event_time REAL DEFAULT 0')
-        except sqlite3.OperationalError as exc:
-            if 'duplicate column' not in str(exc): raise
-    if 'source' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
-        try:
-            con.execute("ALTER TABLE panes ADD COLUMN source TEXT DEFAULT 'hook'")
-        except sqlite3.OperationalError as exc:
-            if 'duplicate column' not in str(exc):
-                raise
-    for column, decl in [
-        ('transcript_path', "TEXT DEFAULT ''"),
-        ('preview_agent', "TEXT DEFAULT ''"),
-        ('preview_users', "TEXT DEFAULT '[]'"),
-        ('preview_mtime', 'REAL DEFAULT 0'),
-    ]:
-        if column not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
+    try:
+        con.row_factory = sqlite3.Row
+        enable_wal(con)
+        con.execute('''CREATE TABLE IF NOT EXISTS panes (
+            socket TEXT, pane TEXT, pid TEXT, agent TEXT, state TEXT, reason TEXT,
+            updated REAL, revision INTEGER, acknowledged INTEGER DEFAULT 0,
+            snoozed_revision INTEGER DEFAULT 0, snoozed_until REAL DEFAULT 0, needs_review INTEGER DEFAULT 0,
+            PRIMARY KEY(socket,pane,pid))''')
+        if 'needs_review' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
             try:
-                con.execute(f'ALTER TABLE panes ADD COLUMN {column} {decl}')
+                con.execute('ALTER TABLE panes ADD COLUMN needs_review INTEGER DEFAULT 0')
             except sqlite3.OperationalError as exc:
                 if 'duplicate column' not in str(exc):
                     raise
-    con.execute('''CREATE TABLE IF NOT EXISTS codex_sessions (
-        socket TEXT, pane TEXT, pid TEXT, cli_pid INTEGER DEFAULT 0,
-        thread_id TEXT, rollout_path TEXT, origin TEXT,
-        PRIMARY KEY(socket,pane,pid))''')
-    con.execute('''CREATE TABLE IF NOT EXISTS cycle_cursors (
-        socket TEXT, client TEXT, category TEXT, pane TEXT, pid TEXT,
-        PRIMARY KEY(socket,client,category))''')
-    return con
+        if 'event_key' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
+            try:
+                con.execute("ALTER TABLE panes ADD COLUMN event_key TEXT DEFAULT ''")
+            except sqlite3.OperationalError as exc:
+                if 'duplicate column' not in str(exc): raise
+        if 'last_event_time' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
+            try:
+                con.execute('ALTER TABLE panes ADD COLUMN last_event_time REAL DEFAULT 0')
+            except sqlite3.OperationalError as exc:
+                if 'duplicate column' not in str(exc): raise
+        if 'source' not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
+            try:
+                con.execute("ALTER TABLE panes ADD COLUMN source TEXT DEFAULT 'hook'")
+            except sqlite3.OperationalError as exc:
+                if 'duplicate column' not in str(exc):
+                    raise
+        for column, decl in [
+            ('transcript_path', "TEXT DEFAULT ''"),
+            ('preview_agent', "TEXT DEFAULT ''"),
+            ('preview_users', "TEXT DEFAULT '[]'"),
+            ('preview_mtime', 'REAL DEFAULT 0'),
+        ]:
+            if column not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
+                try:
+                    con.execute(f'ALTER TABLE panes ADD COLUMN {column} {decl}')
+                except sqlite3.OperationalError as exc:
+                    if 'duplicate column' not in str(exc):
+                        raise
+        con.execute('''CREATE TABLE IF NOT EXISTS codex_sessions (
+            socket TEXT, pane TEXT, pid TEXT, cli_pid INTEGER DEFAULT 0,
+            thread_id TEXT, rollout_path TEXT, origin TEXT,
+            PRIMARY KEY(socket,pane,pid))''')
+        con.execute('''CREATE TABLE IF NOT EXISTS cycle_cursors (
+            socket TEXT, client TEXT, category TEXT, pane TEXT, pid TEXT,
+            PRIMARY KEY(socket,client,category))''')
+        return con
+    except Exception:
+        con.close()
+        raise
 
 
 def clean(value, limit=240):
@@ -892,8 +979,8 @@ def project_labels(paths, aliases):
     return labels
 
 
-def update_window_badges(rows, live=None):
-    live = live_panes() if live is None else live
+def update_window_badges(rows, live=None, sock=None):
+    live = live_panes(sock=sock) if live is None else live
     groups = {}
     for row in rows:
         groups.setdefault(row['window_id'], []).append(row)
@@ -904,7 +991,7 @@ def update_window_badges(rows, live=None):
         paths.setdefault(meta['window_id'], meta['path'])
     labels = project_labels([path for path in paths.values() if path], load_project_aliases())
     commands = []
-    for line in tmux('list-windows', '-a', '-F', '#{window_id}\t#{@tmux_attn_badge}\t#{@tmux_attn_project}', check=False).splitlines():
+    for line in tmux('list-windows', '-a', '-F', '#{window_id}\t#{@tmux_attn_badge}\t#{@tmux_attn_project}', check=False, sock=sock).splitlines():
         window, current, project = (line.split('\t') + ['', ''])[:3]
         group = groups.get(window, [])
         for key, previous, desired in [('@tmux_attn_badge', current, window_badge(group)), ('@tmux_attn_project', project, labels.get(paths.get(window), ''))]:
@@ -914,7 +1001,7 @@ def update_window_badges(rows, live=None):
                 commands.extend(['set-option', '-w', '-t', window, key, desired])
     if commands:
         # One server command for changed windows; no process per window per refresh.
-        tmux(*commands, check=False)
+        tmux(*commands, check=False, sock=sock)
 
 
 def jump(item, client=None):
@@ -1784,7 +1871,11 @@ def main():
                 cycle_category(con,socket(),args.args[1],args.args[0])
     elif args.command == 'observe':
         from codex_observer import observe
-        observe()
+        try:
+            observe()
+        except Exception as exc:
+            log_observer_error(exc)
+            raise
     elif args.command == 'prune':
         prune_sidebars()
     elif args.command == 'web':
@@ -1810,12 +1901,15 @@ def main():
             if line.endswith('\t1'):
                 tmux('select-pane','-t',line.split('\t')[0])
     else:
+        sock = resolve_socket()
+        if args.command in ('status', 'status-clickable'):
+            ensure_observer(sock)
         with closing(db()) as con:
-            live = live_panes()
-            rows, running = items(con, socket(), live, args.command == 'dump')
+            live = live_panes(sock=sock)
+            rows, running = items(con, sock, live, args.command == 'dump')
             if args.command in ('status','status-clickable'):
-                registered, _ = items(con, socket(), live, True)
-                update_window_badges(registered, live)
+                registered, _ = items(con, sock, live, True)
+                update_window_badges(registered, live, sock=sock)
                 print(status_text(status_groups(registered),args.command == 'status-clickable'))
             elif args.command == 'dump':
                 print(json.dumps(rows, ensure_ascii=False, indent=2))
