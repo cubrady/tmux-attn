@@ -1035,6 +1035,61 @@
     let recognition = null;
     let listening = false;
     let speechBase = '';
+    let micPermissionGranted = false;
+    let micRequestInFlight = false;
+    let micPromptAttempted = false;
+    const STALE_HOST_TTL_MS = 35000;
+    const lastGoodByHost = new Map();
+
+    function isMicSecureContext() {
+      if (typeof window !== 'undefined' && window.isSecureContext === false) return false;
+      const loc = (typeof window !== 'undefined' && window.location) || (typeof location !== 'undefined' ? location : null);
+      if (loc && loc.protocol === 'http:') {
+        const host = String(loc.hostname || '').toLowerCase();
+        if (host && host !== 'localhost' && host !== '127.0.0.1' && host !== '::1' && host !== '[::1]' && !host.endsWith('.localhost')) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function micBlockedMessage() {
+      if (!isMicSecureContext()) {
+        return '瀏覽器限制：非本機 HTTP 無法要求麥克風權限，請改用 HTTPS（如 tailscale serve）、localhost 或系統聽寫';
+      }
+      return '麥克風權限已被瀏覽器封鎖，請點網址列左側圖示允許麥克風後重試';
+    }
+
+    function getNavigator() {
+      if (typeof window !== 'undefined' && window.navigator) return window.navigator;
+      if (typeof navigator !== 'undefined' && navigator) return navigator;
+      return null;
+    }
+
+    async function requestMicPermission() {
+      if (!isMicSecureContext()) {
+        const err = new Error(micBlockedMessage());
+        err.code = 'insecure-context';
+        throw err;
+      }
+      if (micPermissionGranted) return true;
+      const nav = getNavigator();
+      if (nav && nav.mediaDevices && typeof nav.mediaDevices.getUserMedia === 'function') {
+        micPromptAttempted = true;
+        const status = document.getElementById('sheet-status');
+        status.className = 'sheet-feedback';
+        status.textContent = '正在要求麥克風權限…';
+        const stream = await nav.mediaDevices.getUserMedia({ audio: true });
+        if (stream && typeof stream.getTracks === 'function') {
+          stream.getTracks().forEach(track => {
+            try { track.stop(); } catch (_) {}
+          });
+        }
+        micPermissionGranted = true;
+        if (status.textContent === '正在要求麥克風權限…') status.textContent = '';
+      }
+      return true;
+    }
 
     function agentKey(a) {
       return [a.host || '', a.pane || '', a.pid || ''].join('|');
@@ -1360,9 +1415,36 @@
     function render(data) {
       latestPayload = data;
       const s = data.summary || {};
-      const hosts = data.hosts || [];
+      const hosts = (data.hosts || []).map(h => ({ ...h }));
       latestHosts = hosts;
-      latestAgents = data.agents || [];
+      const now = (typeof performance !== 'undefined' && typeof performance.now === 'function') ? performance.now() : Date.now();
+      const incomingAgents = data.agents || [];
+      const byHost = new Map();
+      for (const a of incomingAgents) {
+        const hName = agentHostName(a);
+        if (!byHost.has(hName)) byHost.set(hName, []);
+        byHost.get(hName).push(a);
+      }
+      const mergedAgents = [...incomingAgents];
+      for (const row of hosts) {
+        const hostAgents = byHost.get(row.name) || [];
+        if (row.ok) {
+          lastGoodByHost.set(row.name, { ts: now, agents: hostAgents });
+        } else if (hostAgents.length > 0) {
+          row.stale = true;
+          const prev = lastGoodByHost.get(row.name);
+          const staleAgeMs = (Number(row.stale_age) || 0) * 1000;
+          const originTs = prev ? prev.ts : (now - staleAgeMs);
+          lastGoodByHost.set(row.name, { ts: originTs, agents: hostAgents });
+        } else {
+          const cached = lastGoodByHost.get(row.name);
+          if (cached && cached.agents.length > 0 && now - cached.ts >= 0 && now - cached.ts <= STALE_HOST_TTL_MS) {
+            mergedAgents.push(...cached.agents);
+            row.stale = true;
+          }
+        }
+      }
+      latestAgents = mergedAgents;
       const known = new Set(hosts.map(h => h.name));
       for (const name of [...hostFilters]) {
         if (!known.has(name)) hostFilters.delete(name);
@@ -1389,10 +1471,11 @@
         const tone = hostTone(row.name);
         const active = hostFilters.has(row.name);
         const dim = filtered && !active;
-        const offline = row.ok ? '' : ' bad';
+        const offline = row.ok ? '' : (row.stale ? ' bad stale' : ' bad');
         const n = sessionCounts[row.name] || 0;
         const empty = (row.ok && n === 0) ? ' empty' : '';
-        const label = escapeHtml(row.name) + (row.ok ? '' : ' offline') + `<span class="count">(${n})</span>`;
+        const stateSuffix = row.ok ? '' : (row.stale ? ' stale' : ' offline');
+        const label = escapeHtml(row.name) + stateSuffix + `<span class="count">(${n})</span>`;
         hostButtons.push(
           `<button type="button" class="host-pill tone-${tone}${offline}${empty}${active ? ' active' : ''}${dim ? ' dim' : ''}" data-host="${escapeHtml(row.name)}" title="${escapeHtml(row.error || row.url || row.source || '')}" aria-pressed="${active ? 'true' : 'false'}">${label}</button>`
         );
@@ -1457,7 +1540,8 @@
     function setupSpeech() {
       if (!SpeechAPI) return;
       recognition = new SpeechAPI();
-      recognition.lang = (navigator.language || 'zh-TW').startsWith('zh') ? 'zh-TW' : (navigator.language || 'en-US');
+      const nav = getNavigator();
+      recognition.lang = ((nav && nav.language) || 'zh-TW').startsWith('zh') ? 'zh-TW' : ((nav && nav.language) || 'en-US');
       recognition.interimResults = true;
       recognition.continuous = false;
       recognition.onstart = () => {
@@ -1471,13 +1555,32 @@
         document.getElementById('sheet-mic').classList.remove('listening');
         document.getElementById('voice-hint').hidden = true;
       };
-      recognition.onerror = (event) => {
+      recognition.onerror = async (event) => {
         listening = false;
         document.getElementById('sheet-mic').classList.remove('listening');
         const status = document.getElementById('sheet-status');
-        status.className = 'sheet-feedback bad';
-        status.textContent = event.error === 'not-allowed' ? '需要麥克風權限' : ('語音錯誤: ' + event.error);
         document.getElementById('voice-hint').hidden = true;
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          micPermissionGranted = false;
+          const nav = getNavigator();
+          if (isMicSecureContext() && !micPromptAttempted && nav && nav.mediaDevices && typeof nav.mediaDevices.getUserMedia === 'function') {
+            const wasOpen = sheetOpen;
+            const targetKey = selectedKey;
+            try {
+              await requestMicPermission();
+              if ((wasOpen && !sheetOpen) || (targetKey && selectedKey !== targetKey)) return;
+              recognition.start();
+              return;
+            } catch (_) {
+              // Fall through to actionable blocked message.
+            }
+          }
+          status.className = 'sheet-feedback bad';
+          status.textContent = micBlockedMessage();
+          return;
+        }
+        status.className = 'sheet-feedback bad';
+        status.textContent = '語音錯誤: ' + event.error;
       };
       recognition.onresult = (event) => {
         let interim = '';
@@ -1530,19 +1633,38 @@
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape' && sheetOpen) closeSheet();
     });
-    document.getElementById('sheet-mic').addEventListener('click', () => {
-      if (!recognition) return;
+    document.getElementById('sheet-mic').addEventListener('click', async () => {
+      if (!recognition || micRequestInFlight) return;
       if (listening) {
         stopListening();
         return;
       }
-      speechBase = document.getElementById('sheet-text').value;
-      if (speechBase && !speechBase.endsWith(' ')) speechBase += ' ';
+      const status = document.getElementById('sheet-status');
+      if (!isMicSecureContext()) {
+        status.className = 'sheet-feedback bad';
+        status.textContent = micBlockedMessage();
+        return;
+      }
+      micRequestInFlight = true;
+      const wasOpen = sheetOpen;
+      const targetKey = selectedKey;
       try {
+        await requestMicPermission();
+        if ((wasOpen && !sheetOpen) || (targetKey && selectedKey !== targetKey)) return;
+        speechBase = document.getElementById('sheet-text').value;
+        if (speechBase && !speechBase.endsWith(' ')) speechBase += ' ';
         recognition.start();
       } catch (e) {
-        document.getElementById('sheet-status').className = 'sheet-feedback bad';
-        document.getElementById('sheet-status').textContent = e.message || '無法開始語音';
+        status.className = 'sheet-feedback bad';
+        if (e && (e.code === 'insecure-context' || e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError')) {
+          status.textContent = micBlockedMessage();
+        } else if (e && (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError')) {
+          status.textContent = '找不到可用的麥克風裝置';
+        } else {
+          status.textContent = (e && e.message) || '無法開始語音';
+        }
+      } finally {
+        micRequestInFlight = false;
       }
     });
     document.getElementById('sheet-form').addEventListener('submit', async (event) => {
