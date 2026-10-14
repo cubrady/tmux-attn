@@ -9,6 +9,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+from attention import VIEW_HOOKS, VIEW_HOOK_INDEX, view_hooks_config
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--sidebar',action='store_true',help='Use the previous persistent sidebar instead of popup')
@@ -72,6 +73,10 @@ for key in ['window-status-format', 'window-status-current-format']:
 for name in ['after-new-window','session-created','client-attached','pane-exited','after-kill-pane']:
     if name+'[90]' in tmux('show-hooks','-g') and 'tmux-attn' not in tmux('show-hooks','-g',name+'[90]'):
         raise SystemExit('Hook index 90 already used: '+name)
+for name in VIEW_HOOKS:
+    key = f'{name}[{VIEW_HOOK_INDEX}]'
+    if key in tmux('show-hooks', '-g') and 'tmux-attn' not in tmux('show-hooks', '-g', key):
+        raise SystemExit('Hook index 91 already used: ' + name)
 
 BACKUP.mkdir(parents=True)
 DEST.mkdir(parents=True, exist_ok=True)
@@ -106,6 +111,11 @@ for name in ['after-new-window','session-created','client-attached','pane-exited
     result = subprocess.run(['tmux','show-hooks','-g',name+'[90]'],capture_output=True,text=True)
     line = result.stdout.strip()
     prior_hooks[name] = line.split(' ',1)[1] if ' ' in line else None
+for name in VIEW_HOOKS:
+    key = f'{name}[{VIEW_HOOK_INDEX}]'
+    result = subprocess.run(['tmux','show-hooks','-g',key],capture_output=True,text=True)
+    line = result.stdout.strip()
+    prior_hooks[key] = line.split(' ',1)[1] if ' ' in line else None
 (BACKUP/'runtime-hooks.json').write_text(json.dumps(prior_hooks,indent=2))
 prefix_bindings = {}
 for line in tmux('list-keys','-T','prefix').splitlines():
@@ -218,6 +228,7 @@ set -g status-right '#({launch} status-clickable) | %H:%M'
 bind-key N run-shell -b "{launch} next '#{{client_name}}'"
 run-shell -b '{launch} observe'
 '''
+base += '# Begin automatic viewing hooks\n' + view_hooks_config(launch) + '# End automatic viewing hooks\n'
 if control_clicks:
     for index, category in enumerate(['wait', 'review', 'running', 'idle']):
         for event in ['MouseDown1', 'SecondClick1', 'TripleClick1']:

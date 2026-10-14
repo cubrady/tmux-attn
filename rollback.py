@@ -41,6 +41,8 @@ manifest = json.loads((backup/'manifest.json').read_text())
 prior_app = next((e for e in manifest if e['path'].endswith('/share/tmux-attn/attention.py')), None)
 for name in ['after-new-window','session-created','client-attached','pane-exited','after-kill-pane']:
     subprocess.run(['tmux','set-hook','-gu',name+'[90]'],check=False)
+for name in ['after-select-window','after-select-pane','client-session-changed']:
+    subprocess.run(['tmux','set-hook','-gu',name+'[91]'],check=False)
 for key in ['a','N']:
     subprocess.run(['tmux','unbind-key',key],check=False)
     path = backup/f'key-{key}.conf'
@@ -62,7 +64,8 @@ hook_file = backup/'runtime-hooks.json'
 if hook_file.exists():
     for name,command in json.loads(hook_file.read_text()).items():
         if command:
-            subprocess.run(['tmux','set-hook','-g',name+'[90]',command],check=True)
+            key = name if '[' in name else name+'[90]'
+            subprocess.run(['tmux','set-hook','-g',key,command],check=True)
 if prior_app and prior_app['backup']:
     config = Path.home()/'.config/tmux-attn/sidebar.conf'
     if config.exists() and ' ensure' in config.read_text():

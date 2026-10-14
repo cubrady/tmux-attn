@@ -46,3 +46,4 @@ jobs:
         run: |
           python tests/popup_roundtrip.py
           python tests/status_click_roundtrip.py
+          python tests/window_click_roundtrip.py

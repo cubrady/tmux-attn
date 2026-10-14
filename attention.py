@@ -25,6 +25,9 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 STATE = Path(os.environ.get('TMUX_ATTN_STATE_DIR', Path.home() / '.local/state/tmux-attn'))
+VIEW_HOOKS = ('after-select-window', 'after-select-pane', 'client-session-changed')
+VIEW_HOOK_INDEX = 91
+VIEW_REVISION_OPTION = '@tmux_attn_view_revision'
 
 
 def tmux(*args, check=True, sock=None):
@@ -521,6 +524,92 @@ def resolve_transcript_path(con, row, meta):
     return path if path and Path(path).is_file() else ''
 
 
+def completed_transcript_matches_revision(path, row, displayed_agent):
+    """Recognize an already cached final turn from its completion marker.
+
+    Callers must separately verify transcript ownership. Text or file changes
+    are unnecessary when the root turn marker identifies the stored completion.
+    """
+    from datetime import datetime
+
+    agent = row.get('agent')
+    if agent not in ('codex', 'claude') or not displayed_agent.strip():
+        return False
+    reason = str(row.get('reason') or '').lower()
+    if any(outcome in reason for outcome in ('interrupted', 'error', 'exited')):
+        return False
+    if agent == 'codex' and not row.get('event_key'):
+        return False
+    final_text, final_time, matched = '', None, False
+
+    def timestamp(entry):
+        try:
+            value = datetime.fromisoformat(entry['timestamp'].replace('Z', '+00:00'))
+            return value.timestamp() if value.tzinfo is not None else None
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return None
+
+    try:
+        with Path(path).open(errors='replace') as source:
+            for line in source:
+                if not line.endswith('\n'):
+                    return False
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict) or entry.get('isSidechain'):
+                    continue
+                kind = entry.get('type')
+                if agent == 'codex':
+                    payload = entry.get('payload')
+                    if not isinstance(payload, dict):
+                        continue
+                    if kind == 'session_meta':
+                        origin = payload.get('source')
+                        if isinstance(origin, dict) and 'subagent' in origin:
+                            return False
+                    elif kind == 'turn_context':
+                        matched = False
+                    elif kind == 'event_msg':
+                        event = payload.get('type')
+                        if event in ('task_started', 'turn_aborted'):
+                            final_text, matched = '', False
+                        elif event == 'user_message':
+                            if not user_text_is_noise(str(payload.get('message') or '')):
+                                final_text, matched = '', False
+                        elif event == 'agent_message':
+                            final_text, matched = str(payload.get('message') or '').strip(), False
+                        elif event == 'task_complete':
+                            last_message = str(payload.get('last_agent_message') or '').strip()
+                            matched = (payload.get('turn_id') == row['event_key'] and bool(final_text)
+                                       and (not last_message or clip_preview(last_message, PREVIEW_CHARS_FULL)
+                                            == clip_preview(final_text, PREVIEW_CHARS_FULL)))
+                    elif kind == 'response_item' and payload.get('type') == 'message':
+                        text = content_to_text(payload.get('content')).strip()
+                        if payload.get('role') == 'user' and not user_text_is_noise(text):
+                            final_text, matched = '', False
+                        elif payload.get('role') == 'assistant' and text:
+                            final_text, matched = text, False
+                else:
+                    message = entry.get('message')
+                    message = message if isinstance(message, dict) else {}
+                    text = content_to_text(message.get('content')).strip()
+                    if kind == 'user' and not entry.get('isMeta') and not user_text_is_noise(text):
+                        final_text, final_time, matched = '', None, False
+                    elif kind == 'assistant' and message.get('content'):
+                        final_text = text if message.get('stop_reason') == 'end_turn' else ''
+                        final_time, matched = timestamp(entry), False
+                    elif kind == 'system' and entry.get('subtype') == 'stop_hook_summary':
+                        stopped = timestamp(entry)
+                        matched = (bool(final_text) and final_time is not None and stopped is not None
+                                   and stopped >= final_time and not entry.get('preventedContinuation')
+                                   and 0 <= stopped - float(row['updated']) <= 2)
+    except (OSError, TypeError, ValueError):
+        return False
+    return matched and clip_preview(final_text, PREVIEW_CHARS_FULL) == displayed_agent
+
+
 def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS, snapshot=False):
     """Cached preview, refreshed from transcript when the file changes.
 
@@ -562,7 +651,8 @@ def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS, snapshot
                 )
                 advanced = parsed['agent'] != agent_text or parsed['users'] != users
                 verified = (row['state'] == 'IDLE' and bool(row['needs_review']) and bool(parsed['agent'])
-                            and bound_path and mtime > cached_mtime and forward_users and advanced)
+                            and bound_path and ((mtime > cached_mtime and forward_users and advanced)
+                                                or (forward_users and completed_transcript_matches_revision(path, row, parsed['agent']))))
                 preview_revision = row['revision'] if verified else 0
                 users, agent_text = parsed['users'], parsed['agent']
                 try:
@@ -654,6 +744,7 @@ def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event
                                (sock, pane, pid)).fetchone()['revision']
     if notify:
         maybe_notify_wait(agent, reason, pane)
+    publish_view_revision(sock, pane, pid, revision if state == 'IDLE' and needs_review else 0)
     return revision
 
 
@@ -947,7 +1038,7 @@ def event_command(agent, event):
 
 
 def live_panes(sock=None):
-    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}\t#{pane_current_command}'
+    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}\t#{pane_current_command}\t#{@tmux_attn_view_revision}'
     result = {}
     for line in tmux('list-panes', '-a', '-F', fmt, check=False, sock=sock).splitlines():
         parts = line.split('\t')
@@ -955,6 +1046,7 @@ def live_panes(sock=None):
             result[(parts[0], parts[1])] = dict(
                 pane=parts[0], pid=parts[1], session=parts[2], window=clean(parts[3]),
                 path=parts[4], window_id=parts[6], command=clean(parts[7] if len(parts) > 7 else ''),
+                view_revision=parts[8] if len(parts) > 8 else '',
             )
     return result
 
@@ -1107,6 +1199,12 @@ def update_window_badges(rows, live=None, sock=None):
         paths.setdefault(meta['window_id'], meta['path'])
     labels = project_labels([path for path in paths.values() if path], load_project_aliases())
     commands = []
+    for row in rows:
+        token = f"{row['pid']}:{row['revision']}" if row['state'] == 'IDLE' and row.get('needs_review') else ''
+        if live.get((row['pane'], row['pid']), {}).get('view_revision', '') != token:
+            if commands:
+                commands.append(';')
+            commands.extend(['set-option', '-p', '-t', row['pane'], VIEW_REVISION_OPTION, token])
     for line in tmux('list-windows', '-a', '-F', '#{window_id}\t#{@tmux_attn_badge}\t#{@tmux_attn_project}', check=False, sock=sock).splitlines():
         window, current, project = (line.split('\t') + ['', ''])[:3]
         group = groups.get(window, [])
@@ -1139,6 +1237,78 @@ def jump_and_acknowledge(con, item, client=None):
     if item['state'] == 'IDLE' and item.get('needs_review'):
         acknowledge(con, item)
     return True
+
+
+def publish_view_revision(sock, pane, pid, revision):
+    """Mirror a version into tmux so the selection hook can snapshot it immediately."""
+    try:
+        actual = tmux('display-message', '-p', '-t', pane, '#{pane_pid}', check=False, sock=sock)
+        if actual == str(pid):
+            token = f'{pid}:{revision}' if revision else ''
+            tmux('set-option', '-p', '-t', pane, VIEW_REVISION_OPTION, token, check=False, sock=sock)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass  # A departed pane must never fail an agent hook.
+
+
+def acknowledge_visible_pane(con, sock, client, pane, pid, token):
+    """Confirm the pane/version captured by a human client's selection event."""
+    match = re.fullmatch(r'([0-9]+):([1-9][0-9]*)', token or '')
+    if not client or not match or match[1] != str(pid):
+        return False
+    # Background selections and control-mode clients must not clear human attention.
+    visible = tmux('display-message', '-p', '-c', client,
+                   '#{pane_id} #{pane_pid} #{client_control_mode}', check=False, sock=sock)
+    if visible != f'{pane} {pid} 0':
+        return False
+    revision = int(match[2])
+    with (nullcontext() if con.in_transaction else con):
+        if not con.in_transaction:
+            con.execute('BEGIN IMMEDIATE')
+        row = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',
+                          (sock, pane, pid)).fetchone()
+        if not row or row['state'] != 'IDLE' or not row['needs_review'] or revision > row['revision']:
+            return False
+        acknowledge(con, dict(row) | {'revision': revision})
+    return True
+
+
+def view_hooks_config(launch):
+    command = f'{launch} viewed "#{{client_name}}" "#{{pane_id}}" "#{{pane_pid}}" "#{{{VIEW_REVISION_OPTION}}}"'
+    hook = 'run-shell -b ' + shlex.quote(command)
+    return ''.join(f'set-hook -g {shlex.quote(name + "[" + str(VIEW_HOOK_INDEX) + "]")} {shlex.quote(hook)}\n'
+                   for name in VIEW_HOOKS)
+
+
+def install_view_hooks(sock=None):
+    """Add viewing hooks to an existing installation without replacing its settings."""
+    config = Path.home() / '.config/tmux-attn/sidebar.conf'
+    start, end = '# Begin automatic viewing hooks\n', '# End automatic viewing hooks\n'
+    original = config.read_text()
+    prior = []
+    for name in VIEW_HOOKS:
+        value = tmux('show-hooks', '-g', f'{name}[{VIEW_HOOK_INDEX}]', check=False, sock=sock)
+        if value and str(ROOT / 'attention.py') not in value:
+            raise RuntimeError(f'Hook index {VIEW_HOOK_INDEX} already used: {name}')
+        prior.append(value)
+    backup = STATE / 'backups' / f'view-hooks-{time.time_ns()}'
+    backup.mkdir(parents=True)
+    (backup / 'sidebar.conf').write_text(original)
+    (backup / 'runtime-hooks.conf').write_text('\n'.join(prior) + '\n')
+    launch = shlex.join(['env', 'TMUX_ATTN_STATE_DIR=' + str(STATE), sys.executable, str(ROOT / 'attention.py')])
+    block = start + view_hooks_config(launch) + end
+    updated = re.sub(re.escape(start) + r'.*?' + re.escape(end), '', original, flags=re.S)
+    # Existing installer versions may include unmarked copies of these same hooks.
+    updated = '\n'.join(line for line in updated.splitlines()
+                        if not any(line.startswith(f'set-hook -g {name}[{VIEW_HOOK_INDEX}] ') for name in VIEW_HOOKS))
+    config.write_text(updated.rstrip() + '\n' + block)
+    runtime = backup / 'apply.conf'
+    runtime.write_text(block)
+    tmux('source-file', str(runtime), sock=sock)
+    with closing(db()) as con:
+        live = live_panes(sock=sock)
+        rows, _ = items(con, sock or resolve_socket(), live, True)
+        update_window_badges(rows, live, sock=sock)
+    return str(backup)
 
 
 def age(stamp):
@@ -2106,11 +2276,20 @@ def ensure_sidebars(target=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox','status-clickable','cycle','web'])
+    parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox','status-clickable','cycle','web','viewed','install-view-hooks'])
     parser.add_argument('args', nargs='*')
     args = parser.parse_args()
     if args.command == 'event':
         event_command(*args.args)
+    elif args.command == 'viewed':
+        if len(args.args) == 4:
+            try:
+                with closing(db()) as con:
+                    acknowledge_visible_pane(con, resolve_socket(), *args.args)
+            except (OSError, RuntimeError, sqlite3.Error, subprocess.SubprocessError):
+                pass  # Selection may have changed again while the hook was queued.
+    elif args.command == 'install-view-hooks':
+        print(json.dumps({'backup': install_view_hooks(resolve_socket())}))
     elif args.command == 'inbox':
         curses.wrapper(lambda win: sidebar(win,popup=True,client=args.args[0] if args.args else None))
     elif args.command == 'popup':
