@@ -159,12 +159,11 @@ class RecoveryIntegrationTests(unittest.TestCase):
         files = list(self.state.glob('codex-observer-*.lock')) if self.state.exists() else []
         for path in files:
             try:
-                pid = int(path.read_text())
                 with path.open('a') as handle:
                     try:
                         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
-                        return pid
+                        return int(path.read_text())
             except (OSError, ValueError):
                 pass
         return None
@@ -194,7 +193,11 @@ class RecoveryIntegrationTests(unittest.TestCase):
         with sqlite3.connect(self.state / 'inbox.sqlite3') as con:
             con.execute('DELETE FROM panes')
         self.status('status-clickable')
-        second = self.wait_for(self.lock_pid)
+        def restarted_pid():
+            pid = self.lock_pid()
+            return pid if pid is not None and pid != first else None
+
+        second = self.wait_for(restarted_pid)
         self.assertNotEqual(first, second)
         self.assertEqual(self.wait_for(self.registered)[0], 'IDLE')
         self.assertIn('💤', self.status('status-clickable').stdout)
