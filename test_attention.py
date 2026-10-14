@@ -552,6 +552,31 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(payload['summary']['wait'], 1)
         self.assertEqual(payload['agents'][0]['pane'], '%1')
 
+    def test_prune_stale_panes_removes_dead_rows_keeps_live(self):
+        a.record(self.con, 'sock', '%1', '123', 'codex', 'IDLE', 'live')
+        a.record(self.con, 'sock', '%2', '999', 'pi', 'IDLE', 'dead')
+        with self.con:
+            self.con.execute(
+                "INSERT INTO codex_sessions(socket,pane,pid,thread_id,rollout_path,origin) VALUES('sock','%2','999','t','p','native')"
+            )
+            self.con.execute(
+                "INSERT INTO cycle_cursors(socket,client,category,pane,pid) VALUES('sock','c0','idle','%2','999')"
+            )
+            self.con.execute(
+                "INSERT INTO cycle_cursors(socket,client,category,pane,pid) VALUES('sock','c0','wait','%1','123')"
+            )
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 's', 'window': 'w', 'window_id': '@1', 'path': '/'}}
+        removed = a.prune_stale_panes(self.con, 'sock', live)
+        self.assertGreaterEqual(removed, 3)
+        panes = [dict(r) for r in self.con.execute('SELECT pane,pid FROM panes WHERE socket=?', ('sock',))]
+        self.assertEqual(panes, [{'pane': '%1', 'pid': '123'}])
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM codex_sessions').fetchone()[0], 0)
+        cursors = [dict(r) for r in self.con.execute('SELECT pane,pid FROM cycle_cursors')]
+        self.assertEqual(cursors, [{'pane': '%1', 'pid': '123'}])
+        # Empty live is ambiguous with list-panes failure — must not wipe.
+        self.assertEqual(a.prune_stale_panes(self.con, 'sock', {}), 0)
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM panes').fetchone()[0], 1)
+
 class IntegrationTests(unittest.TestCase):
     def test_install_live_hooks_sidebars_navigation_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:

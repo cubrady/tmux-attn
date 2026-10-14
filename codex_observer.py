@@ -13,7 +13,10 @@ import signal
 import subprocess
 import time
 
-from attention import STATE, classify, codex_root_transcript, codex_transcript_meta, db, live_panes, record, socket, tmux
+from attention import (
+    STATE, classify, codex_root_transcript, codex_transcript_meta, db, live_panes,
+    prune_stale_panes, record, socket, tmux,
+)
 
 
 def processes():
@@ -407,7 +410,10 @@ def repair_mapping(con, mapping, state_db):
 
 
 def observe_codex_unmapped(con, sock, live, table):
-    """Track unique foreground Codex even before session→pane discovery succeeds."""
+    """Screen-track a unique foreground Codex when session→pane discovery has no row yet.
+
+    Idle TUIs often lack a stable thread match; without this, status stays all zeros.
+    """
     for (pane, pid), meta in live.items():
         if len(native_codex_pids(pid, table)) != 1:
             continue
@@ -453,6 +459,7 @@ def observe():
                 live = live_panes()
                 if time.monotonic()-refreshed > 10:
                     table = processes(); refreshed = time.monotonic()
+                    prune_stale_panes(con, sock, live)
                     discover(con,sock,live,table,attempted)
                 observe_cursor(con,sock,live,table)
                 observe_claude(con,sock,live,table)
