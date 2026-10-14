@@ -528,7 +528,7 @@
     }
     .preview-line {
       display: grid;
-      grid-template-columns: 2.4rem 1fr;
+      grid-template-columns: 2.4rem minmax(0, 1fr);
       gap: 8px;
       align-items: start;
       font-size: 0.84rem;
@@ -650,9 +650,12 @@
       text-underline-offset: 2px;
     }
     .preview-line .text.md table {
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
       border-collapse: collapse;
       font-size: 0.9em;
-      width: 100%;
     }
     .preview-line .text.md th,
     .preview-line .text.md td {
