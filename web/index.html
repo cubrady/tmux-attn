@@ -556,27 +556,44 @@
       color: var(--muted);
       text-wrap: pretty;
     }
-    .card .preview-line .text {
-      display: -webkit-box;
-      -webkit-box-orient: vertical;
-      -webkit-line-clamp: 3;
+    /* Card previews: result first, the latest prompt as muted context, cut on whole lines. */
+    .card .preview-line { grid-template-columns: minmax(0, 1fr); }
+    .card .preview-line .who {
+      position: absolute;
+      width: 1px;
+      height: 1px;
       overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
     }
+    .card .preview-line.agent { margin-top: 0; padding-top: 0; border-top: 0; }
     .card .preview-line .text.md {
-      display: block;
-      -webkit-line-clamp: unset;
-      -webkit-box-orient: unset;
-      max-height: 4.9em;
+      max-height: calc(1.45em * 5);
       overflow: hidden;
     }
-    .card.review.unread .preview-line.agent .text {
-      -webkit-line-clamp: 4;
-      color: color-mix(in srgb, var(--fg) 78%, var(--muted));
+    .card .preview-line .text.md > * { margin: 0; }
+    .card .preview-line .text.md.clipped {
+      -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.45em), transparent);
+      mask-image: linear-gradient(to bottom, #000 calc(100% - 1.45em), transparent);
     }
-    .card.review.unread .preview-line.agent .text.md {
-      -webkit-line-clamp: unset;
-      max-height: 6.6em;
-      color: color-mix(in srgb, var(--fg) 78%, var(--muted));
+    .card.review.unread .preview-line.agent .text,
+    .card.wait .preview-line.agent .text { color: var(--fg); }
+    .card .preview-line.user {
+      position: relative;
+      padding-left: 0.95rem;
+      font-size: 0.8rem;
+    }
+    .card .preview-line.user::before {
+      content: '›';
+      position: absolute;
+      left: 0.1rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .card .preview-line.user .text.md {
+      max-height: calc(1.45em * 2);
+      color: var(--muted);
+      font-weight: 400;
     }
     .sheet-preview .preview-line .text {
       overflow-wrap: anywhere;
@@ -1253,6 +1270,8 @@
       ['shell', '其他 pane'],
     ];
     const SECTION_EMOJI = { wait: '🙋', review: '👀', running: '🏃', idle: '💤', shell: '💻' };
+    // Reasons that only repeat what the emoji, badge and section title already say.
+    const GENERIC_REASONS = new Set(['已完成，尚未查看', '已完成，已查看', '閒置，等待新任務', '正在工作']);
     let selectedKey = '';
     let latestAgents = [];
     let latestHosts = [];
@@ -1365,6 +1384,10 @@
       } catch (_) { /* fall through */ }
       return escapeHtml(raw).replace(/\n/g, '<br>');
     }
+    function previewLineHtml(role, text, attrs = '', hint = '') {
+      const label = role === 'user' ? 'you' : 'agent';
+      return `<div class="preview-line ${role}"${attrs}><span class="who">${label}</span><span class="text md">${renderMarkdown(text)}</span>${hint}</div>`;
+    }
     function previewHtml(preview, { actionable = false } = {}) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
       const agentLine = preview?.agent || '';
@@ -1372,8 +1395,21 @@
       const target = (role, index) => actionable ? ` data-role="${role}" data-index="${index}"` : '';
       const openFull = actionable ? '<button type="button" class="open-full">全文</button>' : '';
       return `<div class="preview">${
-        users.map((text, i) => `<div class="preview-line user"${target('user', i)}><span class="who">you</span><span class="text md">${renderMarkdown(text)}</span>${openFull}</div>`).join('')
-      }${agentLine ? `<div class="preview-line agent"${target('agent', 0)}><span class="who">agent</span><span class="text md">${renderMarkdown(agentLine)}</span>${openFull}</div>` : ''}</div>`;
+        users.map((text, i) => previewLineHtml('user', text, target('user', i), openFull)).join('')
+      }${agentLine ? previewLineHtml('agent', agentLine, target('agent', 0), openFull) : ''}</div>`;
+    }
+    // A card is a glance: the result you came for first, then only the latest prompt for context.
+    function cardPreviewHtml(preview) {
+      const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
+      const lastUser = users[users.length - 1] || '';
+      const agentLine = preview?.agent || '';
+      if (!lastUser && !agentLine) return '';
+      return `<div class="preview">${agentLine ? previewLineHtml('agent', agentLine) : ''}${lastUser ? previewLineHtml('user', lastUser) : ''}</div>`;
+    }
+    function markClippedPreviews() {
+      document.querySelectorAll('.card .preview-line .text.md').forEach(el => {
+        el.classList.toggle('clipped', el.scrollHeight > el.clientHeight + 1);
+      });
     }
     function clipBranch(branch, limit = 36) {
       const text = String(branch || '');
@@ -1428,8 +1464,8 @@
           <div class="age">${escapeHtml(a.age)}</div>
         </div>
         ${envLineHtml(a)}
-        <div class="reason">${escapeHtml(reason)}</div>
-        ${previewHtml(a.preview)}
+        ${GENERIC_REASONS.has(reason) ? '' : `<div class="reason">${escapeHtml(reason)}</div>`}
+        ${cardPreviewHtml(a.preview)}
       </article>`;
     }
     let killArmedUntil = 0;
@@ -2026,6 +2062,7 @@
         const heading = `<div class="section" id="group-${key}" data-group="${key}"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>`;
         return heading + rows.map((a, i) => cardHtml(a, { newest: key === 'review' && i === 0 })).join('');
       }).join('');
+      markClippedPreviews();
       syncSheetFromData();
     }
     function jumpToGroup(key) {
@@ -2081,6 +2118,9 @@
       else if (sheetOpen) closeSheet();
     });
     window.addEventListener('hashchange', applyRoute);
+    // Line wraps change when the web font arrives or the window resizes, so the clipped marks must follow.
+    window.addEventListener('resize', markClippedPreviews);
+    if (document.fonts) document.fonts.addEventListener('loadingdone', markClippedPreviews);
     document.getElementById('sheet-preview').addEventListener('click', (event) => {
       if (event.target.closest('a[href]')) return;
       const picked = typeof window.getSelection === 'function' ? String(window.getSelection()) : '';
