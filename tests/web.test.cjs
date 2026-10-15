@@ -1011,13 +1011,10 @@ test('forward navigation to a reader link reopens the sheet and message from a c
   t.ui.open(other);
   await t.settle();
   t.el('sheet-text').value = 'draft meant for the other session';
-  await t.el('sheet-kill').listeners.click();
-  assert.match(t.el('sheet-kill').title, /5 秒內/);
   t.browser.window.location.hash = '#/m/lab/%251/123/agent/0';
   await t.settle();
   assert.equal(t.el('reader-title').textContent, 'Agent 回覆');
   assert.equal(t.el('sheet-text').value, '');
-  assert.doesNotMatch(t.el('sheet-kill').title, /5 秒內/);
 });
 
 test('a reloaded reader link still notices that the conversation moved on', async () => {
@@ -1170,4 +1167,186 @@ test('clipped previews are re-measured after web fonts load and when the window 
   fontListeners.loadingdone();
   browser.listeners.resize();
   assert.deepEqual(toggled, [false, true, true]);
+});
+
+function killSetup({ kill, names = ['demo'] } = {}) {
+  const calls = [];
+  const clock = { now: 1_000_000 };
+  const timers = [];
+  const replaced = [];
+  const refocused = [];
+  const FakeDate = class extends Date { static now() { return clock.now; } };
+  const doc = {
+    // A card the page can swap in place: it records the new markup instead of touching a real DOM.
+    querySelector(selector) {
+      const key = (selector.match(/data-key="([^"]*)"/) || [])[1];
+      if (key === undefined) return null;
+      return {
+        classList: { contains: () => false, add() {}, remove() {} },
+        contains: node => node === ui.document.activeElement,
+        set outerHTML(html) { replaced.push([key, html]); },
+        querySelector: inner => ({ focus: () => refocused.push([key, inner]) }),
+      };
+    },
+  };
+  const ui = dashboard({
+    document: doc,
+    globals: { Date: FakeDate, setTimeout: (fn, ms) => { timers.push({ fn, at: clock.now + ms }); } },
+    fetchRequest: async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      if (url === '/api/kill') return kill ? kill() : jsonReply({ ok: true });
+      if (url === '/api/preview') return jsonReply(PREVIEW);
+      return jsonReply({ ok: true });
+    },
+  });
+  const agents = names.map((name, i) => ({ ...agent('lab', 'WAIT'), project: name, pane: `%${i + 1}`, pid: String(100 + i) }));
+  ui.render({ agents });
+  const keyOf = i => ui.context.agentKey(agents[i]);
+  const tap = (i = 0, onKill = true) => ui.elements.get('list').listeners.click({
+    target: { closest: selector => (selector === '[data-kill]' ? (onKill ? {} : null) : { dataset: { key: keyOf(i) } }) },
+  });
+  const list = () => { ui.render({ agents }); return ui.elements.get('list').innerHTML; };
+  const advance = ms => {
+    clock.now += ms;
+    const due = timers.filter(timer => timer.at <= clock.now);
+    for (const timer of due) timers.splice(timers.indexOf(timer), 1);
+    for (const timer of due) timer.fn();
+  };
+  const killCalls = () => calls.filter(call => call.url === '/api/kill');
+  const live = () => ui.elements.get('kill-live').textContent;
+  const lastHtml = i => (replaced.filter(([key]) => key === keyOf(i)).pop() || [])[1] || '';
+  const focusTrash = () => { ui.document.activeElement = { closest: selector => (selector === '[data-kill]' ? {} : null) }; };
+  return { ui, calls, replaced, refocused, agents, tap, list, advance, killCalls, live, lastHtml, focusTrash };
+}
+
+test('tracked cards carry a trash button beside the age; the card itself is not a button', () => {
+  const ui = dashboard();
+  ui.render({ agents: [{ ...agent('lab', 'WAIT'), project: 'demo' },
+    { ...agent('lab', 'SHELL', false), pane: '%9', pid: '9', project: 'plain-shell' }] });
+  const list = ui.elements.get('list').innerHTML;
+  assert.equal((list.match(/class="card-kill"/g) || []).length, 1);
+  assert.match(list, /class="row1-side">\s*<div class="age">[^<]*<\/div>\s*<button type="button" class="card-kill" data-kill aria-label="關閉 demo"/);
+  assert.doesNotMatch(list, /card-kill-label/);
+  // Nested interactive controls hide the trash from screen readers, so the open action is its own button.
+  assert.doesNotMatch(list, /role="button"/);
+  assert.equal((list.match(/class="card-open" aria-label="開啟 demo"/g) || []).length, 1);
+});
+
+test('the first tap arms the trash on that card only, announces it and never opens the sheet', async () => {
+  const t = killSetup();
+  await t.tap();
+  await settle();
+  assert.deepEqual(t.calls, []);
+  assert.equal(t.replaced.length, 1);
+  assert.match(t.lastHtml(0), /class="card-kill armed" data-kill aria-label="再按一次確認關閉 demo"/);
+  assert.match(t.lastHtml(0), /class="card-kill-label">確認關閉/);
+  assert.match(t.lastHtml(0), /class="card [^"]*\bkill-armed\b/);
+  assert.equal(t.live(), '再按一次確認關閉 demo');
+  assert.match(t.list(), /class="card-kill armed"/, 'a poll render keeps the arm');
+});
+
+test('arming one card disarms another, and a tap on the second card never closes it', async () => {
+  const t = killSetup({ names: ['alpha', 'beta'] });
+  await t.tap(0);
+  await t.tap(1);
+  await settle();
+  assert.equal(t.killCalls().length, 0);
+  assert.doesNotMatch(t.lastHtml(0), /armed/);
+  assert.match(t.lastHtml(1), /card-kill armed/);
+  await t.tap(1);
+  await settle();
+  assert.deepEqual(t.killCalls().map(call => call.body), [{ host: 'lab', pane: '%2', pid: '101' }]);
+});
+
+test('a second tap within five seconds closes the pane on its own host', async () => {
+  const t = killSetup();
+  await t.tap();
+  await t.tap();
+  await settle();
+  assert.deepEqual(t.killCalls().map(call => call.body), [{ host: 'lab', pane: '%1', pid: '100' }]);
+  assert.equal(t.calls.some(call => call.url === '/api/preview'), false);
+});
+
+test('the arm expires on a timer, and an older timer never cuts a newer arm short', async () => {
+  const t = killSetup({ names: ['alpha', 'beta'] });
+  await t.tap(0);
+  t.advance(5000);
+  assert.doesNotMatch(t.lastHtml(0), /armed/, 'the pill reverts by itself');
+  assert.equal(t.killCalls().length, 0);
+  await t.tap(0);
+  t.advance(4000);
+  await t.tap(1); // arms beta; alpha's timer is still pending
+  t.advance(1000); // alpha's timer fires now
+  assert.match(t.list(), /data-key="lab\|%2\|101"[^>]*>[\s\S]*?card-kill armed/, 'beta stays armed');
+  t.advance(4100);
+  assert.doesNotMatch(t.list(), /armed/);
+});
+
+test('a confirmed close stays on "closing" until a render no longer lists the pane', async () => {
+  const t = killSetup();
+  await t.tap();
+  await t.tap();
+  await settle();
+  assert.match(t.lastHtml(0), /class="card-kill busy" data-kill[^>]*aria-disabled="true"/);
+  assert.doesNotMatch(t.lastHtml(0), /\bdisabled\b(?!=)/);
+  assert.match(t.list(), /card-kill busy/, 'a stale poll that still lists the pane keeps it busy');
+  t.ui.render({ agents: [] });
+  assert.doesNotMatch(t.list(), /busy/);
+});
+
+test('taps during an in-flight close are ignored', async () => {
+  let release;
+  const t = killSetup({ names: ['alpha', 'beta'], kill: () => new Promise(resolve => { release = () => resolve(jsonReply({ ok: true })); }) });
+  await t.tap(0);
+  const inFlight = t.tap(0); // the confirming tap waits on the request
+  await settle();
+  await t.tap(0);
+  await t.tap(1);
+  assert.equal(t.killCalls().length, 1);
+  release();
+  await inFlight;
+});
+
+test('a failed close shows and announces the reason, disarms, and the note clears itself', async () => {
+  const t = killSetup({ kill: () => jsonReply({ ok: false, error: 'boom <b>' }, 409) });
+  await t.tap();
+  await t.tap();
+  await settle();
+  assert.match(t.lastHtml(0), /class="kill-note">boom &lt;b&gt;/);
+  assert.doesNotMatch(t.lastHtml(0), /armed|busy/);
+  assert.equal(t.live(), '關閉失敗：boom <b>');
+  t.advance(6000);
+  assert.doesNotMatch(t.lastHtml(0), /kill-note/);
+  assert.doesNotMatch(t.list(), /kill-note/);
+});
+
+test('keyboard focus follows the trash when its markup is swapped, and only then', async () => {
+  const t = killSetup();
+  await t.tap();
+  assert.deepEqual(t.refocused, []);
+  t.focusTrash();
+  await t.tap(); // confirm: the button re-renders as busy
+  await settle();
+  assert.ok(t.refocused.length >= 1);
+  assert.ok(t.refocused.every(([key, selector]) => key === 'lab|%1|100' && selector === '[data-kill]'));
+});
+
+test('tapping the card body still opens the sheet', async () => {
+  const t = killSetup();
+  await t.tap(0, false);
+  await settle();
+  assert.equal(t.calls.some(call => call.url === '/api/preview'), true);
+  assert.equal(t.killCalls().length, 0);
+});
+
+test('the reply sheet has no trash button and keeps attach and send inside one composer box', () => {
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.doesNotMatch(html, /id="sheet-kill"/);
+  const form = html.slice(html.indexOf('<form class="sheet-compose"'), html.indexOf('</form>', html.indexOf('<form class="sheet-compose"')));
+  const box = form.slice(form.indexOf('<div class="composer"'), form.indexOf('id="sheet-status"'));
+  for (const id of ['sheet-attachments', 'sheet-text', 'sheet-attach', 'sheet-send']) {
+    assert.ok(box.includes(`id="${id}"`), `${id} belongs inside .composer`);
+  }
+  assert.ok(box.indexOf('id="sheet-attachments"') < box.indexOf('id="sheet-text"'), 'thumbnails sit above the text');
+  assert.ok(box.indexOf('id="sheet-text"') < box.indexOf('id="sheet-attach"'), 'the toolbar sits below the text');
 });
