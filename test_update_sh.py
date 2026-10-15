@@ -96,5 +96,24 @@ class UpdateScriptTests(unittest.TestCase):
         self.assertIn('absolute', relative.stderr)
 
 
+    def test_an_old_checkout_without_update_py_borrows_the_one_from_the_target_commit(self):
+        legacy = self.root / 'legacy_origin'
+        legacy.mkdir()
+        self.git(legacy, 'init', '-q', '-b', 'main')
+        (legacy / 'attention.py').write_text('x\n')
+        self.git(legacy, 'add', '-A')
+        self.git(legacy, 'commit', '-q', '-m', 'before update.py')
+        checkout = self.root / 'legacy_checkout'
+        self.git(self.root, 'clone', '-q', str(legacy), str(checkout))
+        (legacy / 'update.py').write_text(STUB + '# new\n')
+        self.git(legacy, 'add', '-A')
+        self.git(legacy, 'commit', '-q', '-m', 'add update.py')
+        (self.share / 'INSTALL.json').write_text('{"source": "%s"}' % checkout)
+        result = self.run_script('--check')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f'ARGS --src {checkout} --check')
+        self.assertFalse((checkout / 'update.py').exists(), 'the working tree is left alone until update.py has checked it')
+
+
 if __name__ == '__main__':
     unittest.main()
