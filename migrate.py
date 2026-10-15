@@ -12,7 +12,7 @@ FILES = [
     'rollback.py', 'attention.py', 'codex_observer.py', 'pi-attention.ts',
     'tmux-attn', 'tmux.conf.snippet', 'project-aliases.example.json',
     'web/index.html', 'peers.example.json', 'join_peer.py', 'install.sh',
-    'install_web_service.sh',
+    'install_web_service.sh', 'update.py', 'update.sh',
     'contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist',
     'web/icons/claude.svg', 'web/icons/codex.svg', 'web/icons/agent.svg', 'web/icons/pi.svg',
     'test_attention.py', 'test_codex_observer.py', 'test_observer_recovery.py',
