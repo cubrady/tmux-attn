@@ -53,7 +53,7 @@ check_prereqs() {
     echo "python3: $(python3 --version 2>&1)"
   fi
   if ! command -v tmux >/dev/null 2>&1; then
-    echo 'Need tmux with display-popup support' >&2
+    echo 'Need tmux with display-popup -T title support (tmux 3.3 or newer)' >&2
     ok=0
   else
     echo "tmux: $(tmux -V 2>&1)"

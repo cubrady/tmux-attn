@@ -68,6 +68,10 @@ for name in ['.claude/settings.json', '.codex/hooks.json', '.cursor/hooks.json']
 # Confirm server access and save runtime before any live-file mutation.
 def tmux(*args):
     return subprocess.check_output(['tmux',*args],text=True).strip()
+popup_usage = next((line for line in tmux('list-commands').splitlines()
+                    if line.startswith('display-popup ')), '')
+if '[-T title]' not in popup_usage:
+    raise SystemExit('Requires tmux with display-popup -T title support (tmux 3.3 or newer).')
 runtime = {k: tmux('show-options','-gv',k) for k in ['status-interval','status-right-length','status-right','mouse']}
 for key in ['window-status-format', 'window-status-current-format']:
     runtime[key] = tmux('show-options', '-gwv', key)
