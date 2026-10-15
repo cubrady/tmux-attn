@@ -27,6 +27,7 @@
       --idle: #71717a;
       --danger: #b91c1c;
       --danger-bg: #fef2f2;
+      --danger-fg: #ffffff;
       --radius: 8px;
       --font: "Outfit", "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
       --mono: "JetBrains Mono", ui-monospace, monospace;
@@ -52,6 +53,7 @@
         --idle: #a1a1aa;
         --danger: #f87171;
         --danger-bg: #450a0a;
+        --danger-fg: #2a0707;
         --header-bg: color-mix(in srgb, var(--bg) 88%, transparent);
         --sheet-bg: #18181b;
         --scrim: rgb(0 0 0 / 0.55);
@@ -368,7 +370,16 @@
     .review-state { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 500; color: var(--muted); }
     .review-state.unread { color: var(--review); font-weight: 600; }
     .review-state.unread::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
     .card {
+      position: relative;
       background: var(--card);
       border-radius: var(--radius);
       padding: 12px 12px 12px 14px;
@@ -378,6 +389,20 @@
       cursor: pointer;
     }
     .card.shell { cursor: default; }
+    /* The whole card is one button; the trash sits above it so the two never nest. */
+    .card-open {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      padding: 0;
+      border: 0;
+      border-radius: inherit;
+      background: transparent;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .card-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
     @media (prefers-reduced-motion: no-preference) {
       .card { transition: border-color 160ms var(--ease), background 160ms var(--ease), transform 140ms var(--ease); }
       .card:active { transform: scale(0.985); }
@@ -802,41 +827,74 @@
       border-top: 1px solid var(--line);
       padding-top: 10px;
     }
-    .sheet-compose textarea {
-      width: 100%;
-      min-height: 88px;
-      max-height: 28dvh;
-      resize: vertical;
+    .composer {
+      display: flex;
+      flex-direction: column;
       border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 10px 11px;
-      font: 0.95rem/1.4 var(--font);
+      border-radius: 18px;
       background: var(--bg-elevated);
+      transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
+    }
+    .composer:focus-within {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+    }
+    .composer textarea {
+      display: block;
+      width: 100%;
+      min-height: 76px;
+      max-height: 28dvh;
+      field-sizing: content;
+      resize: none;
+      border: 0;
+      border-radius: 18px 18px 0 0;
+      padding: 12px 14px 4px;
+      /* 16px keeps iOS Safari from zooming the page when the box takes focus */
+      font: 1rem/1.45 var(--font);
+      background: transparent;
       color: var(--fg);
       outline: none;
     }
-    .sheet-compose textarea:focus {
-      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-    }
-    .sheet-actions {
+    .composer-bar {
       display: flex;
-      gap: 8px;
       align-items: center;
       justify-content: space-between;
-      margin-top: 8px;
+      padding: 2px 8px 8px;
     }
-    .sheet-actions-left,
-    .sheet-actions-right {
-      display: flex;
-      gap: 8px;
+    .composer-btn {
+      position: relative;
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      display: inline-flex;
       align-items: center;
+      justify-content: center;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      transition: background 140ms var(--ease), color 140ms var(--ease), transform 140ms var(--ease);
     }
-    .sheet-actions-right { margin-left: auto; }
+    .composer-btn::after { content: ''; position: absolute; inset: -4px; }
+    .composer-btn svg { width: 20px; height: 20px; display: block; }
+    .composer-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .composer-btn:disabled { opacity: 0.45; cursor: default; }
+    @media (hover: hover) {
+      .composer-btn.attach:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--fg) 8%, transparent);
+        color: var(--fg);
+      }
+    }
+    .composer-btn.send { background: var(--accent); color: var(--accent-fg); }
+    .composer-btn.send svg { width: 18px; height: 18px; margin: 1px 1px 0 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .composer-btn:active:not(:disabled) { transform: scale(0.92); }
+    }
     .attachments {
       display: flex;
       gap: 8px;
-      margin-top: 8px;
-      padding-bottom: 2px;
+      padding: 12px 12px 2px;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
     }
@@ -905,29 +963,51 @@
     }
     .attachment-remove svg { position: relative; width: 12px; height: 12px; }
     .attachment-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-    .icon-btn.send {
-      border: 0;
-      background: var(--accent);
-      color: var(--accent-fg);
-    }
-    .icon-btn.send:disabled {
-      opacity: 0.45;
-      cursor: default;
-    }
     @media (prefers-reduced-motion: no-preference) {
       .icon-btn:active { transform: scale(0.97); }
     }
     .icon-btn:disabled { opacity: 0.4; cursor: default; }
-    .icon-btn.kill {
-      color: var(--danger);
-      border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+    .row1-side { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+    .row1-side .age { padding-top: 0; }
+    .card-kill {
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      height: 28px;
+      min-width: 28px;
+      margin: -2px -6px -2px 0;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
       background: transparent;
+      color: var(--muted);
+      font: 600 0.72rem var(--font);
+      white-space: nowrap;
+      cursor: pointer;
+      transition: background 140ms var(--ease), color 140ms var(--ease);
     }
-    .icon-btn.kill.armed {
+    .card-kill svg { width: 16px; height: 16px; display: block; }
+    .card-kill:focus-visible { outline: 2px solid var(--danger); outline-offset: 1px; }
+    @media (hover: hover) {
+      .card-kill:hover:not([aria-disabled="true"]) { color: var(--danger); background: var(--danger-bg); }
+    }
+    .card-kill.armed,
+    .card-kill.busy {
+      margin-right: -4px;
+      padding: 0 10px 0 8px;
       background: var(--danger);
-      border-color: var(--danger);
-      color: #fff;
+      color: var(--danger-fg);
     }
+    .card-kill[aria-disabled="true"] { cursor: default; opacity: 0.85; }
+    @media (prefers-reduced-motion: no-preference) {
+      .card-kill.armed { animation: kill-arm 180ms var(--ease); }
+    }
+    @keyframes kill-arm { from { transform: scale(0.88); } to { transform: scale(1); } }
+    .card.kill-armed .age { display: none; }
+    .kill-note { margin-top: 6px; font-size: 0.78rem; color: var(--danger); }
     .sheet-feedback {
       min-height: 1.1em;
       margin-top: 6px;
@@ -1190,6 +1270,8 @@
     <div class="banner-error" id="error" hidden></div>
   </div>
 
+  <div class="sr-only" id="kill-live" aria-live="polite"></div>
+
   <div class="sheet-root" id="sheet-root" hidden>
     <button type="button" class="sheet-scrim" id="sheet-scrim" aria-label="關閉"></button>
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
@@ -1207,11 +1289,11 @@
       <div class="sheet-preview" id="sheet-preview" tabindex="0"></div>
       <button type="button" class="host-pill" id="sheet-refresh">重新整理內容</button>
       <form class="sheet-compose" id="sheet-form">
-        <textarea id="sheet-text" placeholder="輸入訊息" enterkeyhint="send"></textarea>
-        <div class="attachments" id="sheet-attachments" aria-label="已加入的圖片" hidden></div>
-        <div class="sheet-actions">
-          <div class="sheet-actions-left">
-            <button type="button" class="icon-btn" id="sheet-attach" aria-label="加入圖片" title="加入圖片">
+        <div class="composer">
+          <div class="attachments" id="sheet-attachments" aria-label="已加入的圖片" hidden></div>
+          <textarea id="sheet-text" placeholder="輸入訊息" enterkeyhint="send"></textarea>
+          <div class="composer-bar">
+            <button type="button" class="composer-btn attach" id="sheet-attach" aria-label="加入圖片" title="加入圖片">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="16" rx="3"/>
                 <circle cx="9" cy="10" r="1.6"/>
@@ -1219,17 +1301,7 @@
               </svg>
             </button>
             <input type="file" id="sheet-file" accept="image/*" multiple hidden>
-          </div>
-          <div class="sheet-actions-right">
-            <button type="button" class="icon-btn kill" id="sheet-kill" aria-label="關閉 pane" title="關閉 pane（需按兩次）">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M3 6h18"/>
-                <path d="M8 6V4h8v2"/>
-                <path d="M19 6l-1 14H6L5 6"/>
-                <path d="M10 11v6M14 11v6"/>
-              </svg>
-            </button>
-            <button type="submit" class="icon-btn send" id="sheet-send" aria-label="送出" title="送出">
+            <button type="submit" class="composer-btn send" id="sheet-send" aria-label="送出" title="送出">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M22 2L11 13"/>
                 <path d="M22 2L15 22l-4-9-9-4 20-7z"/>
@@ -1310,6 +1382,9 @@
 
     function agentKey(a) {
       return [a.host || '', a.pane || '', a.pid || ''].join('|');
+    }
+    function agentName(a) {
+      return a.project || a.window || '未命名專案';
     }
     function hostTone(name) {
       const text = String(name || '');
@@ -1453,37 +1528,104 @@
       const reviewState = cat === 'review' ? '<span class="review-state unread">未看</span>' :
         reviewed ? '<span class="review-state">已看</span>' : '';
       const selected = agentKey(a) === selectedKey ? ' selected' : '';
-      const selectable = a.tracked ? ' tabindex="0" role="button"' : '';
-      return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}" data-key="${escapeHtml(agentKey(a))}"${selectable}>
+      const key = agentKey(a);
+      const name = agentName(a);
+      const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
+      const killNote = killState.key === key && killState.note
+        ? `<div class="kill-note">${escapeHtml(killState.note)}</div>` : '';
+      return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}${killClass}" data-key="${escapeHtml(key)}">
+        ${a.tracked ? `<button type="button" class="card-open" aria-label="開啟 ${escapeHtml(name)}"></button>` : ''}
         <div class="row1">
           <div class="title">
             <span class="emoji" aria-hidden="true">${emoji}</span>
             ${cliBadge(a.cli || a.agent)}
-            <span class="project">${escapeHtml(a.project || a.window || '未命名專案')}</span>
+            <span class="project">${escapeHtml(name)}</span>
             ${reviewState}
           </div>
-          <div class="age">${escapeHtml(a.age)}</div>
+          <div class="row1-side">
+            <div class="age">${escapeHtml(a.age)}</div>
+            ${a.tracked ? killButtonHtml(key, name) : ''}
+          </div>
         </div>
+        ${killNote}
         ${envLineHtml(a)}
         ${GENERIC_REASONS.has(reason) ? '' : `<div class="reason">${escapeHtml(reason)}</div>`}
         ${cardPreviewHtml(a.preview)}
       </article>`;
     }
-    let killArmedUntil = 0;
-    function resetKillArm() {
-      killArmedUntil = 0;
-      const btn = document.getElementById('sheet-kill');
-      if (btn) {
-        btn.classList.remove('armed');
-        btn.disabled = false;
-        btn.setAttribute('aria-label', '關閉 pane');
-        btn.title = '關閉 pane（需按兩次）';
+    // Closing a pane is destructive, so a card's trash needs two taps. The state lives here rather than in the
+    // DOM because the poll re-renders every card.
+    const KILL_ARM_MS = 5000;
+    const KILL_NOTE_MS = 6000;
+    const KILL_BUSY_MAX_MS = 35000; // outlasts the server's 30s handler timeout
+    const KILL_IDLE = { key: '', until: 0, busy: false, note: '' };
+    const TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
+    let killState = KILL_IDLE;
+    function killPhase(key) {
+      if (killState.key !== key) return '';
+      if (killState.busy) return 'busy';
+      return Date.now() < killState.until ? 'armed' : '';
+    }
+    function replaceCard(key) {
+      const selector = `.card[data-key="${CSS.escape(key)}"]`;
+      const el = document.querySelector(selector);
+      const agent = latestAgents.find(a => agentKey(a) === key);
+      if (!el || !agent) return;
+      // Swapping the markup drops focus, so hand it back to the control the user was on.
+      const active = document.activeElement;
+      const refocus = active && el.contains(active) ? (active.closest('[data-kill]') ? '[data-kill]' : '.card-open') : '';
+      el.outerHTML = cardHtml(agent, { newest: el.classList.contains('newest') });
+      const target = refocus && (document.querySelector(selector) || { querySelector: () => null }).querySelector(refocus);
+      if (target) target.focus();
+      markClippedPreviews();
+    }
+    function announceKill(text) {
+      document.getElementById('kill-live').textContent = text;
+    }
+    function setKillState(next, ttl = 0) {
+      const touched = new Set([killState.key, next.key]);
+      killState = next;
+      // A timer only resets the state it was started for, so a newer arm is never cut short by an older timer.
+      if (ttl) setTimeout(() => { if (killState === next) setKillState(KILL_IDLE); }, ttl);
+      for (const key of touched) if (key) replaceCard(key);
+    }
+    function killButtonHtml(key, name) {
+      const phase = killPhase(key);
+      const label = { armed: '確認關閉', busy: '關閉中…' }[phase] || '';
+      const aria = phase === 'armed' ? `再按一次確認關閉 ${name}` : `關閉 ${name}`;
+      const tip = phase === 'armed' ? `${KILL_ARM_MS / 1000} 秒內再按一次確認關閉` : '關閉 pane（需按兩次）';
+      // aria-disabled, not disabled: a disabled button would drop keyboard focus mid-close.
+      return `<button type="button" class="card-kill${phase ? ' ' + phase : ''}" data-kill aria-label="${escapeHtml(aria)}" title="${tip}"${phase === 'busy' ? ' aria-disabled="true"' : ''}>${TRASH_SVG}${label ? `<span class="card-kill-label">${label}</span>` : ''}</button>`;
+    }
+    async function onCardKill(key) {
+      const agent = latestAgents.find(a => agentKey(a) === key && a.tracked);
+      if (!agent || killState.busy) return;
+      if (killPhase(key) !== 'armed') {
+        setKillState({ key, until: Date.now() + KILL_ARM_MS, busy: false, note: '' }, KILL_ARM_MS);
+        announceKill(`再按一次確認關閉 ${agentName(agent)}`);
+        return;
+      }
+      const busy = { key, until: 0, busy: true, note: '' };
+      setKillState(busy, KILL_BUSY_MAX_MS);
+      try {
+        const res = await fetch('/api/kill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        // Stay on "closing" until a render no longer lists the pane; a poll already in flight may still show it.
+        refresh();
+      } catch (e) {
+        if (killState !== busy && killState !== KILL_IDLE) return;
+        setKillState({ key, until: 0, busy: false, note: e.message }, KILL_NOTE_MS);
+        announceKill(`關閉失敗：${e.message}`);
       }
     }
     function closeSheet() {
       closeReader();
       clearAttachments();
-      resetKillArm();
       sheetOpen = false;
       selectedKey = '';
       sheetPreviewKey = '';
@@ -1900,10 +2042,7 @@
     }
     function openSheet(agent) {
       clearAttachments();
-      if (agentKey(agent) !== selectedKey) {
-        document.getElementById('sheet-text').value = '';
-        resetKillArm();
-      }
+      if (agentKey(agent) !== selectedKey) document.getElementById('sheet-text').value = '';
       selectedKey = agentKey(agent);
       sheetOpen = true;
       sheetPreviewKey = '';
@@ -1990,6 +2129,7 @@
         }
       }
       latestAgents = mergedAgents;
+      if (killState.busy && !mergedAgents.some(a => agentKey(a) === killState.key)) killState = KILL_IDLE;
       if (!routeSettled) {
         routeSettled = true;
         applyRoute();
@@ -2102,6 +2242,7 @@
     document.getElementById('list').addEventListener('click', (event) => {
       const card = event.target.closest('.card[data-key]');
       if (!card) return;
+      if (event.target.closest('[data-kill]')) return onCardKill(card.dataset.key);
       const agent = latestAgents.find(a => agentKey(a) === card.dataset.key);
       if (!agent || !agent.tracked) return;
       openSheet(agent);
@@ -2193,42 +2334,6 @@
       } finally {
         button.disabled = false;
         renderAttachments();
-      }
-    });
-    document.getElementById('sheet-kill').addEventListener('click', async () => {
-      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
-      const status = document.getElementById('sheet-status');
-      const btn = document.getElementById('sheet-kill');
-      if (!agent) return;
-      const now = Date.now();
-      if (now > killArmedUntil) {
-        killArmedUntil = now + 5000;
-        btn.classList.add('armed');
-        btn.setAttribute('aria-label', '再按一次確認關閉');
-        btn.title = '5 秒內再按一次確認關閉';
-        status.className = 'sheet-feedback';
-        status.textContent = '再按一次確認關閉';
-        return;
-      }
-      btn.disabled = true;
-      status.className = 'sheet-feedback';
-      status.textContent = '關閉中…';
-      try {
-        const res = await fetch('/api/kill', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
-        status.className = 'sheet-feedback ok';
-        status.textContent = '已關閉 pane';
-        setTimeout(() => { closeSheet(); refresh(); }, 320);
-      } catch (e) {
-        status.className = 'sheet-feedback bad';
-        status.textContent = e.message;
-        resetKillArm();
-        btn.disabled = false;
       }
     });
     const POLL_MS = 10000;
