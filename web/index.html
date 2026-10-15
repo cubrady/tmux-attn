@@ -513,29 +513,26 @@
       text-transform: uppercase;
     }
     .sheet-env {
-      margin: 0 0 8px;
-      padding: 8px 10px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: var(--bg);
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      line-height: 1.45;
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px 8px;
+      font: 0.7rem/1.4 var(--mono);
       color: var(--muted);
     }
-    .sheet-env .path {
-      color: color-mix(in srgb, var(--fg) 78%, var(--muted));
-      overflow-wrap: anywhere;
-    }
-    .sheet-env .row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px 10px;
-      margin-top: 4px;
-      align-items: baseline;
-    }
-    .sheet-env .branch { color: var(--muted); }
+    .sheet-env[hidden] { display: none; }
     .sheet-env .dirty { color: var(--wait); }
+    .path-toggle {
+      padding: 1px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: none;
+      color: var(--muted);
+      font: inherit;
+      cursor: pointer;
+    }
+    .path-toggle[aria-expanded="true"] { background: var(--bg); color: var(--fg); }
+    .path-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .reason {
       margin-top: 7px;
       font-size: 0.88rem;
@@ -770,7 +767,9 @@
     .sheet-root[hidden] { display: none !important; }
     .sheet-root {
       position: fixed;
-      inset: 0;
+      /* Tracks the visible area, so the on-screen keyboard cannot cover the composer. */
+      inset: var(--vv-top, 0px) 0 auto 0;
+      height: var(--vv-h, 100dvh);
       z-index: 20;
       display: flex;
       align-items: flex-end;
@@ -788,7 +787,7 @@
       position: relative;
       z-index: 1;
       width: min(100%, var(--max));
-      max-height: min(88dvh, 720px);
+      max-height: min(88%, 720px);
       display: flex;
       flex-direction: column;
       background: var(--sheet-bg);
@@ -807,25 +806,84 @@
       from { transform: translateY(18px); opacity: 0.85; }
       to { transform: translateY(0); opacity: 1; }
     }
+    @media (prefers-reduced-motion: no-preference) {
+      .sheet { transition: transform 180ms var(--ease); }
+      .sheet.dragging { transition: none; }
+    }
+    .sheet-drag { touch-action: none; }
     .sheet-handle {
       width: 36px;
       height: 4px;
       border-radius: 999px;
       background: var(--line);
-      margin: 10px auto 8px;
+      margin: 8px auto 6px;
+      cursor: grab;
     }
     .sheet-top {
       display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
+      align-items: center;
       gap: 10px;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
+    .sheet-cli:empty { display: none; }
+    .sheet-heading { flex: 1 1 auto; min-width: 0; }
     .sheet-title {
       margin: 0;
       font-size: 1.05rem;
       font-weight: 600;
       letter-spacing: -0.02em;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+    .sheet-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 2px 8px;
+      margin-top: 1px;
+    }
+    .icon-btn.refresh.fresh {
+      width: auto;
+      padding: 0 10px;
+      gap: 6px;
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+      background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+      font: 600 0.72rem var(--font);
+    }
+    .icon-btn.refresh.fresh .refresh-label {
+      position: static;
+      width: auto;
+      height: auto;
+      overflow: visible;
+      clip: auto;
+    }
+    .sheet-path {
+      margin: 0 0 8px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--bg);
+      font: 0.72rem/1.45 var(--mono);
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      user-select: all;
+    }
+    .sheet-path[hidden] { display: none; }
+    .sheet-progress { position: relative; height: 2px; margin-bottom: 6px; overflow: hidden; }
+    .sheet-progress[hidden] { display: none; }
+    .sheet-progress::after {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 36%;
+      border-radius: 1px;
+      background: var(--accent);
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .sheet-progress::after { animation: refresh-slide 1.05s var(--ease) infinite; }
     }
     .icon-btn {
       border: 1px solid var(--line);
@@ -843,9 +901,8 @@
     }
     .icon-btn svg { width: 18px; height: 18px; display: block; }
     .sheet-reason {
-      font-size: 0.88rem;
-      color: color-mix(in srgb, var(--fg) 82%, var(--muted));
-      margin-bottom: 8px;
+      font-size: 0.8rem;
+      color: color-mix(in srgb, var(--fg) 70%, var(--muted));
       text-wrap: pretty;
     }
     .sheet-preview {
@@ -854,9 +911,81 @@
       overflow: auto;
       margin-bottom: 10px;
       -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
       outline: none;
     }
-    .sheet-preview .preview { margin-top: 0; padding-top: 0; border-top: 0; }
+    .sheet-preview .preview { margin-top: 0; padding-top: 0; border-top: 0; gap: 10px; }
+    /* Sheet transcript: earlier prompts fold away, the latest prompt is context, the result is the content. */
+    .sheet-preview .preview-line { grid-template-columns: minmax(0, 1fr) auto; }
+    .sheet-preview .preview-line .who {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+    .sheet-preview .preview-line.user {
+      position: relative;
+      padding-left: 0.95rem;
+      font-size: 0.86rem;
+    }
+    .sheet-preview .preview-line.user::before {
+      content: '›';
+      position: absolute;
+      left: 0.1rem;
+      top: 0;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .sheet-preview .preview-line.user .text { color: color-mix(in srgb, var(--fg) 75%, var(--muted)); font-weight: 500; }
+    .sheet-preview .preview-line.user .text.md { max-height: calc(1.45em * 3); overflow: hidden; }
+    .earlier .preview-line.user .text.md { max-height: calc(1.45em * 2); font-weight: 400; }
+    .sheet-preview .preview-line.user .text.md.clipped {
+      -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.45em), transparent);
+      mask-image: linear-gradient(to bottom, #000 calc(100% - 1.45em), transparent);
+    }
+    .sheet-preview .preview-line.agent {
+      grid-template-areas: "who open" "text text";
+      margin-top: 0;
+      padding-top: 10px;
+      font-size: 0.9rem;
+    }
+    .sheet-preview .preview-line.agent .who {
+      grid-area: who;
+      position: static;
+      width: auto;
+      height: auto;
+      clip: auto;
+      padding: 0;
+      font: 600 0.68rem var(--mono);
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+    .sheet-preview .preview-line.agent .text { grid-area: text; color: var(--fg); }
+    .sheet-preview .preview-line.agent .open-full { grid-area: open; }
+    .sheet-preview .preview-line .open-full { grid-column: auto; justify-self: end; }
+    .earlier-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      padding: 4px 0;
+      border: 0;
+      background: none;
+      color: var(--muted);
+      font: 500 0.76rem var(--font);
+      text-align: left;
+      cursor: pointer;
+    }
+    .earlier-toggle::before { content: '›'; display: inline-block; }
+    @media (prefers-reduced-motion: no-preference) {
+      .earlier-toggle::before { transition: transform 140ms var(--ease); }
+    }
+    .earlier-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+    .earlier-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    .earlier { display: flex; flex-direction: column; gap: 10px; }
+    .earlier[hidden] { display: none; }
     .sheet-compose {
       flex: 0 0 auto;
       border-top: 1px solid var(--line);
@@ -878,7 +1007,7 @@
       display: block;
       width: 100%;
       min-height: 76px;
-      max-height: 28dvh;
+      max-height: min(28dvh, calc(var(--vv-h, 100dvh) * 0.28));
       field-sizing: content;
       resize: none;
       border: 0;
@@ -1042,7 +1171,18 @@
     }
     @keyframes kill-arm { from { transform: scale(0.88); } to { transform: scale(1); } }
     .card.kill-armed .age { display: none; }
+    .sent-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 600; color: var(--running); }
+    .sent-tag::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
     .kill-note { margin-top: 6px; font-size: 0.78rem; color: var(--danger); }
+    .sheet-root.kb-open .sheet { max-height: 100%; border-radius: 12px 12px 0 0; padding-bottom: 8px; }
+    .sheet-root.kb-open .sheet-handle,
+    .sheet-root.kb-open .sheet-meta,
+    .sheet-root.kb-open .sheet-path { display: none; }
+    @media (min-width: 720px) and (min-height: 560px) {
+      .sheet-root { align-items: center; }
+      .sheet { border-bottom: 1px solid var(--line); border-radius: 16px; max-height: min(86%, 760px); padding-bottom: 14px; }
+      .sheet-handle { display: none; }
+    }
     .sheet-feedback {
       min-height: 1.1em;
       margin-top: 6px;
@@ -1310,20 +1450,30 @@
 
   <div class="sheet-root" id="sheet-root" hidden>
     <button type="button" class="sheet-scrim" id="sheet-scrim" aria-label="關閉"></button>
-    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
-      <div class="sheet-handle" aria-hidden="true"></div>
-      <div class="sheet-top">
-        <div>
-          <h2 class="sheet-title" id="sheet-title">回覆</h2>
+    <div class="sheet" id="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet-drag" id="sheet-drag">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <div class="sheet-top">
+          <span class="sheet-cli" id="sheet-cli"></span>
+          <div class="sheet-heading">
+            <h2 class="sheet-title" id="sheet-title">回覆</h2>
+            <div class="sheet-meta">
+              <span class="sheet-reason" id="sheet-reason"></span>
+              <span class="sheet-env" id="sheet-env" hidden></span>
+            </div>
+          </div>
+          <button type="button" class="icon-btn refresh" id="sheet-refresh" title="重新整理內容">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+            <span class="refresh-label sr-only" id="sheet-refresh-label">重新整理內容</span>
+          </button>
+          <button type="button" class="icon-btn" id="sheet-close" aria-label="關閉">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
         </div>
-        <button type="button" class="icon-btn" id="sheet-close" aria-label="關閉">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
       </div>
-      <div class="sheet-env" id="sheet-env" hidden></div>
-      <div class="sheet-reason" id="sheet-reason"></div>
+      <div class="sheet-path" id="sheet-path" hidden></div>
+      <div class="sheet-progress" id="sheet-progress" hidden></div>
       <div class="sheet-preview" id="sheet-preview" tabindex="0"></div>
-      <button type="button" class="host-pill" id="sheet-refresh">重新整理內容</button>
       <form class="sheet-compose" id="sheet-form">
         <div class="composer">
           <div class="attachments" id="sheet-attachments" aria-label="已加入的圖片" hidden></div>
@@ -1525,18 +1675,30 @@
       return escapeHtml(raw).replace(/\n/g, '<br>');
     }
     function previewLineHtml(role, text, attrs = '', hint = '') {
-      const label = role === 'user' ? 'you' : 'agent';
+      const label = role === 'user' ? '你' : '結果';
       return `<div class="preview-line ${role}"${attrs}><span class="who">${label}</span><span class="text md">${renderMarkdown(text)}</span>${hint}</div>`;
     }
+    // Sheet transcript: older prompts fold into one line; the latest prompt then the result keep their order.
+    let sheetEarlierOpen = false;
+    let sheetShown = { preview: null, actionable: false };
     function previewHtml(preview, { actionable = false } = {}) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
       const agentLine = preview?.agent || '';
       if (!users.length && !agentLine) return '';
       const target = (role, index) => actionable ? ` data-role="${role}" data-index="${index}"` : '';
       const openFull = actionable ? '<button type="button" class="open-full">全文</button>' : '';
-      return `<div class="preview">${
-        users.map((text, i) => previewLineHtml('user', text, target('user', i), openFull)).join('')
-      }${agentLine ? previewLineHtml('agent', agentLine, target('agent', 0), openFull) : ''}</div>`;
+      const lines = users.map((text, i) => previewLineHtml('user', text, target('user', i), openFull));
+      const latest = lines.pop() || '';
+      const earlier = lines.length
+        ? `<button type="button" class="earlier-toggle" data-earlier aria-expanded="${sheetEarlierOpen}">較早的 ${lines.length} 則訊息</button>` +
+          `<div class="earlier"${sheetEarlierOpen ? '' : ' hidden'}>${lines.join('')}</div>` : '';
+      return `<div class="preview">${earlier}${latest}${
+        agentLine ? previewLineHtml('agent', agentLine, target('agent', 0), openFull) : ''}</div>`;
+    }
+    function renderSheetPreview(preview, actionable) {
+      sheetShown = { preview, actionable };
+      document.getElementById('sheet-preview').innerHTML = previewHtml(preview, { actionable }) || emptyPreviewHtml();
+      markClippedPreviews();
     }
     // A card is a glance: the result you came for first, then only the latest prompt for context.
     function cardPreviewHtml(preview) {
@@ -1547,7 +1709,7 @@
       return `<div class="preview">${agentLine ? previewLineHtml('agent', agentLine) : ''}${lastUser ? previewLineHtml('user', lastUser) : ''}</div>`;
     }
     function markClippedPreviews() {
-      document.querySelectorAll('.card .preview-line .text.md').forEach(el => {
+      document.querySelectorAll('.card .preview-line .text.md, .sheet-preview .preview-line.user .text.md').forEach(el => {
         el.classList.toggle('clipped', el.scrollHeight > el.clientHeight + 1);
       });
     }
@@ -1567,15 +1729,15 @@
       if (a.dirty) parts.push('<span class="dirty">dirty</span>');
       return parts.length ? `<div class="env">${parts.join('')}</div>` : '';
     }
+    let sheetPathOpen = false;
+    // One compact row; the path is behind a toggle because the card already says which project this is.
     function sheetEnvHtml(a) {
-      const path = a.path || '';
-      const branch = a.branch || '';
-      if (!path && !branch) return '';
       const bits = [];
-      if (branch) bits.push(`<span class="branch">${escapeHtml(branch)}</span>`);
+      if (a.branch) bits.push(`<span class="branch">${escapeHtml(a.branch)}</span>`);
       if (a.dirty) bits.push('<span class="dirty">dirty</span>');
-      return `<div class="path">${escapeHtml(path || (a.repo || ''))}</div>` +
-        (bits.length ? `<div class="row">${bits.join('')}</div>` : '');
+      if (a.age) bits.push(`<span class="age-chip">${escapeHtml(a.age)}</span>`);
+      if (a.path || a.repo) bits.push(`<button type="button" class="path-toggle" data-toggle-path aria-expanded="${sheetPathOpen}">路徑</button>`);
+      return bits.join('');
     }
     function attentionDisplay(a) {
       const cat = category(a);
@@ -1593,6 +1755,8 @@
         reviewed ? '<span class="review-state">已看</span>' : '';
       const selected = agentKey(a) === selectedKey ? ' selected' : '';
       const key = agentKey(a);
+      if (cat === 'running') sentAt.delete(key); // it started: the tag has done its job and must not return later
+      const sentTag = sentRecently(key) && cat !== 'running' ? '<span class="sent-tag">已送出</span>' : '';
       const name = agentName(a);
       const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
       const killNote = killState.key === key && killState.note
@@ -1604,7 +1768,7 @@
             <span class="emoji" aria-hidden="true">${emoji}</span>
             ${cliBadge(a.cli || a.agent)}
             <span class="project">${escapeHtml(name)}</span>
-            ${reviewState}
+            ${reviewState}${sentTag}
           </div>
           <div class="row1-side">
             <div class="age">${escapeHtml(a.age)}</div>
@@ -1619,6 +1783,13 @@
     }
     // Closing a pane is destructive, so a card's trash needs two taps. The state lives here rather than in the
     // DOM because the poll re-renders every card.
+    // A send is acknowledged on the card at once; the agent's own state arrives with the next poll.
+    const SENT_TAG_MS = 8000;
+    const sentAt = new Map();
+    function sentRecently(key) {
+      const at = sentAt.get(key);
+      return at !== undefined && Date.now() - at < SENT_TAG_MS;
+    }
     const KILL_ARM_MS = 5000;
     const KILL_NOTE_MS = 6000;
     const KILL_BUSY_MAX_MS = 35000; // outlasts the server's 30s handler timeout
@@ -1688,9 +1859,14 @@
       }
     }
     function closeSheet() {
+      const openedFrom = selectedKey;
       closeReader();
       clearAttachments();
       sheetOpen = false;
+      setPageInert(false);
+      setSheetLoading(false);
+      clearViewport();
+      resetDrag();
       selectedKey = '';
       sheetPreviewKey = '';
       sheetPreviewFull = false;
@@ -1705,6 +1881,9 @@
       document.getElementById('sheet-status').className = 'sheet-feedback';
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
       if (latestPayload) render(latestPayload);
+      // The page behind was inert, so focus fell to <body>; give it back to the card that opened the sheet.
+      const card = openedFrom && document.querySelector(`.card[data-key="${CSS.escape(openedFrom)}"] .card-open`);
+      if (card) card.focus();
     }
     function setSheetStatus(message, kind = '') {
       const status = document.getElementById('sheet-status');
@@ -1856,6 +2035,7 @@
       readerText = '';
       readerToken += 1;
       document.getElementById('reader-root').hidden = true;
+      document.getElementById('sheet-root').inert = false;
       document.body.classList.remove('reader-open');
       document.getElementById('reader-body').innerHTML = '';
       document.getElementById('reader-status').textContent = '';
@@ -1925,6 +2105,7 @@
       document.getElementById('reader-sub').textContent = agent.project || agent.window || '未命名專案';
       document.getElementById('reader-status').textContent = '';
       document.getElementById('reader-root').hidden = false;
+      document.getElementById('sheet-root').inert = true;
       document.body.classList.add('reader-open');
       loadReaderMessage(agent, route, recallReaderSig(readerHash));
       requestAnimationFrame(() => document.getElementById('reader-body').focus());
@@ -1992,7 +2173,53 @@
       const envHtml = sheetEnvHtml(agent);
       env.hidden = !envHtml;
       env.innerHTML = envHtml;
+      document.getElementById('sheet-cli').innerHTML = cliBadge(agent.cli || agent.agent);
+      const path = document.getElementById('sheet-path');
+      path.textContent = agent.path || agent.repo || '';
+      path.hidden = !sheetPathOpen || !path.textContent;
       document.getElementById('sheet-reason').textContent = reason || '';
+    }
+    function setRefreshLabel(newer) {
+      // Short while visible so it cannot squeeze the title; the full sentence stays in the tooltip.
+      document.getElementById('sheet-refresh-label').textContent = newer ? '有新訊息' : '重新整理內容';
+      const button = document.getElementById('sheet-refresh');
+      button.title = newer ? '有新訊息，點一下重新整理內容' : '重新整理內容';
+      button.setAttribute('aria-label', newer ? '有新訊息，重新整理內容' : '重新整理內容');
+      button.classList.toggle('fresh', newer);
+    }
+    function setSheetLoading(on) {
+      document.getElementById('sheet-progress').hidden = !on;
+      document.getElementById('sheet-preview').setAttribute('aria-busy', String(on));
+    }
+    function setPageInert(on) {
+      const page = document.querySelector('.wrap');
+      if (page) page.inert = on;
+    }
+    // The keyboard overlays the page on iOS without resizing it, so follow the visual viewport instead.
+    function viewportMetrics(vv, innerHeight) {
+      const height = Math.round(vv.height);
+      const top = Math.round(vv.offsetTop || 0);
+      // A pinch-zoomed page also has a smaller visual viewport; that is not a keyboard.
+      return { height, top, keyboard: (vv.scale || 1) <= 1.05 && innerHeight - height - top > 120 };
+    }
+    function applyViewport() {
+      const vv = window.visualViewport;
+      if (!vv || !sheetOpen) return;
+      const m = viewportMetrics(vv, window.innerHeight);
+      const root = document.getElementById('sheet-root');
+      root.style.setProperty('--vv-h', `${m.height}px`);
+      root.style.setProperty('--vv-top', `${m.top}px`);
+      root.classList.toggle('kb-open', m.keyboard);
+    }
+    function clearViewport() {
+      const root = document.getElementById('sheet-root');
+      if (!root.style || !root.style.removeProperty) return;
+      root.style.removeProperty('--vv-h');
+      root.style.removeProperty('--vv-top');
+      root.classList.remove('kb-open');
+    }
+    function dragOutcome(dy, ms) {
+      return dy >= 96 || (dy >= 40 && dy / Math.max(ms, 1) > 0.5) ? 'dismiss' : 'back';
     }
     function confirmSheetMeta(agent, revision, token) {
       if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== agentKey(agent) || sheetPreviewRevision !== revision) return;
@@ -2003,15 +2230,15 @@
     }
     async function loadSheetPreview(agent) {
       const key = agentKey(agent);
-      const box = document.getElementById('sheet-preview');
       if (sheetPreviewKey !== key || !sheetPreviewFull) {
-        box.innerHTML = previewHtml(agent.preview) || emptyPreviewHtml();
+        renderSheetPreview(agent.preview, false);
         sheetPreviewData = { users: [], agent: '' };
         sheetPreviewKey = key;
         sheetPreviewFull = false;
         sheetPreviewUpdated = 0;
       }
       const token = ++sheetPreviewToken;
+      setSheetLoading(true);
       try {
         const res = await fetch('/api/preview', {
           method: 'POST',
@@ -2028,13 +2255,14 @@
           }
           return;
         }
-        box.innerHTML = previewHtml(data.preview, { actionable: true }) || emptyPreviewHtml();
+        renderSheetPreview(data.preview, true);
+        setSheetLoading(false);
         sheetPreviewData = { users: (data.preview?.users || []).filter(Boolean), agent: data.preview?.agent || '' };
         sheetPreviewFull = true;
         sheetPreviewKey = key;
         sheetPreviewUpdated = agent.updated || 0;
         sheetPreviewRevision = data.revision || 0;
-        document.getElementById('sheet-refresh').textContent = '重新整理內容';
+        setRefreshLabel(false);
         if (data.viewable === false && category(agent) === 'review' && isUnread(agent)) {
           const status = document.getElementById('sheet-status');
           if (!status.textContent) {
@@ -2055,6 +2283,8 @@
           status.className = 'sheet-feedback bad';
           status.textContent = '預覽載入失敗';
         }
+      } finally {
+        if (token === sheetPreviewToken) setSheetLoading(false);
       }
     }
     async function acknowledgePreview(agent, revision, token) {
@@ -2113,12 +2343,17 @@
       sheetPreviewFull = false;
       sheetPreviewUpdated = 0;
       sheetPreviewRevision = 0;
-      document.getElementById('sheet-refresh').textContent = '重新整理內容';
+      setRefreshLabel(false);
+      sheetPathOpen = false;
+      sheetEarlierOpen = false;
       fillSheet(agent, { refreshPreview: true });
       document.getElementById('sheet-status').textContent = '';
       document.getElementById('sheet-status').className = 'sheet-feedback';
       document.getElementById('sheet-root').hidden = false;
+      markClippedPreviews(); // the first render happened while hidden, when nothing can be measured
       document.body.classList.add('sheet-open');
+      setPageInert(true);
+      applyViewport();
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
       const card = document.querySelector(`.card[data-key="${CSS.escape(selectedKey)}"]`);
       if (card) card.classList.add('selected');
@@ -2136,7 +2371,7 @@
       const newer = sheetPreviewFull && (sheetPreviewRevision
         ? (agent.revision || 0) > sheetPreviewRevision
         : (agent.updated || 0) > sheetPreviewUpdated);
-      document.getElementById('sheet-refresh').textContent = newer ? '有新訊息 · 重新整理內容' : '重新整理內容';
+      setRefreshLabel(newer);
     }
     function renderSummary(counts) {
       document.getElementById('summary').innerHTML = [
@@ -2341,7 +2576,57 @@
     // Line wraps change when the web font arrives or the window resizes, so the clipped marks must follow.
     window.addEventListener('resize', markClippedPreviews);
     if (document.fonts) document.fonts.addEventListener('loadingdone', markClippedPreviews);
+    document.getElementById('sheet-env').addEventListener('click', (event) => {
+      const toggle = event.target.closest('[data-toggle-path]');
+      if (!toggle) return;
+      sheetPathOpen = !sheetPathOpen;
+      toggle.setAttribute('aria-expanded', String(sheetPathOpen));
+      document.getElementById('sheet-path').hidden = !sheetPathOpen;
+    });
+    let drag = null;
+    function resetDrag() {
+      drag = null;
+      const panel = document.getElementById('sheet-panel');
+      if (!panel.style) return;
+      panel.style.transform = '';
+      panel.classList.remove('dragging');
+    }
+    // Swipe the handle or header down to dismiss; anything that starts on a button stays that button's.
+    const dragZone = document.getElementById('sheet-drag');
+    dragZone.addEventListener('pointerdown', (event) => {
+      // Touch and pen only: with a mouse a downward text selection or a right-click would dismiss the sheet.
+      if (event.pointerType === 'mouse' || event.isPrimary === false || event.target.closest('button')) return;
+      drag = { y: event.clientY, at: performance.now(), id: event.pointerId };
+      if (event.currentTarget && event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId);
+      document.getElementById('sheet-panel').classList.add('dragging');
+    });
+    dragZone.addEventListener('pointermove', (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      document.getElementById('sheet-panel').style.transform = `translateY(${Math.max(0, event.clientY - drag.y)}px)`;
+    });
+    function endDrag(event) {
+      if (!drag || event.pointerId !== drag.id) return;
+      const outcome = dragOutcome(event.clientY - drag.y, performance.now() - drag.at);
+      resetDrag();
+      if (outcome === 'dismiss') closeSheet();
+    }
+    dragZone.addEventListener('pointerup', endDrag);
+    dragZone.addEventListener('pointercancel', resetDrag);
+    dragZone.addEventListener('lostpointercapture', resetDrag);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', applyViewport);
+      window.visualViewport.addEventListener('scroll', applyViewport);
+    }
     document.getElementById('sheet-preview').addEventListener('click', (event) => {
+      const fold = event.target.closest('[data-earlier]');
+      if (fold) {
+        // In place, not a re-render: replacing the button would drop keyboard focus.
+        sheetEarlierOpen = !sheetEarlierOpen;
+        fold.setAttribute('aria-expanded', String(sheetEarlierOpen));
+        if (fold.nextElementSibling) fold.nextElementSibling.hidden = !sheetEarlierOpen;
+        markClippedPreviews();
+        return;
+      }
       if (event.target.closest('a[href]')) return;
       const picked = typeof window.getSelection === 'function' ? String(window.getSelection()) : '';
       if (picked.trim()) return;
@@ -2404,6 +2689,9 @@
         status.textContent = '已貼上';
         document.getElementById('sheet-text').value = '';
         clearAttachments();
+        sentAt.set(agentKey(agent), Date.now());
+        refresh();
+        setTimeout(refresh, 1500);
         setTimeout(closeSheet, 280);
       } catch (e) {
         status.className = 'sheet-feedback bad';

@@ -445,7 +445,7 @@ test('polling keeps open sheet content and metadata stable until explicit refres
   assert.match(ui.elements.get('sheet-preview').innerHTML, /full result 1/);
   assert.equal(ui.elements.get('sheet-reason').textContent, 'first reason');
   assert.match(ui.elements.get('sheet-env').innerHTML, /first branch/);
-  assert.match(ui.elements.get('sheet-refresh').textContent, /有新訊息/);
+  assert.match(ui.elements.get('sheet-refresh-label').textContent, /有新訊息/);
   ui.refreshPreview();
   await settle();
   assert.equal(previews, 2);
@@ -786,7 +786,7 @@ function readerSetup({ message, startHash = '', clipboard, storage } = {}) {
   const el = id => ui.elements.get(id);
   const line = (role, index) => ({ dataset: { role, index: String(index) } });
   const tap = (role, index, extra = {}) => el('sheet-preview').listeners.click({
-    target: { closest: selector => selector === 'a[href]' ? (extra.link ? {} : null) : line(role, index) },
+    target: { closest: selector => selector === 'a[href]' ? (extra.link ? {} : null) : selector === '.preview-line[data-role]' ? line(role, index) : null },
   });
   const settle = async () => { await flush(); await flush(); };
   const messages = () => calls.filter(call => call.url === '/api/message');
@@ -1428,4 +1428,407 @@ test('a hub version that is not a commit hash never produces a command', () => {
   const ui = dashboard();
   ui.render({ version: 'abc; rm -rf ~', agents: [], hosts: hostRows({ name: 'lab', ok: true, source: 'peer', version: 'ffffffffffff' }) });
   assert.equal(ui.elements.get('update-hint').hidden, true);
+});
+
+
+// ---- sheet redesign
+
+function sheetAgent(extra = {}) {
+  return { ...agent('lab', 'IDLE'), project: 'demo', cli: 'claude', branch: 'main', dirty: true, path: '/work/demo',
+    age: '2m', reason: '已完成，尚未查看', ...extra };
+}
+
+test('the sheet header carries the CLI badge and keeps branch, dirty flag and age in one meta row', () => {
+  const ui = dashboard();
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  assert.match(ui.elements.get('sheet-cli').innerHTML, /class="cli claude"/);
+  const env = ui.elements.get('sheet-env');
+  assert.equal(env.hidden, false);
+  assert.match(env.innerHTML, /class="branch">main</);
+  assert.match(env.innerHTML, /class="dirty">dirty</);
+  assert.match(env.innerHTML, />2m</);
+  assert.doesNotMatch(env.innerHTML, /\/work\/demo/, 'the path stays out of the way until asked for');
+  assert.equal(ui.elements.get('sheet-path').textContent, '/work/demo');
+  assert.equal(ui.elements.get('sheet-path').hidden, true);
+});
+
+test('the path toggle shows and hides the path, and a new session starts collapsed', () => {
+  const ui = dashboard();
+  const a = sheetAgent();
+  const b = sheetAgent({ pane: '%2', pid: '2', project: 'other', path: '/work/other' });
+  ui.render({ agents: [a, b] });
+  ui.open(a);
+  const attrs = {};
+  const button = { setAttribute: (k, v) => { attrs[k] = v; } };
+  const tap = () => ui.elements.get('sheet-env').listeners.click({ target: { closest: s => (s === '[data-toggle-path]' ? button : null) } });
+  tap();
+  assert.equal(ui.elements.get('sheet-path').hidden, false);
+  assert.equal(attrs['aria-expanded'], 'true');
+  tap();
+  assert.equal(ui.elements.get('sheet-path').hidden, true);
+  tap();
+  ui.close();
+  ui.open(b);
+  assert.equal(ui.elements.get('sheet-path').hidden, true);
+  assert.equal(ui.elements.get('sheet-path').textContent, '/work/other');
+});
+
+const FULL = { ok: true, revision: 3, viewable: false,
+  preview: { users: ['first ask', 'second ask', 'latest ask'], agent: 'the result' } };
+
+async function sheetWith(preview = FULL) {
+  const ui = dashboard(async url => response(url === '/api/preview' ? preview : { ok: true }));
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  await settle();
+  return { ui, html: () => ui.elements.get('sheet-preview').innerHTML };
+}
+
+test('older prompts fold into one line, the latest prompt and the result stay in order, indices are kept', async () => {
+  const { html } = await sheetWith();
+  const h = html();
+  assert.match(h, /data-earlier[^>]*aria-expanded="false">較早的 2 則訊息</);
+  assert.match(h, /class="earlier" hidden>[\s\S]*data-index="0"[\s\S]*data-index="1"[\s\S]*<\/div>/);
+  assert.ok(h.indexOf('data-index="1"') < h.indexOf('latest ask'), 'earlier ones come first');
+  assert.ok(h.indexOf('latest ask') < h.indexOf('the result'), 'the result stays after the prompt it answers');
+  assert.match(h, /data-role="user" data-index="2"/);
+  assert.match(h, /data-role="agent" data-index="0"/);
+  assert.doesNotMatch(h.slice(0, h.indexOf('class="earlier"')), /first ask/);
+});
+
+test('a single prompt has no fold; expanding the fold works in place, survives a refresh, and resets for the next session', async () => {
+  const one = await sheetWith({ ok: true, revision: 1, viewable: false, preview: { users: ['only'], agent: 'r' } });
+  assert.doesNotMatch(one.html(), /earlier/);
+  const { ui, html } = await sheetWith();
+  const attrs = {};
+  const panel = { hidden: true };
+  const toggle = { setAttribute: (k, v) => { attrs[k] = v; }, nextElementSibling: panel };
+  const tapFold = () => ui.elements.get('sheet-preview').listeners.click({
+    target: { closest: s => (s === '[data-earlier]' ? toggle : null) } });
+  const before = html();
+  await tapFold();
+  assert.equal(html(), before, 'no re-render: replacing the button would drop keyboard focus');
+  assert.equal(attrs['aria-expanded'], 'true');
+  assert.equal(panel.hidden, false);
+  ui.refreshPreview();
+  await settle();
+  assert.doesNotMatch(html(), /class="earlier" hidden/, 'a refresh must not re-collapse what the user opened');
+  await tapFold();
+  assert.equal(panel.hidden, true);
+  await tapFold();
+  ui.close();
+  const other = sheetAgent({ pane: '%2', pid: '2', project: 'other' });
+  ui.render({ agents: [sheetAgent(), other] });
+  ui.open(other);
+  await settle();
+  assert.match(html(), /class="earlier" hidden/, 'a different session starts folded');
+});
+
+test('the refresh control is an icon whose label only shows when something newer exists', () => {
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /<button[^>]*id="sheet-refresh"[^>]*>[\s\S]*?<span class="refresh-label sr-only" id="sheet-refresh-label">重新整理內容<\/span>/);
+  assert.doesNotMatch(html, /class="host-pill" id="sheet-refresh"/);
+});
+
+test('the loading bar shows while the full preview loads and is gone afterwards, even on failure', async () => {
+  for (const fail of [false, true]) {
+    const ui = dashboard(async url => { if (fail && url === '/api/preview') throw new Error('offline'); return response(url === '/api/preview' ? FULL : { ok: true }); });
+    const a = sheetAgent();
+    ui.render({ agents: [a] });
+    ui.open(a);
+    assert.equal(ui.elements.get('sheet-progress').hidden, false);
+    await settle();
+    assert.equal(ui.elements.get('sheet-progress').hidden, true);
+  }
+});
+
+test('while the sheet is open the page behind it is inert, and it is released on close', () => {
+  const wrap = { inert: false };
+  const ui = dashboard({ document: { querySelector: s => (s === '.wrap' ? wrap : null) } });
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  assert.equal(wrap.inert, true);
+  ui.close();
+  assert.equal(wrap.inert, false);
+});
+
+test('the keyboard shrinks the sheet root to the visible area and compacts the header', () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(dashboard().context.viewportMetrics({ height: 430, offsetTop: 0 }, 844))),
+    { height: 430, top: 0, keyboard: true });
+  assert.equal(dashboard().context.viewportMetrics({ height: 820, offsetTop: 0 }, 844).keyboard, false, 'browser chrome is not a keyboard');
+  const calls = {};
+  const classes = {};
+  const listeners = {};
+  const ui = dashboard({ window: { visualViewport: { height: 844, offsetTop: 0, addEventListener: (t, fn) => { listeners[t] = fn; } }, innerHeight: 844 } });
+  const root = ui.elements.get('sheet-root');
+  root.style = { setProperty: (k, v) => { calls[k] = v; } };
+  root.classList = { add() {}, remove() {}, toggle: (c, on) => { classes[c] = on; } };
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  ui.context.window.visualViewport.height = 430;
+  listeners.resize();
+  assert.equal(calls['--vv-h'], '430px');
+  assert.equal(classes['kb-open'], true);
+  ui.context.window.visualViewport.height = 844;
+  listeners.resize();
+  assert.equal(classes['kb-open'], false);
+});
+
+test('dragging the header down dismisses the sheet; a short drag springs back', () => {
+  const { dragOutcome } = dashboard().context;
+  assert.equal(dragOutcome(120, 600), 'dismiss');
+  assert.equal(dragOutcome(60, 80), 'dismiss', 'a quick flick');
+  assert.equal(dragOutcome(60, 900), 'back');
+  assert.equal(dragOutcome(-50, 100), 'back');
+  const ui = dashboard();
+  const style = {};
+  const panel = ui.elements.get('sheet-panel');
+  panel.style = style;
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  const drag = ui.elements.get('sheet-drag');
+  const at = (y, extra = {}) => ({ clientY: y, pointerId: 1, target: { closest: () => null }, currentTarget: { setPointerCapture() {} }, ...extra });
+  drag.listeners.pointerdown(at(100));
+  ui.setNow(100); drag.listeners.pointermove(at(150));
+  assert.equal(style.transform, 'translateY(50px)');
+  ui.setNow(900); drag.listeners.pointerup(at(150));
+  assert.equal(ui.elements.get('sheet-root').hidden, false);
+  assert.equal(style.transform, '');
+  drag.listeners.pointerdown(at(100));
+  ui.setNow(1000); drag.listeners.pointermove(at(260));
+  ui.setNow(1100); drag.listeners.pointerup(at(260));
+  assert.equal(ui.elements.get('sheet-root').hidden, true);
+});
+
+test('a drag that starts on a button is left to the button', () => {
+  const ui = dashboard();
+  ui.elements.get('sheet-panel').style = {};
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  const drag = ui.elements.get('sheet-drag');
+  drag.listeners.pointerdown({ clientY: 0, pointerId: 1, target: { closest: s => (s === 'button' ? {} : null) }, currentTarget: { setPointerCapture() {} } });
+  drag.listeners.pointermove({ clientY: 300, pointerId: 1 });
+  drag.listeners.pointerup({ clientY: 300, pointerId: 1 });
+  assert.equal(ui.elements.get('sheet-root').hidden, false);
+});
+
+test('after a send the card says so until the agent shows as running or eight seconds pass', async () => {
+  const clock = { now: 5_000_000 };
+  const FakeDate = class extends Date { static now() { return clock.now; } };
+  const ui = dashboard({ globals: { Date: FakeDate }, fetchRequest: async url => response(url === '/api/preview' ? FULL : { ok: true }) });
+  const a = sheetAgent({ state: 'WAIT', pending: true, category: 'wait' });
+  ui.render({ agents: [a] });
+  ui.open(a);
+  await settle();
+  ui.elements.get('sheet-text').value = 'go ahead';
+  await ui.elements.get('sheet-form').listeners.submit({ preventDefault() {} });
+  const list = () => { ui.render({ agents: [a] }); return ui.elements.get('list').innerHTML; };
+  assert.match(list(), /class="sent-tag">已送出/);
+  assert.doesNotMatch((ui.render({ agents: [{ ...a, state: 'RUNNING', category: 'running', pending: false }] }), ui.elements.get('list').innerHTML), /sent-tag/);
+  clock.now += 9000;
+  assert.doesNotMatch(list(), /sent-tag/);
+});
+
+
+// ---- review hardening
+
+function stubSheetChrome(ui) {
+  const log = { props: {}, removed: [], classes: {}, transform: [] };
+  const root = ui.elements.get('sheet-root');
+  root.style = { setProperty: (k, v) => { log.props[k] = v; }, removeProperty: k => { log.removed.push(k); } };
+  root.classList = { add: c => { log.classes[c] = true; }, remove: c => { log.classes[c] = false; }, toggle: (c, on) => { log.classes[c] = on; } };
+  const panel = ui.elements.get('sheet-panel');
+  panel.style = { set transform(v) { log.transform.push(v); }, get transform() { return log.transform.at(-1); } };
+  return log;
+}
+
+test('closing the sheet clears everything it set: viewport vars, keyboard class, drag offset, loading bar, inert', () => {
+  const wrap = { inert: false };
+  const vv = { height: 430, offsetTop: 12, scale: 1, addEventListener() {} };
+  const ui = dashboard({ window: { visualViewport: vv, innerHeight: 844 }, document: { querySelector: s => (s === '.wrap' ? wrap : null) } });
+  const log = stubSheetChrome(ui);
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  assert.deepEqual([log.props['--vv-h'], log.props['--vv-top'], log.classes['kb-open']], ['430px', '12px', true],
+    'the viewport is applied on open, without waiting for an event');
+  ui.close();
+  assert.deepEqual(log.removed.sort(), ['--vv-h', '--vv-top']);
+  assert.equal(log.classes['kb-open'], false);
+  assert.equal(log.transform.at(-1), '');
+  assert.equal(ui.elements.get('sheet-progress').hidden, true);
+  assert.equal(wrap.inert, false);
+});
+
+test('visualViewport scroll as well as resize re-applies the viewport, and the top offset is used', () => {
+  const listeners = {};
+  const vv = { height: 500, offsetTop: 0, scale: 1, addEventListener: (t, fn) => { listeners[t] = fn; } };
+  const ui = dashboard({ window: { visualViewport: vv, innerHeight: 500 } });
+  const log = stubSheetChrome(ui);
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  vv.offsetTop = 40;
+  listeners.scroll();
+  assert.equal(log.props['--vv-top'], '40px');
+  assert.equal(typeof listeners.resize, 'function');
+});
+
+test('a pinch-zoomed page is not mistaken for a keyboard', () => {
+  const { viewportMetrics } = dashboard().context;
+  assert.equal(viewportMetrics({ height: 430, offsetTop: 0, scale: 1 }, 844).keyboard, true);
+  assert.equal(viewportMetrics({ height: 430, offsetTop: 0, scale: 2 }, 844).keyboard, false);
+});
+
+test('drag handling ignores the mouse, a second finger and anything after the pointer is lost', () => {
+  const ui = dashboard();
+  const log = stubSheetChrome(ui);
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  const drag = ui.elements.get('sheet-drag');
+  const ev = (y, extra = {}) => ({ clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true,
+    target: { closest: () => null }, currentTarget: { setPointerCapture() {} }, ...extra });
+  drag.listeners.pointerdown(ev(0, { pointerType: 'mouse' }));
+  drag.listeners.pointermove(ev(300, { pointerType: 'mouse' }));
+  drag.listeners.pointerup(ev(300, { pointerType: 'mouse' }));
+  assert.equal(ui.elements.get('sheet-root').hidden, false, 'a mouse selection must not dismiss');
+  drag.listeners.pointerdown(ev(0, { isPrimary: false }));
+  drag.listeners.pointerup(ev(300));
+  assert.equal(ui.elements.get('sheet-root').hidden, false);
+  drag.listeners.pointerdown(ev(0));
+  drag.listeners.pointermove(ev(50, { pointerId: 2 }));
+  assert.equal(log.transform.includes('translateY(50px)'), false, 'another pointer cannot move the sheet');
+  drag.listeners.pointerup(ev(300, { pointerId: 2 }));
+  assert.equal(ui.elements.get('sheet-root').hidden, false, 'another pointer cannot move or finish this drag');
+  drag.listeners.lostpointercapture();
+  drag.listeners.pointermove(ev(300));
+  assert.equal(log.transform.at(-1), '', 'after the capture is lost nothing follows the pointer');
+  drag.listeners.pointerdown(ev(0));
+  drag.listeners.pointercancel();
+  drag.listeners.pointerup(ev(300));
+  assert.equal(ui.elements.get('sheet-root').hidden, false);
+});
+
+test('the pointer is captured so a drag keeps following the finger outside the header', () => {
+  const ui = dashboard();
+  stubSheetChrome(ui);
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  let captured = 0;
+  ui.elements.get('sheet-drag').listeners.pointerdown({ clientY: 0, pointerId: 1, pointerType: 'touch', isPrimary: true,
+    target: { closest: () => null }, currentTarget: { setPointerCapture: () => { captured += 1; } } });
+  assert.equal(captured, 1);
+});
+
+test('the reader makes the sheet beneath it inert and gives it back when it closes', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  assert.notEqual(t.el('sheet-root').inert, true);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(t.el('sheet-root').inert, true);
+  await t.el('reader-back').listeners.click();
+  await t.settle();
+  assert.equal(t.el('sheet-root').inert, false);
+});
+
+test('a send schedules the immediate refresh follow-up and the close, and the tag lasts exactly eight seconds', async () => {
+  const clock = { now: 5_000_000 };
+  const FakeDate = class extends Date { static now() { return clock.now; } };
+  const delays = [];
+  const ui = dashboard({ globals: { Date: FakeDate, setTimeout: (fn, ms) => { delays.push(ms); } },
+    fetchRequest: async url => response(url === '/api/preview' ? FULL : { ok: true }) });
+  const a = sheetAgent({ state: 'WAIT', pending: true, category: 'wait' });
+  ui.render({ agents: [a] });
+  ui.open(a);
+  await settle();
+  ui.elements.get('sheet-text').value = 'go';
+  await ui.elements.get('sheet-form').listeners.submit({ preventDefault() {} });
+  assert.deepEqual(delays.filter(ms => ms === 280 || ms === 1500).sort((x, y) => x - y), [280, 1500]);
+  const tagged = () => { ui.render({ agents: [a] }); return /sent-tag/.test(ui.elements.get('list').innerHTML); };
+  clock.now += 7999;
+  assert.equal(tagged(), true);
+  clock.now += 2;
+  assert.equal(tagged(), false);
+});
+
+test('once the agent has been seen running, a quick finish does not bring the sent tag back', async () => {
+  const clock = { now: 9_000_000 };
+  const FakeDate = class extends Date { static now() { return clock.now; } };
+  const ui = dashboard({ globals: { Date: FakeDate }, fetchRequest: async url => response(url === '/api/preview' ? FULL : { ok: true }) });
+  const wait = sheetAgent({ state: 'WAIT', pending: true, category: 'wait' });
+  ui.render({ agents: [wait] });
+  ui.open(wait);
+  await settle();
+  await ui.elements.get('sheet-form').listeners.submit({ preventDefault() {} });
+  ui.render({ agents: [{ ...wait, state: 'RUNNING', pending: false, category: 'running' }] });
+  clock.now += 3000;
+  ui.render({ agents: [{ ...wait, state: 'IDLE', pending: false, category: 'review', needs_review: true, revision: 2, acknowledged: 1 }] });
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /sent-tag/);
+});
+
+test('long latest prompts are measured for the fade once the sheet is visible, not only while it is still hidden', () => {
+  const seen = [];
+  const doc = { querySelectorAll: selector => { seen.push([selector, ui.elements.get('sheet-root').hidden]); return []; } };
+  const ui = dashboard({ document: doc, fetchRequest: async () => new Promise(() => {}) });
+  ui.elements.get('sheet-root').hidden = true; // as in the real page: closed sheets are display:none
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  seen.length = 0;
+  ui.open(a);
+  const sheetCalls = seen.filter(([selector]) => selector.includes('.sheet-preview .preview-line.user'));
+  assert.equal(sheetCalls[0][1], true, 'the first render happens before the sheet is shown');
+  assert.equal(sheetCalls.some(([, hidden]) => hidden === false), true, 'and it is measured again once visible');
+});
+
+test('the path toggle state is reflected in the markup after a refresh, and a stale fresh-label is reset on open', async () => {
+  const { ui } = await sheetWith();
+  const attrs = {};
+  const button = { setAttribute: (k, v) => { attrs[k] = v; } };
+  ui.elements.get('sheet-env').listeners.click({ target: { closest: s => (s === '[data-toggle-path]' ? button : null) } });
+  ui.refreshPreview();
+  await settle();
+  assert.match(ui.elements.get('sheet-env').innerHTML, /data-toggle-path aria-expanded="true"/);
+  ui.elements.get('sheet-refresh-label').textContent = '有新訊息';
+  ui.close();
+  ui.open(sheetAgent());
+  assert.equal(ui.elements.get('sheet-refresh-label').textContent, '重新整理內容');
+  assert.match(ui.elements.get('sheet-env').innerHTML, /data-toggle-path aria-expanded="false"/);
+});
+
+test('the refresh button keeps the verb in its accessible name while it shows only 有新訊息', () => {
+  const attrs = {};
+  const ui = dashboard();
+  const button = ui.elements.get('sheet-refresh');
+  button.setAttribute = (k, v) => { attrs[k] = v; };
+  button.classList = { toggle() {}, add() {}, remove() {} };
+  ui.context.setRefreshLabel(true);
+  assert.equal(ui.elements.get('sheet-refresh-label').textContent, '有新訊息');
+  assert.match(attrs['aria-label'], /重新整理/);
+});
+
+test('closing the sheet hands focus back to the card that opened it', () => {
+  const focused = [];
+  const a = sheetAgent();
+  const ui = dashboard({ document: { querySelector: s => (s.includes('.card-open') ? { focus: () => focused.push(s) } : null) } });
+  ui.render({ agents: [a] });
+  ui.open(a);
+  ui.close();
+  assert.equal(focused.length, 1);
+  assert.match(focused[0], /lab\|%1\|123/);
+});
+
+test('the transcript cannot chain scrolling into the page, and motion respects reduced-motion', () => {
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /\.sheet-preview \{[^}]*overscroll-behavior: contain/);
+  assert.match(html, /@media \(prefers-reduced-motion: no-preference\) \{\s*\.sheet \{ transition/);
 });
