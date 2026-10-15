@@ -1549,6 +1549,10 @@
     let routeSettled = false;
     const readerSigs = new Map();
     const READER_SIG_STORE = 'attn.readerSigs';
+    // Only the current sheet snapshot is cached (at most three prompts and one reply).
+    const readerMessages = new Map();
+    const replyDrafts = new Map();
+    const DRAFT_STORE_PREFIX = 'attn.replyDraft.';
     const MAX_ATTACHMENTS = 4;
     const MAX_IMAGE_EDGE = 2048;
     const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
@@ -1560,6 +1564,25 @@
 
     function agentKey(a) {
       return [a.host || '', a.pane || '', a.pid || ''].join('|');
+    }
+    function saveReplyDraft(key, text) {
+      if (!key) return;
+      replyDrafts.set(key, text);
+      try {
+        if (text) localStorage.setItem(DRAFT_STORE_PREFIX + key, text);
+        else localStorage.removeItem(DRAFT_STORE_PREFIX + key);
+      } catch (_) { /* Keep drafts in memory when browser storage is unavailable. */ }
+    }
+    function readReplyDraft(key) {
+      if (replyDrafts.has(key)) return replyDrafts.get(key);
+      try {
+        return localStorage.getItem(DRAFT_STORE_PREFIX + key) || '';
+      } catch (_) {
+        return replyDrafts.get(key) || '';
+      }
+    }
+    function saveCurrentReplyDraft() {
+      if (sheetOpen) saveReplyDraft(selectedKey, document.getElementById('sheet-text').value);
     }
     // Both commands pin the deployed code to the hub's own commit, so a peer converges on the hub, not on main.
     const updateCommand = hub => `tmux-attn update --ref ${hub}`;
@@ -1852,6 +1875,7 @@
     }
     function closeSheet() {
       const openedFrom = selectedKey;
+      saveCurrentReplyDraft();
       closeReader();
       clearAttachments();
       sheetOpen = false;
@@ -1866,6 +1890,7 @@
       sheetPreviewRevision = 0;
       sheetPreviewData = { users: [], agent: '' };
       sheetPreviewToken += 1;
+      readerMessages.clear();
       document.getElementById('sheet-root').hidden = true;
       document.body.classList.remove('sheet-open');
       document.getElementById('sheet-text').value = '';
@@ -2072,28 +2097,73 @@
       else if (data.truncated) note = `<p class="reader-note">內容過長，僅顯示前 ${text.length} 字（共 ${Number(data.chars) || 0} 字）。</p>`;
       return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text)}</div></div>${note}`;
     }
+    function readerSnapshot(route, sig) {
+      if (!sheetOpen || !sheetPreviewFull || sheetPreviewKey !== agentKey(route) || !sig) return null;
+      const text = route.role === 'agent' ? sheetPreviewData.agent : sheetPreviewData.users[route.index];
+      if (!text || Array.from(text).slice(0, READER_SIG_CHARS).join('') !== sig) return null;
+      const current = latestAgents.find(a => agentKey(a) === sheetPreviewKey && a.tracked);
+      const newer = current && (sheetPreviewRevision
+        ? (current.revision || 0) > sheetPreviewRevision
+        : (current.updated || 0) > sheetPreviewUpdated);
+      return { text, key: newer ? null : JSON.stringify([sheetPreviewToken, readerHashFor(route, route.role, route.index), sig]) };
+    }
+    function requestReaderMessage(route, sig, snapshot) {
+      const key = snapshot && snapshot.key;
+      if (key && readerMessages.has(key)) return readerMessages.get(key);
+      const entry = { data: null, promise: null };
+      if (key) readerMessages.set(key, entry);
+      const forget = () => {
+        if (key && readerMessages.get(key) === entry) readerMessages.delete(key);
+      };
+      entry.promise = (async () => {
+        try {
+          const res = await fetch('/api/message', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host: route.host, pane: route.pane, pid: route.pid, role: route.role, index: route.index, sig }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+          entry.data = data;
+          if (data.partial) forget(); // A hook fallback may become complete without a new revision.
+          return data;
+        } catch (error) {
+          forget();
+          throw error;
+        }
+      })();
+      return entry;
+    }
+    function prefetchReaderReply(agent) {
+      if (readerOpen || document.visibilityState === 'hidden' || !sheetPreviewData.agent) return;
+      const route = { host: agent.host || '', pane: agent.pane, pid: agent.pid, role: 'agent', index: 0 };
+      const sig = Array.from(sheetPreviewData.agent).slice(0, READER_SIG_CHARS).join('');
+      const snapshot = readerSnapshot(route, sig);
+      if (snapshot && snapshot.key) requestReaderMessage(route, sig, snapshot).promise.catch(() => {});
+    }
     async function loadReaderMessage(agent, route, sig) {
       const token = ++readerToken;
       const body = document.getElementById('reader-body');
       const copy = document.getElementById('reader-copy');
       readerText = '';
       copy.disabled = true;
-      body.innerHTML = '<p class="reader-loading" role="status">載入中…</p>';
+      const snapshot = readerSnapshot(route, sig);
+      body.setAttribute('aria-busy', 'true');
+      body.innerHTML = snapshot
+        ? readerBodyHtml(snapshot.text, {}) + '<p class="reader-loading" role="status">載入全文中…</p>'
+        : '<p class="reader-loading" role="status">載入中…</p>';
       const failed = (error) => {
         if (token !== readerToken || !readerOpen) return;
+        body.setAttribute('aria-busy', 'false');
         body.innerHTML = readerErrorHtml(error, route.role);
       };
       try {
-        const res = await fetch('/api/message', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: route.host, pane: route.pane, pid: route.pid, role: route.role, index: route.index, sig }),
-        });
-        const data = await res.json();
+        const entry = requestReaderMessage(route, sig, snapshot);
+        const data = entry.data || await entry.promise;
         if (token !== readerToken || !readerOpen) return;
-        if (!res.ok || !data.ok) return failed(data && data.error);
         readerText = String(data.text);
         copy.disabled = false;
+        body.setAttribute('aria-busy', 'false');
         body.innerHTML = readerBodyHtml(readerText, data);
         document.getElementById('reader-sub').textContent =
           `${agent.project || agent.window || '未命名專案'} · ${Number(data.chars) || 0} 字`;
@@ -2239,6 +2309,7 @@
         reason: agent.state === 'IDLE' ? agent.reason : '已完成，已查看' });
     }
     async function loadSheetPreview(agent) {
+      readerMessages.clear();
       const key = agentKey(agent);
       if (sheetPreviewKey !== key || !sheetPreviewFull) {
         renderSheetPreview(agent.preview, false);
@@ -2272,7 +2343,9 @@
         sheetPreviewKey = key;
         sheetPreviewUpdated = agent.updated || 0;
         sheetPreviewRevision = data.revision || 0;
+        readerMessages.clear();
         setRefreshLabel(false);
+        prefetchReaderReply(agent);
         if (data.viewable === false && category(agent) === 'review' && isUnread(agent)) {
           const status = document.getElementById('sheet-status');
           if (!status.textContent) {
@@ -2345,8 +2418,9 @@
       if (refreshPreview) loadSheetPreview(agent);
     }
     function openSheet(agent) {
+      saveCurrentReplyDraft();
       clearAttachments();
-      if (agentKey(agent) !== selectedKey) document.getElementById('sheet-text').value = '';
+      if (agentKey(agent) !== selectedKey) document.getElementById('sheet-text').value = readReplyDraft(agentKey(agent));
       selectedKey = agentKey(agent);
       sheetOpen = true;
       sheetPreviewKey = '';
@@ -2381,6 +2455,7 @@
       const newer = sheetPreviewFull && (sheetPreviewRevision
         ? (agent.revision || 0) > sheetPreviewRevision
         : (agent.updated || 0) > sheetPreviewUpdated);
+      if (newer) readerMessages.clear();
       setRefreshLabel(newer);
     }
     function renderSummary(counts) {
@@ -2645,6 +2720,8 @@
     });
     document.getElementById('reader-back').addEventListener('click', closeReader);
     document.getElementById('reader-copy').addEventListener('click', copyReaderText);
+    document.getElementById('sheet-text').addEventListener('input', saveCurrentReplyDraft);
+    window.addEventListener('pagehide', saveCurrentReplyDraft);
     document.getElementById('reader-body').addEventListener('click', (event) => {
       if (!event.target.closest('[data-retry]')) return;
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
@@ -2671,6 +2748,7 @@
       const text = document.getElementById('sheet-text').value;
       if (!agent || button.disabled) return;
       const targetKey = agentKey(agent);
+      saveReplyDraft(targetKey, text);
       if (attachments.some(item => item.status === 'uploading')) {
         setSheetStatus(UPLOADING_NOTICE);
         return;
@@ -2694,11 +2772,15 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
-        if (!sheetOpen || selectedKey !== targetKey) return;
+        if (!sheetOpen || selectedKey !== targetKey) {
+          if (readReplyDraft(targetKey) === text) saveReplyDraft(targetKey, '');
+          return;
+        }
         status.className = 'sheet-feedback ok';
         status.textContent = '已貼上';
         const input = document.getElementById('sheet-text');
         if (input.value === text) input.value = '';
+        saveReplyDraft(targetKey, input.value);
         clearAttachments();
         sentAt.set(agentKey(agent), Date.now());
         refresh();
