@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 from attention import VIEW_HOOKS, VIEW_HOOK_INDEX, view_hooks_config
+import update
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--sidebar',action='store_true',help='Use the previous persistent sidebar instead of popup')
@@ -93,6 +94,7 @@ paths.extend([
     DEST/'contrib/systemd/tmux-attn-web.service',
     DEST/'contrib/launchd/ai.tmux-attn.web.plist',
 ])
+paths.append(DEST/'INSTALL.json')
 manifest = []
 for i, p in enumerate(paths):
     copy = BACKUP / str(i)
@@ -155,6 +157,11 @@ for unit in ['contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-a
         dest = DEST / unit
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
+# Lets `tmux-attn update` find this checkout and lets the panel report which version is installed.
+try:
+    update.record_install(DEST, ROOT)
+except Exception as error:  # a missing version record must never abort an install
+    print('note: version not recorded:', error, file=sys.stderr)
 paths[6].parent.mkdir(parents=True, exist_ok=True)
 paths[6].write_text('#!/bin/sh\nif [ "$#" -eq 0 ]; then set -- popup; fi\nexec '+shlex.join([python,str(app)])+' "$@"\n')
 paths[6].chmod(0o755)

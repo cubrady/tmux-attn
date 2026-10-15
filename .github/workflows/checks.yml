@@ -37,7 +37,7 @@ jobs:
       - name: Python static checks
         run: ruff check --select F .
       - name: Shell checks
-        run: shellcheck bootstrap.sh install.sh install_web_service.sh
+        run: shellcheck bootstrap.sh install.sh install_web_service.sh update.sh
       - name: Python tests
         run: python -m unittest discover -v
       - name: Dashboard tests
