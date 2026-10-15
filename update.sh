@@ -43,7 +43,7 @@ main() {
     fi
 
     is_checkout() {
-        [ -e "$1/.git" ] && [ -f "$1/update.py" ]
+        [ -e "$1/.git" ]
     }
 
     src="${TMUX_ATTN_SRC:-}"
@@ -73,10 +73,24 @@ main() {
         fi
     fi
 
-    if [ -n "${TMUX_ATTN_REF:-}" ]; then
-        exec "$python" "$src/update.py" --src "$src" --ref "$TMUX_ATTN_REF" "$@"
+    updater="$src/update.py"
+    borrowed=''
+    if [ ! -f "$updater" ]; then
+        # A checkout older than update.py: run the copy from the commit we are moving to, and leave the
+        # working tree alone until that updater has checked it for local changes.
+        default_ref='@{upstream}'
+        git -C "$src" fetch --quiet --tags
+        borrowed=$(mktemp)
+        trap 'rm -f "$borrowed"' EXIT
+        git -C "$src" show "${TMUX_ATTN_REF:-$default_ref}:update.py" > "$borrowed"
+        updater=$borrowed
     fi
-    exec "$python" "$src/update.py" --src "$src" "$@"
+    if [ -n "${TMUX_ATTN_REF:-}" ]; then
+        set -- --ref "$TMUX_ATTN_REF" "$@"
+    fi
+    status=0
+    "$python" "$updater" --src "$src" "$@" || status=$?
+    exit "$status"
 }
 
 main "$@"
