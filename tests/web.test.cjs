@@ -1033,25 +1033,27 @@ test('the reader contains the same composer and preserves the draft on back navi
   assert.equal(t.el('sheet-text').value, 'draft reply from the reader');
 });
 
-test('sending directly from the reader keeps the full message and route open', async () => {
+test('sending directly from the reader returns to the dashboard route', async () => {
   const t = readerSetup();
   await openSheetWithPreview(t);
   await t.tap('agent', 0);
   await t.settle();
-  const hash = t.browser.state.hash;
-  const message = t.el('reader-body').innerHTML;
   const timers = [];
   t.ui.context.setTimeout = (fn, ms) => timers.push({ fn, ms });
   t.el('sheet-text').value = 'reply in place';
   await t.el('sheet-form').listeners.submit(submitEvent());
+  await t.settle();
   assert.deepEqual(t.calls.find(call => call.url === '/api/send').body,
     { host: 'lab', pane: '%1', pid: '123', text: 'reply in place', submit: true, images: [] });
-  assert.equal(t.el('reader-root').hidden, false);
-  assert.equal(t.el('sheet-root').inert, true);
-  assert.equal(t.browser.state.hash, hash);
-  assert.equal(t.el('reader-body').innerHTML, message);
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.equal(t.el('sheet-root').hidden, true);
+  assert.equal(t.el('sheet-root').inert, false);
+  assert.equal(t.browser.state.hash, '');
+  assert.equal(t.browser.state.stack.length, 1);
+  assert.equal(t.el('sheet-form').parentNode, t.el('sheet-panel'));
   assert.equal(t.el('sheet-text').value, '');
-  assert.equal(t.el('sheet-status').textContent, '已貼上');
+  t.ui.render({ agents: [t.current] });
+  assert.match(t.el('list').innerHTML, /class="sent-tag">已送出/);
   assert.equal(timers.some(timer => timer.ms === 280), false);
   assert.equal(t.el('sheet-send').disabled, false);
 });
@@ -1088,7 +1090,9 @@ test('reader uploads and sends mixed attachments using the shared composer', asy
   const sent = t.calls.find(call => call.url === '/api/send').body;
   assert.deepEqual(sent.images, ['image.png']);
   assert.deepEqual(sent.files, ['document.txt']);
-  assert.equal(t.el('reader-root').hidden, false);
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.equal(t.el('sheet-root').hidden, true);
   assert.equal(t.el('sheet-attachments').hidden, true);
   assert.deepEqual(revoked, ['blob:image.png']);
 });
@@ -1108,9 +1112,10 @@ test('a failed reader send preserves the draft and can be retried in place', asy
   assert.equal(t.el('sheet-text').value, 'keep my reply');
   assert.equal(t.el('sheet-send').disabled, false);
   await t.el('sheet-form').listeners.submit(submitEvent());
+  await t.settle();
   assert.equal(attempts, 2);
-  assert.equal(t.el('sheet-status').textContent, '已貼上');
-  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('reader-root').hidden, true);
+  assert.equal(t.el('sheet-root').hidden, true);
 });
 
 test('typing the next draft during a reader send preserves the new text', async () => {
@@ -1131,18 +1136,20 @@ test('typing the next draft during a reader send preserves the new text', async 
   assert.equal(t.el('sheet-send').disabled, false);
 });
 
-test('opening the reader after a sheet send prevents its pending auto-close', async () => {
+test('opening another message after a successful sheet send is not closed by a delayed callback', async () => {
   const t = readerSetup();
   await openSheetWithPreview(t);
   const timers = [];
   t.ui.context.setTimeout = (fn, ms) => timers.push({ fn, ms });
   t.el('sheet-text').value = 'reply';
   await t.el('sheet-form').listeners.submit(submitEvent());
-  const closeTimer = timers.find(timer => timer.ms === 280);
-  assert.ok(closeTimer);
+  assert.equal(t.el('sheet-root').hidden, true);
+  assert.equal(timers.some(timer => timer.ms === 280), false);
+  t.ui.open(t.current);
+  await t.settle();
   await t.tap('agent', 0);
   await t.settle();
-  closeTimer.fn();
+  timers.forEach(timer => timer.fn());
   assert.equal(t.el('reader-root').hidden, false);
   assert.equal(t.el('sheet-form').parentNode, t.el('reader-compose'));
 });
@@ -1940,7 +1947,7 @@ test('the reader makes the sheet beneath it inert and gives it back when it clos
   assert.equal(t.el('sheet-root').inert, false);
 });
 
-test('a send schedules the immediate refresh follow-up and the close, and the tag lasts exactly eight seconds', async () => {
+test('a send closes the sheet immediately, schedules a refresh follow-up and tags the card for eight seconds', async () => {
   const clock = { now: 5_000_000 };
   const FakeDate = class extends Date { static now() { return clock.now; } };
   const delays = [];
@@ -1952,7 +1959,8 @@ test('a send schedules the immediate refresh follow-up and the close, and the ta
   await settle();
   ui.elements.get('sheet-text').value = 'go';
   await ui.elements.get('sheet-form').listeners.submit({ preventDefault() {} });
-  assert.deepEqual(delays.filter(ms => ms === 280 || ms === 1500).sort((x, y) => x - y), [280, 1500]);
+  assert.equal(ui.elements.get('sheet-root').hidden, true);
+  assert.deepEqual(delays.filter(ms => ms === 280 || ms === 1500), [1500]);
   const tagged = () => { ui.render({ agents: [a] }); return /sent-tag/.test(ui.elements.get('list').innerHTML); };
   clock.now += 7999;
   assert.equal(tagged(), true);
