@@ -2669,7 +2669,6 @@
       const status = document.getElementById('sheet-status');
       const button = document.getElementById('sheet-send');
       const text = document.getElementById('sheet-text').value;
-      const fromReader = readerOpen;
       if (!agent || button.disabled) return;
       const targetKey = agentKey(agent);
       if (attachments.some(item => item.status === 'uploading')) {
@@ -2704,10 +2703,7 @@
         sentAt.set(agentKey(agent), Date.now());
         refresh();
         setTimeout(refresh, 1500);
-        if (!fromReader) setTimeout(() => {
-          if (sheetOpen && selectedKey === targetKey && !readerOpen
-              && !document.getElementById('sheet-text').value && !attachments.length) closeSheet();
-        }, 280);
+        if (!input.value) closeSheet();
       } catch (e) {
         if (!sheetOpen || selectedKey !== targetKey) return;
         status.className = 'sheet-feedback bad';
