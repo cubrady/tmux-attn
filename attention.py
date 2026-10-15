@@ -1733,7 +1733,7 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
             _remember_fleet_host(cache_key, now, tagged, summary)
             agents.extend(tagged)
             summaries.append(summary)
-            hosts.append({'name': host, 'ok': True, 'source': 'local'})
+            hosts.append({'name': host, 'ok': True, 'source': 'local', 'version': install_version()})
         except Exception as exc:
             cached = _cached_fleet_host(cache_key, now, stale_ttl)
             host_row = {'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'}
@@ -1757,7 +1757,8 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
                     _remember_fleet_host(cache_key, now, tagged, summary)
                     agents.extend(tagged)
                     summaries.append(summary)
-                    hosts.append({'name': peer['name'], 'ok': True, 'source': 'peer', 'url': peer['url']})
+                    hosts.append({'name': peer['name'], 'ok': True, 'source': 'peer', 'url': peer['url'],
+                                  'version': str(payload.get('version') or '')})
                 except Exception as exc:
                     cached = _cached_fleet_host(cache_key, now, stale_ttl)
                     host_row = {
@@ -1778,6 +1779,7 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
         'summary': merge_summaries(summaries) if summaries else empty_summary(),
         'agents': agents,
         'hosts': hosts,
+        'version': install_version(),
     }
 
 
@@ -2119,6 +2121,41 @@ def prune_stale_panes(con, sock, live):
 
 def web_index_path():
     return ROOT / 'web' / 'index.html'
+
+
+def install_info():
+    """What update.py recorded when it last deployed here; {} for installs that predate it."""
+    try:
+        data = json.loads((ROOT / 'INSTALL.json').read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def install_version():
+    return str(install_info().get('version') or '')
+
+
+# What this process loaded. install_version() re-reads the file, so only this proves a restart picked up new code.
+STARTED_VERSION = install_version()
+
+
+def run_update(argv):
+    """`tmux-attn update ...` hands over to update.py in the checkout this install came from."""
+    source = os.environ.get('TMUX_ATTN_SRC') or str(install_info().get('source') or '')
+    for i, arg in enumerate(argv):
+        if arg == '--src' and i + 1 < len(argv):
+            source = argv[i + 1]
+        elif arg.startswith('--src='):
+            source = arg[len('--src='):]
+    updater = Path(source) / 'update.py' if source else None
+    if not updater or not updater.is_file():
+        where = f'{updater} is missing' if updater else 'this install has no recorded checkout'
+        sys.stderr.write(
+            f'tmux-attn update: {where}.\nRun it from a checkout: python3 <checkout>/update.py, '
+            'or bootstrap with: curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/update.sh | sh\n')
+        return 1
+    os.execv(sys.executable, [sys.executable, str(updater), *argv])
 
 
 def web_icon_path(name):
@@ -2470,13 +2507,15 @@ def make_web_handler(fleet_only=False):
                     'ok': True,
                     'fleet_only': fleet_only,
                     'peers': len(load_peers()),
+                    'version': install_version(),
+                    'started_version': STARTED_VERSION,
                 }), 'application/json; charset=utf-8')
                 return
             if path == '/api/agents':
                 # Machine-local feed only — peer scrapers must use this path.
                 try:
                     with closing(db()) as con:
-                        payload = agents_payload(con)
+                        payload = {**agents_payload(con), 'version': install_version()}
                     self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
                     sys.stderr.write(f'web /api/agents: {type(exc).__name__}: {exc}\n')
@@ -2588,6 +2627,8 @@ def ensure_sidebars(target=None):
 
 
 def main():
+    if sys.argv[1:2] == ['update']:
+        sys.exit(run_update(sys.argv[2:]))
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox','status-clickable','cycle','web','viewed','install-view-hooks'])
     parser.add_argument('args', nargs='*')

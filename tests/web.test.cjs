@@ -1350,3 +1350,82 @@ test('the reply sheet has no trash button and keeps attach and send inside one c
   assert.ok(box.indexOf('id="sheet-attachments"') < box.indexOf('id="sheet-text"'), 'thumbnails sit above the text');
   assert.ok(box.indexOf('id="sheet-text"') < box.indexOf('id="sheet-attach"'), 'the toolbar sits below the text');
 });
+
+const HUB = '5d18590aaaaa';
+const hostRows = (...extra) => [{ name: 'hub', ok: true, source: 'local', version: HUB }, ...extra];
+
+test('the update hint names peers on another version and offers the update command', () => {
+  const ui = dashboard();
+  ui.render({ version: HUB, agents: [], hosts: hostRows(
+    { name: 'lab', ok: true, source: 'peer', url: 'http://lab', version: '8e7d0fcbbbbb' },
+    { name: 'down', ok: false, source: 'peer', url: 'http://down' },
+    { name: 'same', ok: true, source: 'peer', url: 'http://same', version: HUB },
+  ) });
+  const hint = ui.elements.get('update-hint');
+  assert.equal(hint.hidden, false);
+  assert.match(hint.innerHTML, /<strong>lab<\/strong>/);
+  assert.match(hint.innerHTML, /8e7d0fc → hub 5d18590/);
+  assert.match(hint.innerHTML, /<code>tmux-attn update --ref 5d18590aaaaa<\/code>/);
+  assert.doesNotMatch(hint.innerHTML, /down|same/, 'offline hosts and hosts already on the hub version stay out');
+});
+
+test('a peer that reports no version gets the bootstrap command, since it predates `tmux-attn update`', () => {
+  const ui = dashboard();
+  ui.render({ version: HUB, agents: [], hosts: hostRows({ name: 'old', ok: true, source: 'peer', url: 'http://old' }) });
+  const html = ui.elements.get('update-hint').innerHTML;
+  assert.match(html, /未回報版本 → hub 5d18590/);
+  assert.match(html, /update\.sh \| TMUX_ATTN_REF=5d18590aaaaa sh/);
+  assert.doesNotMatch(html, /tmux-attn update --ref/);
+});
+
+test('the update hint stays hidden when versions agree, the hub is unversioned, or only the hub is listed', () => {
+  for (const [version, hosts] of [
+    [HUB, hostRows({ name: 'lab', ok: true, source: 'peer', version: HUB })],
+    ['', hostRows({ name: 'lab', ok: true, source: 'peer', version: 'ffffffffffff' })],
+    [HUB, hostRows()],
+  ]) {
+    const ui = dashboard();
+    ui.render({ version, agents: [], hosts });
+    assert.equal(ui.elements.get('update-hint').hidden, true);
+    assert.equal(ui.elements.get('update-hint').innerHTML, '');
+  }
+});
+
+test('host names in the update hint are escaped', () => {
+  const ui = dashboard();
+  ui.render({ version: HUB, agents: [], hosts: hostRows({ name: '<img src=x onerror=1>', ok: true, source: 'peer', version: 'ffffffffffff' }) });
+  assert.doesNotMatch(ui.elements.get('update-hint').innerHTML, /<img/);
+});
+
+test('the copy button puts the command on the clipboard, falling back when there is no clipboard API', async () => {
+  const written = [];
+  const ui = dashboard({ navigator: { clipboard: { writeText: async text => { written.push(text); } } } });
+  const button = { dataset: { copy: 'tmux-attn update' }, textContent: '複製' };
+  const click = target => ui.elements.get('update-hint').listeners.click({ target: { closest: s => (s === '[data-copy]' ? target : null) } });
+  await click(button);
+  assert.deepEqual(written, ['tmux-attn update']);
+  assert.equal(button.textContent, '已複製');
+  await click(null);
+  assert.equal(written.length, 1, 'a click elsewhere in the hint does nothing');
+  const plain = { dataset: { copy: 'x' }, textContent: '複製' };
+  await dashboard().elements.get('update-hint').listeners.click({ target: { closest: s => (s === '[data-copy]' ? plain : null) } });
+  assert.equal(plain.textContent, '無法複製');
+});
+
+test('identical update-hint markup is not rewritten on every poll, so a selection or the copied label survives', () => {
+  const ui = dashboard();
+  const payload = { version: HUB, agents: [], hosts: hostRows({ name: 'lab', ok: true, source: 'peer', version: 'ffffffffffff' }) };
+  ui.render(payload);
+  const hint = ui.elements.get('update-hint');
+  hint.innerHTML = 'user-visible state';
+  ui.render(payload);
+  assert.equal(hint.innerHTML, 'user-visible state');
+  ui.render({ ...payload, hosts: hostRows({ name: 'lab', ok: true, source: 'peer', version: HUB }) });
+  assert.equal(hint.innerHTML, '');
+});
+
+test('a hub version that is not a commit hash never produces a command', () => {
+  const ui = dashboard();
+  ui.render({ version: 'abc; rm -rf ~', agents: [], hosts: hostRows({ name: 'lab', ok: true, source: 'peer', version: 'ffffffffffff' }) });
+  assert.equal(ui.elements.get('update-hint').hidden, true);
+});

@@ -89,7 +89,32 @@ tmux attach                   # Prefix → a 開清單
 # 手機：http://<這台或 server 的 IP>:7788/
 ```
 
-更新：`git pull --ff-only && sh install.sh --no-clone`，必要時再跑一次 `install_web_service.sh`。
+### 更新
+
+在已安裝的機器上，一個指令升級：
+
+```sh
+tmux-attn update            # 升級到 checkout 的 upstream
+tmux-attn update --check    # 只顯示會改什麼，不動任何東西
+```
+
+沒有 `tmux-attn update` 的舊機器，或第一次升級，用 curl（網址和 `TMUX_ATTN_REF` 請固定在你信任的 tag 或 commit，`main` 代表「此刻 main 上的任何內容」）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/<tag-或-sha>/update.sh | sh
+curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/<tag-或-sha>/update.sh | sh -s -- --check
+```
+
+`update` 只做必要的事：
+
+- 比對 git 物件與已安裝檔案，只複製有變的；`attention.py` 變了才重啟 web 服務與 observer，只有網頁變了不重啟。
+- 先備份，再部署，驗證通過才 fast-forward checkout；web 服務重啟後 `/api/health` 不健康（或版本不符）會自動還原。
+- checkout 有未提交修改、已分叉、或指定的 `--ref` 比 checkout 舊時拒絕執行；不會動 tmux，也不會改 web 服務綁定的位址。
+- hooks 或 tmux 設定相關檔案（`install.py`、`bootstrap.sh`、`pi-attention.ts`）有變時只提示，要加 `--reinstall` 才會重跑安裝器。
+- 還原：`tmux-attn update --rollback`（最近一次）或 `--rollback <備份目錄>`。
+- hub 畫面會在 peer 版本與 hub 不同時顯示提示與可複製的指令。更新只能由該機器自己執行，沒有任何遠端觸發的 HTTP 端點（面板沒有登入機制）。
+
+第一次安裝或需要重裝 hooks 時仍用 `sh install.sh --no-clone`。
 
 ### 給 coding agent 的短 prompt
 
@@ -176,7 +201,7 @@ python3 tests/status_click_roundtrip.py
 
 ```sh
 ruff check --select F .
-shellcheck bootstrap.sh install.sh install_web_service.sh
+shellcheck bootstrap.sh install.sh install_web_service.sh update.sh
 ```
 
 GitHub Actions 會在 push／PR 自動執行上述檢查，涵蓋 Python 3.11 與 3.14。
