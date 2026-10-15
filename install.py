@@ -10,7 +10,10 @@ import shlex
 import subprocess
 import sys
 from attention import VIEW_HOOKS, VIEW_HOOK_INDEX, view_hooks_config
-import update
+try:
+    import update
+except ImportError:  # an older export without update.py still installs
+    update = None
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--sidebar',action='store_true',help='Use the previous persistent sidebar instead of popup')
@@ -159,7 +162,8 @@ for unit in ['contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-a
         shutil.copy2(src, dest)
 # Lets `tmux-attn update` find this checkout and lets the panel report which version is installed.
 try:
-    update.record_install(DEST, ROOT)
+    if update:
+        update.record_install(DEST, ROOT)
 except Exception as error:  # a missing version record must never abort an install
     print('note: version not recorded:', error, file=sys.stderr)
 paths[6].parent.mkdir(parents=True, exist_ok=True)
