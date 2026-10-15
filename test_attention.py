@@ -11,6 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 import base64
+import shlex
 import http.client
 import io
 import stat
@@ -541,6 +542,135 @@ class StoreTests(unittest.TestCase):
         with patch.object(a, 'MAX_UPLOAD_BYTES', 16):
             self.assertEqual(a.store_upload(self.PNG), (None, 'image too large'))
         self.assertEqual(list((a.STATE / 'uploads').glob('*')) if (a.STATE / 'uploads').exists() else [], [])
+
+    @staticmethod
+    def office_zip(ext):
+        import io
+        import zipfile
+        part, kind = {'docx': ('word/document.xml', 'wordprocessingml.document'),
+                      'xlsx': ('xl/workbook.xml', 'spreadsheetml.sheet'),
+                      'pptx': ('ppt/presentation.xml', 'presentationml.presentation')}[ext]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('[Content_Types].xml',
+                             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                             f'<Override PartName="/{part}" ContentType="application/vnd.openxmlformats-officedocument.{kind}.main+xml"/>'
+                             '</Types>')
+            archive.writestr(part, '<document/>')
+        return output.getvalue()
+
+    @staticmethod
+    def office_compound(ext):
+        # Header, FAT and directory sectors; the empty named stream needs no data sector.
+        header = bytearray(512)
+        header[:8] = bytes.fromhex('d0cf11e0a1b11ae1')
+        header[26:32] = bytes.fromhex('0300feff0900')
+        header[32:34] = bytes.fromhex('0600')
+        header[44:48] = (1).to_bytes(4, 'little')
+        header[48:52] = (1).to_bytes(4, 'little')
+        header[56:60] = (4096).to_bytes(4, 'little')
+        header[60:64] = (0xfffffffe).to_bytes(4, 'little')
+        header[68:72] = (0xfffffffe).to_bytes(4, 'little')
+        header[76:512] = b'\xff' * 436
+        header[76:80] = bytes(4)
+        fat = bytearray(b'\xff' * 512)
+        fat[:8] = bytes.fromhex('fdfffffffeffffff')
+        directory = bytearray(512)
+        for offset, name, kind in ((0, 'Root Entry', 5), (128, {'doc': 'WordDocument', 'xls': 'Workbook', 'ppt': 'PowerPoint Document'}[ext], 2)):
+            encoded = (name + '\0').encode('utf-16le')
+            directory[offset:offset + len(encoded)] = encoded
+            directory[offset + 64:offset + 66] = len(encoded).to_bytes(2, 'little')
+            directory[offset + 66] = kind
+            directory[offset + 116:offset + 120] = (0xfffffffe).to_bytes(4, 'little')
+        return bytes(header + fat + directory)
+
+    def test_text_uploads_validate_encoding_content_and_extension(self):
+        for ext in a.TEXT_EXTENSIONS:
+            for raw in ('一般文字\nhello\tworld'.encode(), '文字'.encode('utf-16')):
+                with self.subTest(ext=ext, raw=raw):
+                    file_id, error = a.store_upload(raw, 'NOTES.' + ext.upper())
+                    self.assertIsNone(error)
+                    self.assertEqual(a.upload_path(file_id).read_bytes(), raw)
+                    self.assertTrue(file_id.endswith('.' + ext))
+        for raw, name in ((b'MZ\x00binary', 'notes.txt'), (b'\xff\xff', 'notes.md'),
+                          (b'hello', 'script.exe'), (self.PNG, 'fake.csv'), (b'hi', 'notes.pdf')):
+            self.assertEqual(a.store_upload(raw, name), (None, 'unsupported file type'))
+        self.assertEqual(a.store_upload(b'', 'a.txt'), (None, 'empty file'))
+        with patch.object(a, 'MAX_UPLOAD_BYTES', 2):
+            self.assertEqual(a.store_upload(b'hello', 'a.txt'), (None, 'file too large'))
+
+    def test_office_uploads_require_matching_container_contents(self):
+        for ext in a.OFFICE_EXTENSIONS:
+            raw = self.office_zip(ext) if ext.endswith('x') else self.office_compound(ext)
+            with self.subTest(ext=ext):
+                file_id, error = a.store_upload(raw, 'report.' + ext)
+                self.assertIsNone(error)
+                self.assertEqual(a.upload_path(file_id).read_bytes(), raw)
+                self.assertEqual(a.store_upload(raw, 'fake.' + ('xlsx' if ext != 'xlsx' else 'docx')),
+                                 (None, 'unsupported file type'))
+        for raw in (b'PK\x03\x04not a zip', b'plain text', self.PNG):
+            self.assertEqual(a.store_upload(raw, 'fake.docx'), (None, 'unsupported file type'))
+        # A fabricated directory entry outside the declared chain is rejected.
+        fake = bytearray(self.office_compound('doc'))
+        fake[48:52] = (1000).to_bytes(4, 'little')
+        self.assertEqual(a.store_upload(fake, 'fake.doc'), (None, 'unsupported file type'))
+        fake = bytearray(self.office_compound('doc'))
+        fake[516:520] = (1).to_bytes(4, 'little')  # cyclic directory chain
+        self.assertEqual(a.store_upload(fake, 'fake.doc'), (None, 'unsupported file type'))
+
+    def test_corrupt_office_deflate_returns_validation_error(self):
+        raw = bytearray(self.office_zip('docx'))
+        offset = 30 + len('[Content_Types].xml')
+        raw[offset:offset + 2] = b'\xff\xff'
+        self.assertEqual(a.store_upload(raw, 'broken.docx'), (None, 'unsupported file type'))
+
+    def test_office_manifest_rejects_unexpected_zip_compression(self):
+        raw = bytearray(self.office_zip('docx'))
+        # Mark both local header and central directory as LZMA, leaving invalid properties.
+        raw[8:10] = (14).to_bytes(2, 'little')
+        offset = raw.index(b'PK\x01\x02')
+        raw[offset + 10:offset + 12] = (14).to_bytes(2, 'little')
+        self.assertEqual(a.store_upload(raw, 'broken.docx'), (None, 'unsupported file type'))
+
+    def test_document_upload_dispatch_local_and_peer(self):
+        payload = {'pane': '%1', 'pid': '123', 'filename': '筆記.txt', 'data': base64.b64encode(b'hello').decode()}
+        with patch.object(a, 'live_panes', return_value=self.LIVE):
+            code, body = a.dispatch_upload(payload)
+            self.assertEqual(code, 200)
+            self.assertEqual(a.upload_path(body['id']).read_bytes(), b'hello')
+            for name in (None, 5, 'x' * 256):
+                self.assertEqual(a.dispatch_upload(payload | {'filename': name})[0], 400)
+            with patch.object(a, 'MAX_UPLOAD_BYTES', 2):
+                self.assertEqual(a.dispatch_upload(payload)[0], 413)
+        class Reply:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return json.dumps({'ok': True, 'id': 'a' * 32 + '.txt'}).encode()
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'urlopen', return_value=Reply()) as request:
+            self.assertEqual(a.dispatch_upload(payload | {'host': 'lab'})[0], 200)
+            self.assertEqual(json.loads(request.call_args.args[0].data)['filename'], '筆記.txt')
+            self.assertEqual(a.dispatch_send({'host': 'lab', 'pane': '%1', 'pid': '123', 'text': '', 'files': ['a' * 32 + '.txt']})[0], 200)
+            self.assertEqual(json.loads(request.call_args.args[0].data)['files'], ['a' * 32 + '.txt'])
+            self.assertEqual(request.call_args.kwargs['timeout'], a.PEER_UPLOAD_TIMEOUT)
+
+    def test_document_send_validation_and_all_paths_checked_before_paste(self):
+        file_id, _ = a.store_upload(b'hello', 'notes.txt')
+        image_id, _ = a.store_upload(self.PNG)
+        with patch.object(a, 'send_to_pane', return_value=None) as send:
+            self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'files': [file_id]})[0], 200)
+            self.assertEqual(send.call_args.kwargs['files'], [file_id])
+            for files in ('bad', [None], ['../notes.txt'], [image_id], [file_id] * 5):
+                self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'files': files})[0], 400)
+            self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'images': [image_id] * 3, 'files': [file_id] * 2})[0], 400)
+        with patch.object(a, 'live_panes', return_value=self.LIVE), patch.object(a, 'tmux', return_value='123'), \
+             patch.object(a, 'paste_to_pane') as paste, patch.object(a.time, 'sleep'):
+            self.assertIsNone(a.send_to_pane('%1', '123', '', files=[file_id]))
+            paste.assert_called_once_with('%1', shlex.quote(str(a.upload_path(file_id))), None)
+            paste.reset_mock()
+            self.assertEqual(a.send_to_pane('%1', '123', 'hello', images=[image_id], files=['b' * 32 + '.txt']), 'file not found')
+            paste.assert_not_called()
 
     def test_upload_path_only_resolves_server_issued_ids(self):
         image_id, _ = a.store_upload(self.PNG)
