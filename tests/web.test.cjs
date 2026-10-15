@@ -299,6 +299,7 @@ test('failed acknowledgement stays unread and retries only on explicit refresh o
   let ackAttempts = 0;
   const ui = dashboard(async url => {
     if (url === '/api/preview') return response({ ok: true, preview: { agent: 'result' }, revision: 2, viewable: true });
+    if (url === '/api/message') return response({ ok: true, text: 'result' });
     ackAttempts += 1;
     return response({ ok: ackAttempts > 1, error: 'offline', acknowledged: 2 }, ackAttempts > 1);
   });
@@ -335,7 +336,7 @@ test('failed, cached, empty or action-needed previews never acknowledge', async 
     ui.render({ agents: [current] });
     ui.open(current);
     await settle();
-    assert.deepEqual(calls, ['/api/preview']);
+    assert.deepEqual(calls.filter(url => url !== '/api/message'), ['/api/preview']);
     assert.match(ui.elements.get('summary').innerHTML, /👀 1/);
     if (data.viewable === false) {
       assert.equal(ui.elements.get('sheet-status').textContent, '最新內容尚未就緒，請稍後重新整理。');
@@ -441,6 +442,7 @@ test('polling keeps open sheet content and metadata stable until explicit refres
   let previews = 0;
   const ui = dashboard(async url => {
     if (url === '/api/ack') return response({ ok: true, acknowledged: revision });
+    if (url === '/api/message') return response({ ok: true, text: `full result ${revision}` });
     previews += 1;
     return response({ ok: true, preview: { agent: `full result ${revision}` }, revision, viewable: true });
   });
@@ -477,7 +479,7 @@ test('acknowledgement waits for content to paint and skips hidden or closed shee
     ui.open(current);
     await settle();
     assert.match(ui.elements.get('sheet-preview').innerHTML, /rendered result/);
-    assert.deepEqual(calls, ['/api/preview']);
+    assert.deepEqual(calls.filter(url => url !== '/api/message'), ['/api/preview']);
     // Opening also schedules transcript focus; no acknowledgement until two content frames.
     while (frames.length > 1) frames.shift()();
     frames.shift()();
@@ -522,7 +524,7 @@ test('preview network failure preserves unread and can retry on reopen', async (
   ui.close();
   ui.open(current);
   await settle();
-  assert.deepEqual(calls, ['/api/preview', '/api/preview', '/api/ack']);
+  assert.deepEqual(calls, ['/api/preview', '/api/preview', '/api/message', '/api/ack']);
   assert.match(ui.elements.get('summary').innerHTML, /👀 0/);
   assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
 });
@@ -834,7 +836,7 @@ const jsonReply = (body, status = 200) => ({ ok: status < 400, status, json: asy
 const PREVIEW = { ok: true, revision: 3, viewable: false,
   preview: { users: ['first prompt', 'second prompt'], agent: 'agent answer '.repeat(30) } };
 
-function readerSetup({ message, send, upload, globals = {}, startHash = '', clipboard, storage } = {}) {
+function readerSetup({ message, preview = PREVIEW, send, upload, globals = {}, startHash = '', clipboard, storage } = {}) {
   const calls = [];
   const browser = fakeBrowser();
   browser.state.hash = startHash;
@@ -846,7 +848,7 @@ function readerSetup({ message, send, upload, globals = {}, startHash = '', clip
     fetchRequest: async (url, options) => {
       const body = JSON.parse(options.body);
       calls.push({ url, body });
-      if (url === '/api/preview') return jsonReply(PREVIEW);
+      if (url === '/api/preview') return jsonReply(typeof preview === 'function' ? preview(body) : preview);
       if (url === '/api/send' && send) return send(body);
       if (url === '/api/upload' && upload) return upload(body);
       if (url === '/api/message') {
@@ -950,7 +952,7 @@ test('taps on links and text selections do not open the reader', async () => {
   await t.settle();
   assert.equal(t.browser.state.hash, '');
   assert.equal(t.browser.state.stack.length, 1);
-  assert.equal(t.messages().length, 0);
+  assert.equal(t.messages().length, 1, 'only the background reply prefetch was sent');
 });
 
 test('a conversation that moved on shows a recoverable message instead of the wrong text', async () => {
@@ -965,7 +967,7 @@ test('a conversation that moved on shows a recoverable message instead of the wr
 
 test('failed loads can be retried', async () => {
   let attempts = 0;
-  const t = readerSetup({ message: body => ++attempts === 1
+  const t = readerSetup({ message: body => ++attempts <= 2
     ? jsonReply({ ok: false, error: 'peer message failed: URLError' }, 502)
     : jsonReply({ ok: true, role: body.role, text: 'second try', chars: 10, truncated: false }) });
   await openSheetWithPreview(t);
@@ -1246,6 +1248,270 @@ test('text still syncing from the hook is labelled as partial', async () => {
   await t.settle();
   assert.match(t.el('reader-body').innerHTML, /還在同步/);
   assert.doesNotMatch(t.el('reader-body').innerHTML, /僅顯示前/);
+});
+
+test('a pending reply prefetch shows the preview immediately and is shared with the reader', async () => {
+  let release;
+  const t = readerSetup({ message: () => new Promise(resolve => {
+    release = () => resolve(jsonReply({ ok: true, text: 'complete reply', chars: 14 }));
+  }) });
+  await openSheetWithPreview(t);
+  assert.equal(t.messages().length, 1);
+  assert.equal(t.messages()[0].body.role, 'agent');
+  assert.equal(t.el('reader-root').hidden, true);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /agent answer/);
+  assert.match(t.el('reader-body').innerHTML, /載入全文中/);
+  assert.equal(t.el('reader-copy').disabled, true);
+  assert.equal(t.messages().length, 1, 'clicking must not duplicate the pending request');
+  release();
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /complete reply/);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /載入全文中/);
+  assert.equal(t.el('reader-copy').disabled, false);
+});
+
+test('a completed reply prefetch displays synchronously and reopening reuses it', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  t.ui.context.openReaderFromSheet('agent', 0);
+  t.ui.context.applyRoute();
+  assert.match(t.el('reader-body').innerHTML, /FULL agent 0/);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /載入/);
+  t.browser.window.history.back();
+  await t.settle();
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(t.messages().length, 1);
+});
+
+test('user messages prefill immediately but are fetched only on demand and then reused', async () => {
+  let release;
+  const t = readerSetup({ message: body => body.role === 'agent'
+    ? jsonReply({ ok: true, text: 'agent full' })
+    : new Promise(resolve => { release = () => resolve(jsonReply({ ok: true, text: 'user full' })); }) });
+  await openSheetWithPreview(t);
+  assert.equal(t.messages().length, 1);
+  await t.tap('user', 1);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /second prompt/);
+  assert.equal(t.messages().length, 2);
+  release();
+  await t.settle();
+  t.browser.window.history.back();
+  await t.settle();
+  await t.tap('user', 1);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /user full/);
+  assert.equal(t.messages().length, 2);
+});
+
+test('failed prefetches are silent and the reader fetches again when opened', async () => {
+  let attempts = 0;
+  const t = readerSetup({ message: () => ++attempts === 1
+    ? Promise.reject(new Error('offline')) : jsonReply({ ok: true, text: 'recovered reply' }) });
+  await openSheetWithPreview(t);
+  assert.equal(t.el('sheet-status').textContent, '');
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /recovered reply/);
+  assert.equal(attempts, 2);
+});
+
+test('partial prefetches are fetched again even when the preview revision stays the same', async () => {
+  let attempts = 0;
+  const t = readerSetup({ message: () => ++attempts === 1
+    ? jsonReply({ ok: true, text: 'partial…', partial: true }) : jsonReply({ ok: true, text: 'now complete' }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /now complete/);
+  assert.equal(attempts, 2);
+});
+
+test('refresh and reopen invalidate reply cache even if revision and clipped prefix stay the same', async () => {
+  let attempts = 0;
+  const t = readerSetup({ message: () => jsonReply({ ok: true, text: `reply ${++attempts}` }) });
+  await openSheetWithPreview(t);
+  t.ui.refreshPreview();
+  await t.settle();
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /reply 2/);
+  assert.equal(attempts, 2);
+  t.ui.close();
+  await t.settle();
+  t.ui.open(t.current);
+  await t.settle();
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /reply 3/);
+});
+
+test('newer fleet versions invalidate prefetched replies without replacing the frozen preview', async () => {
+  let attempts = 0;
+  const t = readerSetup({ message: () => ++attempts === 1 ? jsonReply({ ok: true, text: 'old full' })
+    : jsonReply({ ok: false, error: 'content changed; refresh preview' }, 409) });
+  t.current.revision = 3;
+  await openSheetWithPreview(t);
+  t.ui.render({ agents: [{ ...t.current, revision: 4 }] });
+  assert.match(t.el('sheet-preview').innerHTML, /agent answer/);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(attempts, 2);
+  assert.match(t.el('reader-body').innerHTML, /已有新內容/);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /old full/);
+});
+
+test('late prefetches from another pane cannot populate the active reader', async () => {
+  let release;
+  const t = readerSetup({ message: body => body.pane === '%1'
+    ? new Promise(resolve => { release = () => resolve(jsonReply({ ok: true, text: 'WRONG PANE' })); })
+    : jsonReply({ ok: true, text: 'correct pane' }) });
+  await openSheetWithPreview(t);
+  const other = { ...t.current, pane: '%2' };
+  t.ui.render({ agents: [t.current, other] });
+  t.ui.open(other);
+  await t.settle();
+  await t.tap('agent', 0);
+  await t.settle();
+  release();
+  await t.settle();
+  assert.match(t.el('reader-body').innerHTML, /correct pane/);
+  assert.doesNotMatch(t.el('reader-body').innerHTML, /WRONG PANE/);
+});
+
+test('hidden sheets do not speculatively fetch full replies', async () => {
+  const t = readerSetup();
+  t.ui.visibility('hidden');
+  await openSheetWithPreview(t);
+  assert.equal(t.messages().length, 0);
+});
+
+function draftStorage() {
+  const values = new Map();
+  return { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
+    removeItem: key => values.delete(key) };
+}
+
+function typeDraft(t, text) {
+  t.el('sheet-text').value = text;
+  t.el('sheet-text').listeners.input();
+}
+
+test('text drafts survive sheet close and remain isolated by host, pane and PID', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  typeDraft(t, 'first session draft');
+  t.ui.close();
+  await t.settle();
+  t.ui.open(t.current);
+  assert.equal(t.el('sheet-text').value, 'first session draft');
+  for (const other of [{ ...t.current, host: 'other' }, { ...t.current, pane: '%2' }, { ...t.current, pid: '999' }]) {
+    t.ui.render({ agents: [t.current, other] });
+    t.ui.open(other);
+    assert.equal(t.el('sheet-text').value, '');
+    typeDraft(t, `draft ${other.host} ${other.pane} ${other.pid}`);
+    t.ui.open(t.current);
+    assert.equal(t.el('sheet-text').value, 'first session draft');
+    t.ui.open(other);
+    assert.equal(t.el('sheet-text').value, `draft ${other.host} ${other.pane} ${other.pid}`);
+    t.ui.open(t.current);
+  }
+});
+
+test('reader text drafts survive a page reload and explicit clearing removes them', async () => {
+  const localStorage = draftStorage();
+  const first = readerSetup({ globals: { localStorage } });
+  await openSheetWithPreview(first);
+  await first.tap('agent', 0);
+  await first.settle();
+  typeDraft(first, 'unfinished reader reply\n第二行');
+  const reloaded = readerSetup({ globals: { localStorage } });
+  await openSheetWithPreview(reloaded);
+  assert.equal(reloaded.el('sheet-text').value, 'unfinished reader reply\n第二行');
+  typeDraft(reloaded, '');
+  const cleared = readerSetup({ globals: { localStorage } });
+  await openSheetWithPreview(cleared);
+  assert.equal(cleared.el('sheet-text').value, '');
+});
+
+test('failed sends retain saved drafts and successful sends remove them across reloads', async () => {
+  const localStorage = draftStorage();
+  const first = readerSetup({ globals: { localStorage }, send: () => jsonReply({ ok: false, error: 'offline' }, 502) });
+  await openSheetWithPreview(first);
+  typeDraft(first, 'please keep this');
+  await first.el('sheet-form').listeners.submit(submitEvent());
+  first.ui.close();
+  const reloaded = readerSetup({ globals: { localStorage } });
+  await openSheetWithPreview(reloaded);
+  assert.equal(reloaded.el('sheet-text').value, 'please keep this');
+  await reloaded.el('sheet-form').listeners.submit(submitEvent());
+  const sent = readerSetup({ globals: { localStorage } });
+  await openSheetWithPreview(sent);
+  assert.equal(sent.el('sheet-text').value, '');
+});
+
+test('a late send clears only its submitted draft after closing or switching sessions', async () => {
+  for (const editWhilePending of [false, true]) {
+    let release;
+    const localStorage = draftStorage();
+    const t = readerSetup({ globals: { localStorage }, send: () => new Promise(resolve => {
+      release = () => resolve(jsonReply({ ok: true }));
+    }) });
+    await openSheetWithPreview(t);
+    typeDraft(t, 'submitted text');
+    const sending = t.el('sheet-form').listeners.submit(submitEvent());
+    t.ui.close();
+    await t.settle();
+    if (editWhilePending) {
+      t.ui.open(t.current);
+      typeDraft(t, 'new unsent draft');
+      t.ui.close();
+    }
+    const other = { ...t.current, pane: '%2' };
+    t.ui.render({ agents: [t.current, other] });
+    t.ui.open(other);
+    typeDraft(t, 'other session draft');
+    release();
+    await sending;
+    assert.equal(t.el('sheet-text').value, 'other session draft');
+    t.ui.open(t.current);
+    assert.equal(t.el('sheet-text').value, editWhilePending ? 'new unsent draft' : '');
+  }
+});
+
+test('new text typed during a send is saved as the next draft', async () => {
+  let release;
+  const localStorage = draftStorage();
+  const t = readerSetup({ globals: { localStorage }, send: () => new Promise(resolve => {
+    release = () => resolve(jsonReply({ ok: true }));
+  }) });
+  await openSheetWithPreview(t);
+  typeDraft(t, 'submitted text');
+  const sending = t.el('sheet-form').listeners.submit(submitEvent());
+  typeDraft(t, 'next reply');
+  release();
+  await sending;
+  const reloaded = readerSetup({ globals: { localStorage } });
+  await openSheetWithPreview(reloaded);
+  assert.equal(reloaded.el('sheet-text').value, 'next reply');
+});
+
+test('drafts remain available when storage writes fail but reads still work', async () => {
+  const t = readerSetup({ globals: { localStorage: {
+    getItem: () => 'older stored draft', setItem: () => { throw new Error('quota'); }, removeItem: () => { throw new Error('quota'); },
+  } } });
+  await openSheetWithPreview(t);
+  typeDraft(t, 'newer memory draft');
+  t.ui.close();
+  t.ui.open(t.current);
+  assert.equal(t.el('sheet-text').value, 'newer memory draft');
+  typeDraft(t, '');
+  t.ui.close();
+  t.ui.open(t.current);
+  assert.equal(t.el('sheet-text').value, '');
 });
 
 test('reader output stays inert even if a peer relays hostile metadata', async () => {
