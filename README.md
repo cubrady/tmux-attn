@@ -69,7 +69,8 @@ client B ── /api/agents ──┼──▶ server /api/fleet ──▶ 手�
 
 ## 安裝
 
-需要 Python ≥ 3.11、tmux ≥ 3.7、已登入的 agent CLI。
+需要 Python ≥ 3.11、支援 popup 的 tmux、已登入的 agent CLI。建議 tmux ≥ 3.7；
+安裝時會實測 server 是否支援點擊計數，不支援時改用純文字計數，仍可用 Prefix → `a`／`N` 導覽。
 
 ```sh
 git clone https://github.com/cubrady/tmux-attn.git

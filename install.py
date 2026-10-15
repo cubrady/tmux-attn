@@ -68,9 +68,6 @@ for name in ['.claude/settings.json', '.codex/hooks.json', '.cursor/hooks.json']
 # Confirm server access and save runtime before any live-file mutation.
 def tmux(*args):
     return subprocess.check_output(['tmux',*args],text=True).strip()
-version = re.search(r'(\d+)\.(\d+)',tmux('-V'))
-if not version or tuple(map(int,version.groups())) < (3,7):
-    raise SystemExit('Clickable attention counts require tmux 3.7 or newer.')
 runtime = {k: tmux('show-options','-gv',k) for k in ['status-interval','status-right-length','status-right','mouse']}
 for key in ['window-status-format', 'window-status-current-format']:
     runtime[key] = tmux('show-options', '-gwv', key)
@@ -223,6 +220,7 @@ def supports_status_control_clicks():
 
 
 control_clicks = supports_status_control_clicks()
+status_cmd = 'status-clickable' if control_clicks else 'status'
 # Clear prior Control binds out-of-band: unknown keys must not appear in sidebar.conf
 # or `tmux source-file` aborts on hosts that reject MouseDown1Control*.
 for index in range(4):
@@ -235,7 +233,7 @@ base = f'''# Managed tmux attention inbox.
 set -g mouse on
 set -g status-interval 2
 set -g status-right-length 110
-set -g status-right '#({launch} status-clickable) | %H:%M'
+set -g status-right '#({launch} {status_cmd}) | %H:%M'
 bind-key N run-shell -b "{launch} next '#{{client_name}}'"
 run-shell -b '{launch} observe'
 '''
