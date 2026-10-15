@@ -12,9 +12,18 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, {
     innerHTML: '', textContent: '', value: '', hidden: false, disabled: false, title: '', dataset: {}, listeners: {},
     classList: { add() {}, remove() {}, toggle() {} },
+    children: [],
+    style: { setProperty() {}, removeProperty() {} },
+    appendChild(child) {
+      if (child.parentNode) child.parentNode.children = child.parentNode.children.filter(item => item !== child);
+      this.children.push(child);
+      child.parentNode = this;
+      return child;
+    },
     addEventListener(type, listener) { this.listeners[type] = listener; },
     setAttribute() {}, focus() {},
   }]));
+  elements.get('sheet-panel').appendChild(elements.get('sheet-form'));
   const document = {
     body: elements.get('list'),
     getElementById(id) {
@@ -592,7 +601,7 @@ function uploader({ failFor = [], holdUploads = false, holdSend = false, holdPre
     if (holdPrepare) await new Promise(resolve => heldPrepares.push(resolve));
     return { tag: file.name, size: file.outSize };
   };
-  ui.context.blobToBase64 = async blob => `b64-${blob.tag}`;
+  ui.context.blobToBase64 = async blob => `b64-${blob.tag || blob.name}`;
   const current = { ...agent('lab', 'WAIT'), project: 'demo' };
   ui.render({ agents: [current] });
   ui.open(current);
@@ -666,15 +675,77 @@ test('a failed upload blocks sending until the image is removed', async () => {
   assert.deepEqual(t.sends()[0].body.images, ['id-ok.jpg']);
 });
 
-test('only images are accepted and at most four stay attached', async () => {
+test('unsupported files are rejected and at most four attachments stay attached', async () => {
   const t = uploader();
   await t.pick([imageFile('notes.pdf', 'application/pdf'), imageFile('1.jpg'), imageFile('2.jpg'),
     imageFile('3.jpg'), imageFile('4.jpg'), imageFile('5.jpg')]);
   assert.equal(t.uploads().length, 4);
   assert.equal(t.chipKeys().length, 4);
-  assert.match(t.ui.elements.get('sheet-status').textContent, /最多 4 張|只支援圖片/);
+  assert.match(t.ui.elements.get('sheet-status').textContent, /最多 4 個|只支援圖片/);
   await t.pick([imageFile('6.jpg')]);
   assert.equal(t.uploads().length, 4);
+});
+
+test('text and Office files upload unchanged with filenames and mix with images', async () => {
+  const t = uploader();
+  await t.pick([imageFile('photo.jpg'), imageFile('筆記.TXT', ''), imageFile('report.docx', 'application/zip'), imageFile('data.xlsx', '')]);
+  assert.equal(t.uploads().length, 4);
+  assert.deepEqual(t.uploads().filter(call => call.body.filename).map(call => call.body.filename), ['筆記.TXT', 'report.docx', 'data.xlsx']);
+  assert.match(t.chips(), /筆記.TXT/);
+  assert.match(t.chips(), /attachment-file/);
+  assert.equal((t.chips().match(/<img /g) || []).length, 1);
+  await t.submit();
+  assert.deepEqual(t.sends()[0].body.images, ['id-photo.jpg']);
+  assert.deepEqual(t.sends()[0].body.files, ['id-筆記.TXT', 'id-report.docx', 'id-data.xlsx']);
+  assert.deepEqual(t.revoked, ['blob:photo.jpg']);
+});
+
+test('a document alone can be sent, unsupported formats stay out and filenames are escaped', async () => {
+  const t = uploader();
+  await t.pick([imageFile('bad.exe', 'text/plain'), imageFile('archive.zip', ''), imageFile('notes.pdf', ''), imageFile('<notes>.md', '')]);
+  assert.equal(t.uploads().length, 1);
+  assert.match(t.chips(), /&lt;notes&gt;.md/);
+  assert.doesNotMatch(t.chips(), /<notes>/);
+  await t.submit();
+  assert.deepEqual(t.sends()[0].body.files, ['id-<notes>.md']);
+  assert.equal(t.sends()[0].body.text, '');
+});
+
+test('all listed text and Office extensions accept empty browser MIME types', async () => {
+  for (const ext of ['txt', 'md', 'csv', 'tsv', 'json', 'log', 'xml', 'yaml', 'yml', 'ini', 'cfg', 'toml', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']) {
+    const t = uploader();
+    await t.pick([imageFile(`file.${ext}`, '')]);
+    assert.equal(t.uploads().length, 1, ext);
+    assert.equal(t.uploads()[0].body.filename, `file.${ext}`);
+  }
+});
+
+test('oversized documents fail before reading or uploading and block sending', async () => {
+  const t = uploader();
+  await t.pick([{ name: 'huge.docx', type: '', size: 9 * 1024 * 1024 }]);
+  assert.equal(t.uploads().length, 0);
+  assert.match(t.chips(), /attachment error file/);
+  await t.submit();
+  assert.equal(t.sends().length, 0);
+  t.remove(t.chipKeys()[0]);
+  assert.deepEqual(t.revoked, []);
+});
+
+test('document uploads preserve wait, failure and closed-sheet guards', async () => {
+  const t = uploader({ holdUploads: true });
+  await t.pick([imageFile('notes.txt', '')]);
+  await t.submit();
+  assert.equal(t.sends().length, 0);
+  assert.match(t.ui.elements.get('sheet-status').textContent, /附件上傳中/);
+  t.ui.close();
+  t.held.forEach(release => release());
+  await flush();
+  assert.equal(t.chipKeys().length, 0);
+  assert.deepEqual(t.revoked, []);
+  const failed = uploader({ failFor: ['bad.docx'] });
+  await failed.pick([imageFile('bad.docx', '')]);
+  await failed.submit();
+  assert.equal(failed.sends().length, 0);
 });
 
 test('closing the sheet discards attachments and ignores late upload results', async () => {
@@ -763,19 +834,21 @@ const jsonReply = (body, status = 200) => ({ ok: status < 400, status, json: asy
 const PREVIEW = { ok: true, revision: 3, viewable: false,
   preview: { users: ['first prompt', 'second prompt'], agent: 'agent answer '.repeat(30) } };
 
-function readerSetup({ message, startHash = '', clipboard, storage } = {}) {
+function readerSetup({ message, send, upload, globals = {}, startHash = '', clipboard, storage } = {}) {
   const calls = [];
   const browser = fakeBrowser();
   browser.state.hash = startHash;
   browser.state.stack = [startHash];
   const ui = dashboard({
     window: browser.window,
-    globals: storage ? { sessionStorage: storage } : {},
+    globals: { ...globals, ...(storage ? { sessionStorage: storage } : {}) },
     navigator: clipboard ? { clipboard } : {},
     fetchRequest: async (url, options) => {
       const body = JSON.parse(options.body);
       calls.push({ url, body });
       if (url === '/api/preview') return jsonReply(PREVIEW);
+      if (url === '/api/send' && send) return send(body);
+      if (url === '/api/upload' && upload) return upload(body);
       if (url === '/api/message') {
         return message ? message(body) : jsonReply({ ok: true, role: body.role, text: `FULL ${body.role} ${body.index}`, chars: 14, truncated: false });
       }
@@ -940,18 +1013,138 @@ test('closing the sheet closes the reader and leaves no history entry behind', a
   assert.equal(t.browser.state.hash, '');
 });
 
-test('reply closes the reader and focuses the reply box', async () => {
+test('the reader contains the same composer and preserves the draft on back navigation', async () => {
   const t = readerSetup();
   let focused = 0;
   t.el('sheet-text').focus = () => { focused += 1; };
   await openSheetWithPreview(t);
-  focused = 0;
+  const form = t.el('sheet-form');
+  t.el('sheet-text').value = 'draft reply';
   await t.tap('agent', 0);
   await t.settle();
-  await t.el('reader-reply').listeners.click();
+  assert.equal(form.parentNode, t.el('reader-compose'));
+  assert.equal(t.el('sheet-text').value, 'draft reply');
+  assert.equal(t.ui.elements.has('reader-reply'), false);
+  assert.equal(focused, 0, 'opening a message does not bring up the keyboard');
+  t.el('sheet-text').value += ' from the reader';
+  t.browser.window.history.back();
   await t.settle();
-  assert.equal(t.el('reader-root').hidden, true);
-  assert.equal(focused, 1);
+  assert.equal(form.parentNode, t.el('sheet-panel'));
+  assert.equal(t.el('sheet-text').value, 'draft reply from the reader');
+});
+
+test('sending directly from the reader keeps the full message and route open', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  const hash = t.browser.state.hash;
+  const message = t.el('reader-body').innerHTML;
+  const timers = [];
+  t.ui.context.setTimeout = (fn, ms) => timers.push({ fn, ms });
+  t.el('sheet-text').value = 'reply in place';
+  await t.el('sheet-form').listeners.submit(submitEvent());
+  assert.deepEqual(t.calls.find(call => call.url === '/api/send').body,
+    { host: 'lab', pane: '%1', pid: '123', text: 'reply in place', submit: true, images: [] });
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('sheet-root').inert, true);
+  assert.equal(t.browser.state.hash, hash);
+  assert.equal(t.el('reader-body').innerHTML, message);
+  assert.equal(t.el('sheet-text').value, '');
+  assert.equal(t.el('sheet-status').textContent, '已貼上');
+  assert.equal(timers.some(timer => timer.ms === 280), false);
+  assert.equal(t.el('sheet-send').disabled, false);
+});
+
+test('reader uploads and sends mixed attachments using the shared composer', async () => {
+  const revoked = [];
+  let release;
+  const t = readerSetup({ globals: { URL: { createObjectURL: file => `blob:${file.name}`, revokeObjectURL: url => revoked.push(url) } },
+    upload: body => body.filename
+      ? new Promise(resolve => { release = () => resolve(jsonReply({ ok: true, id: 'document.txt' })); })
+      : jsonReply({ ok: true, id: 'image.png' }) });
+  t.ui.context.prepareImage = async file => file;
+  t.ui.context.blobToBase64 = async file => `b64-${file.name}`;
+  await openSheetWithPreview(t);
+  t.el('sheet-file').files = [imageFile('draft.txt', ''), imageFile('image.png')];
+  t.el('sheet-file').listeners.change();
+  await t.settle();
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(t.el('sheet-form').parentNode, t.el('reader-compose'));
+  assert.match(t.el('sheet-attachments').innerHTML, /uploading/);
+  await t.el('sheet-form').listeners.submit(submitEvent());
+  assert.equal(t.calls.some(call => call.url === '/api/send'), false);
+  release();
+  await t.settle();
+  assert.doesNotMatch(t.el('sheet-attachments').innerHTML, /uploading/);
+  const chips = t.el('sheet-attachments').innerHTML;
+  t.el('reader-back').listeners.click();
+  await t.settle();
+  assert.equal(t.el('sheet-attachments').innerHTML, chips);
+  await t.tap('agent', 0);
+  await t.settle();
+  await t.el('sheet-form').listeners.submit(submitEvent());
+  const sent = t.calls.find(call => call.url === '/api/send').body;
+  assert.deepEqual(sent.images, ['image.png']);
+  assert.deepEqual(sent.files, ['document.txt']);
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('sheet-attachments').hidden, true);
+  assert.deepEqual(revoked, ['blob:image.png']);
+});
+
+test('a failed reader send preserves the draft and can be retried in place', async () => {
+  let attempts = 0;
+  const t = readerSetup({ send: () => ++attempts === 1
+    ? jsonReply({ ok: false, error: 'pane not found' }, 409) : jsonReply({ ok: true }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  t.el('sheet-text').value = 'keep my reply';
+  await t.el('sheet-form').listeners.submit(submitEvent());
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('sheet-form').parentNode, t.el('reader-compose'));
+  assert.equal(t.el('sheet-status').textContent, 'pane not found');
+  assert.equal(t.el('sheet-text').value, 'keep my reply');
+  assert.equal(t.el('sheet-send').disabled, false);
+  await t.el('sheet-form').listeners.submit(submitEvent());
+  assert.equal(attempts, 2);
+  assert.equal(t.el('sheet-status').textContent, '已貼上');
+  assert.equal(t.el('reader-root').hidden, false);
+});
+
+test('typing the next draft during a reader send preserves the new text', async () => {
+  let release;
+  const t = readerSetup({ send: () => new Promise(resolve => { release = () => resolve(jsonReply({ ok: true })); }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  t.el('sheet-text').value = 'submitted reply';
+  const pending = t.el('sheet-form').listeners.submit(submitEvent());
+  t.el('sheet-text').value = 'my next draft';
+  await t.el('sheet-form').listeners.submit(submitEvent());
+  assert.equal(t.calls.filter(call => call.url === '/api/send').length, 1);
+  release();
+  await pending;
+  assert.equal(t.el('sheet-text').value, 'my next draft');
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('sheet-send').disabled, false);
+});
+
+test('opening the reader after a sheet send prevents its pending auto-close', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  const timers = [];
+  t.ui.context.setTimeout = (fn, ms) => timers.push({ fn, ms });
+  t.el('sheet-text').value = 'reply';
+  await t.el('sheet-form').listeners.submit(submitEvent());
+  const closeTimer = timers.find(timer => timer.ms === 280);
+  assert.ok(closeTimer);
+  await t.tap('agent', 0);
+  await t.settle();
+  closeTimer.fn();
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('sheet-form').parentNode, t.el('reader-compose'));
 });
 
 test('a reload on a reader link reopens the sheet and the message once the session list arrives', async () => {
@@ -1196,6 +1389,8 @@ function killSetup({ kill, names = ['demo'] } = {}) {
       calls.push({ url, body: JSON.parse(options.body) });
       if (url === '/api/kill') return kill ? kill() : jsonReply({ ok: true });
       if (url === '/api/preview') return jsonReply(PREVIEW);
+      if (url === '/api/send' && send) return send(body);
+      if (url === '/api/upload' && upload) return upload(body);
       return jsonReply({ ok: true });
     },
   });
@@ -1556,16 +1751,18 @@ test('while the sheet is open the page behind it is inert, and it is released on
   assert.equal(wrap.inert, false);
 });
 
-test('the keyboard shrinks the sheet root to the visible area and compacts the header', () => {
+test('the keyboard shrinks sheet and reader roots to the visible area and compacts the header', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(dashboard().context.viewportMetrics({ height: 430, offsetTop: 0 }, 844))),
     { height: 430, top: 0, keyboard: true });
   assert.equal(dashboard().context.viewportMetrics({ height: 820, offsetTop: 0 }, 844).keyboard, false, 'browser chrome is not a keyboard');
   const calls = {};
   const classes = {};
+  const readerCalls = {};
   const listeners = {};
   const ui = dashboard({ window: { visualViewport: { height: 844, offsetTop: 0, addEventListener: (t, fn) => { listeners[t] = fn; } }, innerHeight: 844 } });
   const root = ui.elements.get('sheet-root');
   root.style = { setProperty: (k, v) => { calls[k] = v; } };
+  ui.elements.get('reader-root').style = { setProperty: (k, v) => { readerCalls[k] = v; } };
   root.classList = { add() {}, remove() {}, toggle: (c, on) => { classes[c] = on; } };
   const a = sheetAgent();
   ui.render({ agents: [a] });
@@ -1573,6 +1770,8 @@ test('the keyboard shrinks the sheet root to the visible area and compacts the h
   ui.context.window.visualViewport.height = 430;
   listeners.resize();
   assert.equal(calls['--vv-h'], '430px');
+  assert.equal(readerCalls['--vv-h'], '430px');
+  assert.equal(readerCalls['--vv-top'], '0px');
   assert.equal(classes['kb-open'], true);
   ui.context.window.visualViewport.height = 844;
   listeners.resize();

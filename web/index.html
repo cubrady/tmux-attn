@@ -1073,6 +1073,11 @@
       background: var(--bg);
       overflow: hidden;
     }
+    .attachment.file { width: 160px; }
+    .attachment-file { display: flex; height: 100%; flex-direction: column; justify-content: center; gap: 4px; padding: 8px 30px 8px 10px; }
+    .attachment-file strong { color: var(--muted); font-size: 10px; }
+    .attachment-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .attachment.uploading .attachment-file, .attachment.error .attachment-file { opacity: 0.4; }
     .attachment img { width: 100%; height: 100%; object-fit: cover; display: block; transition: opacity 160ms var(--ease); }
     .attachment.uploading img { opacity: 0.4; }
     .attachment.uploading::after {
@@ -1213,7 +1218,8 @@
     .reader-root[hidden] { display: none !important; }
     .reader-root {
       position: fixed;
-      inset: 0;
+      inset: var(--vv-top, 0px) 0 auto 0;
+      height: var(--vv-h, 100dvh);
       z-index: 30;
       display: flex;
       justify-content: center;
@@ -1262,7 +1268,8 @@
       min-height: 0;
       overflow: auto;
       -webkit-overflow-scrolling: touch;
-      padding: 18px 16px calc(92px + env(safe-area-inset-bottom));
+      padding: 18px 16px;
+      overscroll-behavior: contain;
       outline: none;
     }
     .reader-line { display: block; font-size: 1rem; line-height: 1.7; }
@@ -1288,29 +1295,16 @@
       color: var(--muted);
     }
     .reader-status {
-      position: absolute;
-      left: 16px;
-      bottom: calc(30px + env(safe-area-inset-bottom));
+      flex: 0 0 auto;
+      padding: 0 16px 8px;
       font: 0.75rem var(--mono);
       color: var(--muted);
     }
-    .reader-reply {
-      position: absolute;
-      right: 16px;
-      bottom: calc(18px + env(safe-area-inset-bottom));
-      height: 46px;
-      padding: 0 22px;
-      border: 0;
-      border-radius: 999px;
-      background: var(--accent);
-      color: var(--accent-fg);
-      font: 600 0.95rem var(--font);
-      box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
-      cursor: pointer;
-    }
-    .reader-reply:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
-    @media (prefers-reduced-motion: no-preference) {
-      .reader-reply:active { transform: scale(0.97); }
+    .reader-status:empty { display: none; }
+    .reader-compose {
+      flex: 0 0 auto;
+      padding: 0 14px calc(12px + env(safe-area-inset-bottom));
+      background: var(--bg);
     }
 
     /* Skeleton placeholders for first load + refresh */
@@ -1476,17 +1470,17 @@
       <div class="sheet-preview" id="sheet-preview" tabindex="0"></div>
       <form class="sheet-compose" id="sheet-form">
         <div class="composer">
-          <div class="attachments" id="sheet-attachments" aria-label="已加入的圖片" hidden></div>
+          <div class="attachments" id="sheet-attachments" aria-label="已加入的附件" hidden></div>
           <textarea id="sheet-text" placeholder="輸入訊息" enterkeyhint="send"></textarea>
           <div class="composer-bar">
-            <button type="button" class="composer-btn attach" id="sheet-attach" aria-label="加入圖片" title="加入圖片">
+            <button type="button" class="composer-btn attach" id="sheet-attach" aria-label="加入圖片或檔案" title="加入圖片、文字檔或 Office 檔案">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="16" rx="3"/>
                 <circle cx="9" cy="10" r="1.6"/>
                 <path d="M21 16l-5-5-8 8"/>
               </svg>
             </button>
-            <input type="file" id="sheet-file" accept="image/*" multiple hidden>
+            <input type="file" id="sheet-file" accept="image/*,.txt,.md,.csv,.tsv,.json,.log,.xml,.yaml,.yml,.ini,.cfg,.toml,.doc,.docx,.xls,.xlsx,.ppt,.pptx" multiple hidden>
             <button type="submit" class="composer-btn send" id="sheet-send" aria-label="送出" title="送出">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M22 2L11 13"/>
@@ -1516,7 +1510,7 @@
       </header>
       <div class="reader-body" id="reader-body" tabindex="0"></div>
       <span class="reader-status" id="reader-status" aria-live="polite"></span>
-      <button type="button" class="reader-reply" id="reader-reply">回覆</button>
+      <div class="reader-compose" id="reader-compose"></div>
     </section>
   </div>
 
@@ -1557,11 +1551,11 @@
     let routeSettled = false;
     const readerSigs = new Map();
     const READER_SIG_STORE = 'attn.readerSigs';
-    const MAX_IMAGES = 4;
+    const MAX_ATTACHMENTS = 4;
     const MAX_IMAGE_EDGE = 2048;
-    const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-    const UPLOADING_NOTICE = '圖片上傳中，請稍候再送出';
-    let attachments = []; // { key, name, previewUrl, status: 'uploading' | 'ready' | 'error', imageId, error }
+    const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+    const UPLOADING_NOTICE = '附件上傳中，請稍候再送出';
+    let attachments = []; // { key, name, kind, previewUrl, status, uploadId, error }
     let attachmentSeq = 0;
     const STALE_HOST_TTL_MS = 35000;
     const lastGoodByHost = new Map();
@@ -1913,14 +1907,17 @@
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
-        reader.onerror = () => reject(new Error('讀取圖片失敗'));
+        reader.onerror = () => reject(new Error('讀取附件失敗'));
         reader.readAsDataURL(blob);
       });
     }
     function attachmentHtml(item) {
       const label = item.status === 'error' ? `${item.name}：${item.error || '上傳失敗'}` : item.name;
-      return `<div class="attachment ${item.status}" data-key="${escapeHtml(item.key)}">
-        <img src="${escapeHtml(item.previewUrl)}" alt="${escapeHtml(label)}">
+      const content = item.kind === 'image'
+        ? `<img src="${escapeHtml(item.previewUrl)}" alt="${escapeHtml(label)}">`
+        : `<div class="attachment-file"><strong>${escapeHtml(item.name.split('.').pop().toUpperCase())}</strong><span>${escapeHtml(item.name)}</span></div>`;
+      return `<div class="attachment ${item.status}${item.kind === 'file' ? ' file' : ''}" data-key="${escapeHtml(item.key)}" title="${escapeHtml(label)}">
+        ${content}
         <button type="button" class="attachment-remove" data-remove aria-label="移除 ${escapeHtml(item.name)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
@@ -1930,7 +1927,7 @@
       const box = document.getElementById('sheet-attachments');
       box.hidden = attachments.length === 0;
       box.innerHTML = attachments.map(attachmentHtml).join('');
-      document.getElementById('sheet-attach').disabled = attachments.length >= MAX_IMAGES;
+      document.getElementById('sheet-attach').disabled = document.getElementById('sheet-send').disabled || attachments.length >= MAX_ATTACHMENTS;
     }
     function patchAttachment(key, patch) {
       if (!attachments.some(item => item.key === key)) return false;
@@ -1939,14 +1936,14 @@
       return true;
     }
     function clearAttachments() {
-      attachments.forEach(item => URL.revokeObjectURL(item.previewUrl));
+      attachments.forEach(item => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl); });
       attachments = [];
       renderAttachments();
     }
     function removeAttachment(key) {
       const item = attachments.find(row => row.key === key);
       if (!item) return;
-      URL.revokeObjectURL(item.previewUrl);
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       attachments = attachments.filter(row => row.key !== key);
       renderAttachments();
     }
@@ -1954,38 +1951,45 @@
       const sheetKey = agentKey(agent);
       const stillWanted = () => sheetOpen && selectedKey === sheetKey && attachments.some(item => item.key === key);
       try {
-        const blob = await prepareImage(file);
+        const isImage = attachmentKind(file) === 'image';
+        const blob = isImage ? await prepareImage(file) : file;
         if (!stillWanted()) return;
-        if (blob.size > MAX_IMAGE_BYTES) throw new Error('圖片太大（上限 8MB）');
+        if (blob.size > MAX_ATTACHMENT_BYTES) throw new Error('附件太大（上限 8MB）');
         const data = await blobToBase64(blob);
         if (!stillWanted()) return;
         const res = await fetch('/api/upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, data }),
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, data,
+            ...(!isImage ? { filename: file.name } : {}) }),
         });
         const body = await res.json();
         if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
-        if (stillWanted()) patchAttachment(key, { status: 'ready', imageId: body.id });
+        if (stillWanted()) patchAttachment(key, { status: 'ready', uploadId: body.id });
       } catch (e) {
         if (stillWanted()) patchAttachment(key, { status: 'error', error: friendlyError((e && e.message) || '上傳失敗') });
       }
       const status = document.getElementById('sheet-status');
       if (status.textContent === UPLOADING_NOTICE && !attachments.some(item => item.status === 'uploading')) setSheetStatus('');
     }
-    function addImages(fileList) {
+    const DOCUMENT_EXTENSIONS = new Set(['txt', 'md', 'csv', 'tsv', 'json', 'log', 'xml', 'yaml', 'yml', 'ini', 'cfg', 'toml', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx']);
+    function attachmentKind(file) {
+      if (/\./.test(file.name || '') && DOCUMENT_EXTENSIONS.has(String(file.name).split('.').pop().toLowerCase())) return 'file';
+      return String(file.type).startsWith('image/') ? 'image' : '';
+    }
+    function addAttachments(fileList) {
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
-      if (!sheetOpen || !agent) return;
+      if (!sheetOpen || !agent || document.getElementById('sheet-send').disabled) return;
       const files = Array.from(fileList || []);
-      const images = files.filter(file => String(file.type).startsWith('image/'));
-      const room = Math.max(0, MAX_IMAGES - attachments.length);
-      const accepted = images.slice(0, room);
-      if (images.length < files.length) setSheetStatus('只支援圖片檔', 'bad');
-      else if (accepted.length < images.length) setSheetStatus(`最多 ${MAX_IMAGES} 張圖片`, 'bad');
+      const supported = files.filter(file => attachmentKind(file));
+      const room = Math.max(0, MAX_ATTACHMENTS - attachments.length);
+      const accepted = supported.slice(0, room);
+      if (supported.length < files.length) setSheetStatus('只支援圖片、一般文字檔及 Word／Excel／PowerPoint 檔案', 'bad');
+      else if (accepted.length < supported.length) setSheetStatus(`最多 ${MAX_ATTACHMENTS} 個附件`, 'bad');
       else if (accepted.length) setSheetStatus('');
       const added = accepted.map(file => ({
-        key: `img-${++attachmentSeq}`, name: file.name || 'image',
-        previewUrl: URL.createObjectURL(file), status: 'uploading', imageId: '', error: '',
+        key: `att-${++attachmentSeq}`, name: file.name || 'image', kind: attachmentKind(file),
+        previewUrl: attachmentKind(file) === 'image' ? URL.createObjectURL(file) : '', status: 'uploading', uploadId: '', error: '',
       }));
       if (!added.length) return;
       attachments = attachments.concat(added);
@@ -2036,6 +2040,7 @@
       readerToken += 1;
       document.getElementById('reader-root').hidden = true;
       document.getElementById('sheet-root').inert = false;
+      document.getElementById('sheet-panel').appendChild(document.getElementById('sheet-form'));
       document.body.classList.remove('reader-open');
       document.getElementById('reader-body').innerHTML = '';
       document.getElementById('reader-status').textContent = '';
@@ -2105,7 +2110,10 @@
       document.getElementById('reader-sub').textContent = agent.project || agent.window || '未命名專案';
       document.getElementById('reader-status').textContent = '';
       document.getElementById('reader-root').hidden = false;
+      // Share the form itself so drafts, attachments and upload handlers stay intact across views.
+      document.getElementById('reader-compose').appendChild(document.getElementById('sheet-form'));
       document.getElementById('sheet-root').inert = true;
+      applyViewport();
       document.body.classList.add('reader-open');
       loadReaderMessage(agent, route, recallReaderSig(readerHash));
       requestAnimationFrame(() => document.getElementById('reader-body').focus());
@@ -2206,17 +2214,21 @@
       const vv = window.visualViewport;
       if (!vv || !sheetOpen) return;
       const m = viewportMetrics(vv, window.innerHeight);
-      const root = document.getElementById('sheet-root');
-      root.style.setProperty('--vv-h', `${m.height}px`);
-      root.style.setProperty('--vv-top', `${m.top}px`);
-      root.classList.toggle('kb-open', m.keyboard);
+      for (const id of ['sheet-root', 'reader-root']) {
+        const root = document.getElementById(id);
+        root.style.setProperty('--vv-h', `${m.height}px`);
+        root.style.setProperty('--vv-top', `${m.top}px`);
+        root.classList.toggle('kb-open', m.keyboard);
+      }
     }
     function clearViewport() {
-      const root = document.getElementById('sheet-root');
-      if (!root.style || !root.style.removeProperty) return;
-      root.style.removeProperty('--vv-h');
-      root.style.removeProperty('--vv-top');
-      root.classList.remove('kb-open');
+      for (const id of ['sheet-root', 'reader-root']) {
+        const root = document.getElementById(id);
+        if (!root.style || !root.style.removeProperty) continue;
+        root.style.removeProperty('--vv-h');
+        root.style.removeProperty('--vv-top');
+        root.classList.remove('kb-open');
+      }
     }
     function dragOutcome(dy, ms) {
       return dy >= 96 || (dy >= 40 && dy / Math.max(ms, 1) > 0.5) ? 'dismiss' : 'back';
@@ -2635,10 +2647,6 @@
     });
     document.getElementById('reader-back').addEventListener('click', closeReader);
     document.getElementById('reader-copy').addEventListener('click', copyReaderText);
-    document.getElementById('reader-reply').addEventListener('click', () => {
-      closeReader();
-      requestAnimationFrame(() => document.getElementById('sheet-text').focus());
-    });
     document.getElementById('reader-body').addEventListener('click', (event) => {
       if (!event.target.closest('[data-retry]')) return;
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
@@ -2649,7 +2657,7 @@
     document.getElementById('sheet-attach').addEventListener('click', () => document.getElementById('sheet-file').click());
     const fileInput = document.getElementById('sheet-file');
     fileInput.addEventListener('change', () => {
-      addImages(fileInput.files);
+      addAttachments(fileInput.files);
       fileInput.value = '';
     });
     document.getElementById('sheet-attachments').addEventListener('click', (event) => {
@@ -2663,16 +2671,19 @@
       const status = document.getElementById('sheet-status');
       const button = document.getElementById('sheet-send');
       const text = document.getElementById('sheet-text').value;
-      if (!agent) return;
+      const fromReader = readerOpen;
+      if (!agent || button.disabled) return;
+      const targetKey = agentKey(agent);
       if (attachments.some(item => item.status === 'uploading')) {
         setSheetStatus(UPLOADING_NOTICE);
         return;
       }
       if (attachments.some(item => item.status === 'error')) {
-        setSheetStatus('有圖片上傳失敗，請移除後再送出', 'bad');
+        setSheetStatus('有附件上傳失敗，請移除後再送出', 'bad');
         return;
       }
-      const images = attachments.map(item => item.imageId);
+      const images = attachments.filter(item => item.kind === 'image').map(item => item.uploadId);
+      const files = attachments.filter(item => item.kind === 'file').map(item => item.uploadId);
       button.disabled = true;
       document.getElementById('sheet-attach').disabled = true;
       status.className = 'sheet-feedback';
@@ -2681,19 +2692,26 @@
         const res = await fetch('/api/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, text, submit: true, images }),
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, text, submit: true, images,
+            ...(files.length ? { files } : {}) }),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        if (!sheetOpen || selectedKey !== targetKey) return;
         status.className = 'sheet-feedback ok';
         status.textContent = '已貼上';
-        document.getElementById('sheet-text').value = '';
+        const input = document.getElementById('sheet-text');
+        if (input.value === text) input.value = '';
         clearAttachments();
         sentAt.set(agentKey(agent), Date.now());
         refresh();
         setTimeout(refresh, 1500);
-        setTimeout(closeSheet, 280);
+        if (!fromReader) setTimeout(() => {
+          if (sheetOpen && selectedKey === targetKey && !readerOpen
+              && !document.getElementById('sheet-text').value && !attachments.length) closeSheet();
+        }, 280);
       } catch (e) {
+        if (!sheetOpen || selectedKey !== targetKey) return;
         status.className = 'sheet-feedback bad';
         status.textContent = e.message;
       } finally {

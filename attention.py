@@ -7,6 +7,7 @@ import binascii
 import curses
 import fcntl
 import hashlib
+import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,9 @@ import stat
 import subprocess
 import sys
 import time
+import zipfile
+import zlib
+import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -889,7 +893,11 @@ MAX_IMAGES = 4
 UPLOAD_TTL_SECONDS = 7 * 24 * 3600
 UPLOAD_MAX_FILES = 200
 UPLOAD_MAX_TOTAL_BYTES = 256 * 1024 * 1024
-UPLOAD_ID_RE = re.compile(r'^[0-9a-f]{32}\.(?:png|jpg|gif|webp)\Z')
+TEXT_EXTENSIONS = ('txt', 'md', 'csv', 'tsv', 'json', 'log', 'xml', 'yaml', 'yml', 'ini', 'cfg', 'toml')
+OFFICE_EXTENSIONS = ('doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx')
+IMAGE_ID_RE = re.compile(r'^[0-9a-f]{32}\.(?:png|jpg|gif|webp)\Z')
+FILE_ID_RE = re.compile(r'^[0-9a-f]{32}\.(?:' + '|'.join(TEXT_EXTENSIONS + OFFICE_EXTENSIONS) + r')\Z')
+UPLOAD_ID_RE = re.compile(r'^[0-9a-f]{32}\.(?:png|jpg|gif|webp|' + '|'.join(TEXT_EXTENSIONS + OFFICE_EXTENSIONS) + r')\Z')
 PEER_UPLOAD_TIMEOUT = 20
 # A peer's 404 on a new route means that host has not been updated; say so instead of passing 'not found' on.
 PEER_OUTDATED = 'peer is running an older tmux-attn without this feature'
@@ -915,7 +923,7 @@ def upload_dir():
 
 
 def upload_path(image_id):
-    """Resolve a server-issued image id to its file. Anything else is None."""
+    """Resolve a server-issued attachment id to its file. Anything else is None."""
     if not isinstance(image_id, str) or not UPLOAD_ID_RE.match(image_id):
         return None
     path = upload_dir() / image_id
@@ -948,15 +956,112 @@ def prune_uploads(now=None):
                 pass
 
 
-def store_upload(data):
-    """Persist validated image bytes under a server-chosen name. Returns (image_id, error)."""
+def document_extension(data, filename):
+    """Allowlisted extension plus text encoding or Office container structure."""
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    if ext in TEXT_EXTENSIONS:
+        try:
+            text = data.decode('utf-16' if data.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig')
+        except UnicodeError:
+            return ''
+        return ext if all(ch >= ' ' or ch in '\t\r\n\f' for ch in text) else ''
+    if ext in ('docx', 'xlsx', 'pptx'):
+        part, content_type = {
+            'docx': ('word/document.xml', 'wordprocessingml.document'),
+            'xlsx': ('xl/workbook.xml', 'spreadsheetml.sheet'),
+            'pptx': ('ppt/presentation.xml', 'presentationml.presentation'),
+        }[ext]
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                info = archive.getinfo('[Content_Types].xml')
+                if (info.file_size > 128 * 1024 or part not in archive.namelist()
+                        or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
+                    return ''
+                root = ET.fromstring(archive.read(info))
+                expected = f'application/vnd.openxmlformats-officedocument.{content_type}.main+xml'
+                for node in root.findall('{http://schemas.openxmlformats.org/package/2006/content-types}Override'):
+                    if node.get('PartName') == '/' + part and node.get('ContentType') == expected:
+                        return ext
+        except (KeyError, ValueError, OSError, RuntimeError, EOFError, zlib.error, zipfile.BadZipFile, ET.ParseError):
+            pass
+    if ext in ('doc', 'xls', 'ppt'):
+        names = {'doc': ('WordDocument',), 'xls': ('Workbook', 'Book'), 'ppt': ('PowerPoint Document',)}[ext]
+        return ext if compound_has_stream(data, names) else ''
+    return ''
+
+
+def compound_has_stream(data, names):
+    """Follow the compound file's FAT and directory, rather than searching file contents."""
+    if len(data) < 512 or not data.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1') or data[28:30] != b'\xfe\xff':
+        return False
+    major = int.from_bytes(data[26:28], 'little')
+    shift = int.from_bytes(data[30:32], 'little')
+    if (major, shift) not in ((3, 9), (4, 12)):
+        return False
+    size = 1 << shift
+    count = len(data) // size - 1
+    if len(data) % size or count < 2:
+        return False
+
+    def number(offset):
+        return int.from_bytes(data[offset:offset + 4], 'little')
+
+    def sector(index):
+        if index >= count:
+            raise ValueError('invalid sector')
+        return data[(index + 1) * size:(index + 2) * size]
+
+    try:
+        fat_count = number(44)
+        difat_count = number(72)
+        if not 0 < fat_count <= count or difat_count > count:
+            return False
+        fat_ids = [number(pos) for pos in range(76, 512, 4)]
+        next_difat = number(68)
+        seen = set()
+        for _ in range(difat_count):
+            if next_difat in seen:
+                return False
+            seen.add(next_difat)
+            block = sector(next_difat)
+            fat_ids.extend(int.from_bytes(block[pos:pos + 4], 'little') for pos in range(0, size - 4, 4))
+            next_difat = int.from_bytes(block[-4:], 'little')
+        fat_ids = [index for index in fat_ids if index != 0xffffffff]
+        if len(fat_ids) != fat_count or len(set(fat_ids)) != fat_count:
+            return False
+        fat = b''.join(sector(index) for index in fat_ids)
+        directory = number(48)
+        seen = set()
+        found = False
+        has_root = False
+        while directory != 0xfffffffe:
+            if directory in seen or directory * 4 + 4 > len(fat):
+                return False
+            seen.add(directory)
+            block = sector(directory)
+            for offset in range(0, size, 128):
+                entry = block[offset:offset + 128]
+                has_root |= entry[66] == 5
+                for name in names:
+                    encoded = (name + '\0').encode('utf-16le')
+                    if entry[66] == 2 and int.from_bytes(entry[64:66], 'little') == len(encoded) and entry.startswith(encoded):
+                        found = True
+            directory = int.from_bytes(fat[directory * 4:directory * 4 + 4], 'little')
+        return has_root and found
+    except ValueError:
+        return False
+
+
+def store_upload(data, filename=''):
+    """Persist validated attachment bytes under a server-chosen name."""
+    kind = 'file' if filename else 'image'
     if not data:
-        return None, 'empty image'
+        return None, f'empty {kind}'
     if len(data) > MAX_UPLOAD_BYTES:
-        return None, 'image too large'
-    ext = image_extension(data)
+        return None, f'{kind} too large'
+    ext = document_extension(data, filename) if filename else image_extension(data)
     if not ext:
-        return None, 'unsupported image type'
+        return None, f'unsupported {kind} type'
     directory = upload_dir()
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
@@ -987,14 +1092,15 @@ def paste_to_pane(pane, content, sock=None):
     tmux('paste-buffer', '-b', buf, '-t', pane, '-p', '-d', sock=sock)
 
 
-def send_to_pane(pane, pid, text, submit=True, sock=None, images=()):
-    """Paste text (then uploaded images) into a live pane after verifying pane_pid. Returns None on success.
+def send_to_pane(pane, pid, text, submit=True, sock=None, images=(), files=()):
+    """Paste text and uploaded attachment paths after verifying pane_pid. Returns None on success.
 
     Each image goes in as its own paste of its bare absolute path, separated by a space:
     Claude Code and Codex turn that into an attachment, Pi keeps the path as text.
+    Document paths remain text for the agent's file-reading tools.
     """
     text = str(text)
-    if not text.strip() and not images:
+    if not text.strip() and not images and not files:
         return 'empty message'
     if len(text) > 8000:
         return 'message too long'
@@ -1004,6 +1110,11 @@ def send_to_pane(pane, pid, text, submit=True, sock=None, images=()):
         if not path:
             return 'image not found'
         paths.append(str(path))
+    for file_id in files:
+        path = upload_path(file_id)
+        if not path:
+            return 'file not found'
+        paths.append(shlex.quote(str(path)))
     if not live_pane_meta(pane, pid, sock):
         return 'pane not found or pid mismatch'
     # Verify again at paste time — pane ids are reused.
@@ -2195,11 +2306,15 @@ def dispatch_send(payload):
     host = clean(payload.get('host') or '')
     submit = payload.get('submit', True)
     images = payload.get('images') or []
+    files = payload.get('files', [])
     if not pane or not pid or text is None:
         return 400, {'ok': False, 'error': 'pane, pid, and text are required'}
     if (not isinstance(images, list) or len(images) > MAX_IMAGES
-            or not all(isinstance(i, str) and UPLOAD_ID_RE.match(i) for i in images)):
+            or not all(isinstance(i, str) and IMAGE_ID_RE.match(i) for i in images)):
         return 400, {'ok': False, 'error': 'invalid images'}
+    if (not isinstance(files, list) or len(images) + len(files) > MAX_IMAGES
+            or not all(isinstance(i, str) and FILE_ID_RE.match(i) for i in files)):
+        return 400, {'ok': False, 'error': 'invalid files'}
     local = local_host_name()
     if host and host != local and not payload.get('_local_only'):
         peer = next((row for row in load_peers() if row['name'] == host), None)
@@ -2209,6 +2324,7 @@ def dispatch_send(payload):
             body = json.dumps({
                 'pane': pane, 'pid': pid, 'text': text, 'submit': submit, 'images': images,
                 '_local_only': True,
+                **({'files': files} if files else {}),
             }).encode()
             request = Request(
                 peer['url'].rstrip('/') + '/api/send',
@@ -2217,7 +2333,7 @@ def dispatch_send(payload):
                 method='POST',
             )
             # Each image costs the peer several tmux calls; a timeout after delivery would invite a duplicate send.
-            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT if images else 3) as response:
+            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT if images or files else 3) as response:
                 data = json.loads(response.read().decode())
             return (200 if data.get('ok') else 502), data
         except HTTPError as exc:
@@ -2227,20 +2343,23 @@ def dispatch_send(payload):
                 return 502, {'ok': False, 'error': f'peer send failed: HTTP {exc.code}'}
         except Exception as exc:
             return 502, {'ok': False, 'error': f'peer send failed: {type(exc).__name__}'}
-    error = send_to_pane(pane, pid, text, submit=bool(submit), images=images)
+    error = send_to_pane(pane, pid, text, submit=bool(submit), images=images, **({'files': files} if files else {}))
     if error:
         return 409, {'ok': False, 'error': error}
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local}
 
 
 def dispatch_upload(payload):
-    """Store an image on the pane's own host (local or via peer). Returns (code, body dict)."""
+    """Store an attachment on the pane's own host (local or via peer)."""
     if not isinstance(payload, dict):
         return 400, {'ok': False, 'error': 'invalid json'}
     pane = clean(payload.get('pane') or '')
     pid = clean(str(payload.get('pid') or ''))
     host = clean(payload.get('host') or '')
     data = payload.get('data')
+    filename = payload.get('filename', '')
+    if not isinstance(filename, str) or len(filename) > 255:
+        return 400, {'ok': False, 'error': 'invalid filename'}
     if not pane or not pid or not isinstance(data, str) or not data:
         return 400, {'ok': False, 'error': 'pane, pid, and data are required'}
     local = local_host_name()
@@ -2249,7 +2368,8 @@ def dispatch_upload(payload):
         if not peer:
             return 404, {'ok': False, 'error': f'unknown host {host}'}
         try:
-            body = json.dumps({'pane': pane, 'pid': pid, 'data': data, '_local_only': True}).encode()
+            body = json.dumps({'pane': pane, 'pid': pid, 'data': data, '_local_only': True,
+                               **({'filename': filename} if filename else {})}).encode()
             request = Request(
                 peer['url'].rstrip('/') + '/api/upload',
                 data=body,
@@ -2276,11 +2396,11 @@ def dispatch_upload(payload):
     except (ValueError, binascii.Error):
         return 400, {'ok': False, 'error': 'invalid base64'}
     try:
-        image_id, error = store_upload(raw)
+        image_id, error = store_upload(raw, filename)
     except OSError as exc:
         return 500, {'ok': False, 'error': f'upload failed: {type(exc).__name__}'}
     if error:
-        return (413 if error == 'image too large' else 400), {'ok': False, 'error': error}
+        return (413 if error in ('image too large', 'file too large') else 400), {'ok': False, 'error': error}
     return 200, {'ok': True, 'id': image_id, 'bytes': len(raw), 'pane': pane, 'pid': pid, 'host': local}
 
 
