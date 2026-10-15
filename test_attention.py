@@ -1144,6 +1144,136 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(a.prune_stale_panes(self.con, 'sock', {}), 0)
         self.assertEqual(self.con.execute('SELECT COUNT(*) FROM panes').fetchone()[0], 1)
 
+class ClaudeSessionResetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        state = patch.object(a, 'STATE', Path(self.tmp.name))
+        state.start()
+        self.addCleanup(state.stop)
+        self.con = a.db()
+        self.addCleanup(self.con.close)
+        for name in ('publish_view_revision', 'maybe_notify_wait'):
+            mock = patch.object(a, name)
+            setattr(self, name, mock.start())
+            self.addCleanup(mock.stop)
+        self.old_path = Path(self.tmp.name) / 'old.jsonl'
+        self.old_path.write_text(json.dumps({'type': 'user', 'message': {'content': 'Old task'}}) + '\n'
+                                 + json.dumps({'type': 'assistant', 'message': {'content': 'Old answer'}}) + '\n')
+
+    def row(self):
+        return dict(self.con.execute('SELECT * FROM panes').fetchone())
+
+    def seed(self, state='IDLE', agent='claude'):
+        a.record(self.con, 'socket', '%1', '123', agent, state, 'Old work', state == 'IDLE')
+        a.remember_preview(self.con, 'socket', '%1', '123', user='Old task', agent='Old answer',
+                           transcript_path=str(self.old_path))
+
+    def hook(self, event='SessionStart', agent='claude', **data):
+        with patch.object(a.sys, 'stdin', io.StringIO(json.dumps(data))), \
+                patch.object(a.sys, 'stdout', io.StringIO()) as out, \
+                patch.object(a, 'hook_target', return_value=('socket', '%1', '123')), \
+                patch.dict(os.environ, {'CURSOR_VERSION': ''}):
+            a.event_command(agent, event)
+        self.assertEqual(json.loads(out.getvalue()), {})
+
+    def test_clear_discards_prior_state_and_previews(self):
+        for state in ('RUNNING', 'WAIT', 'IDLE'):
+            for path_kind in ('empty', 'missing', 'blank'):
+                with self.subTest(state=state, transcript=path_kind):
+                    self.seed(state)
+                    before = self.row()
+                    path = Path(self.tmp.name) / f'{state}-{path_kind}.jsonl'
+                    if path_kind == 'empty':
+                        path.write_text('')
+                    transcript = '' if path_kind == 'blank' else str(path)
+                    self.hook(source='clear', transcript_path=transcript)
+                    row = self.row()
+                    self.assertEqual((row['state'], row['needs_review']), ('IDLE', 0))
+                    self.assertGreater(row['revision'], before['revision'])
+                    self.assertEqual((row['preview_users'], row['preview_agent'], row['preview_mtime'],
+                                      row['preview_revision'], row['transcript_path']),
+                                     ('[]', '', 0, 0, transcript))
+                    # A bound missing transcript must not discover the previous conversation.
+                    discovered = str(self.old_path) if transcript else ''
+                    with patch.object(a, 'latest_claude_transcript', return_value=discovered) as discover:
+                        self.assertEqual(a.pane_conversation_preview(self.con, row, {'path': '/project'}),
+                                         {'users': [], 'agent': ''})
+                        if transcript:
+                            discover.assert_not_called()
+                    self.assertEqual(self.publish_view_revision.call_args.args, ('socket', '%1', '123', 0))
+
+    def test_startup_and_resume_preserve_unread_completion_and_cache(self):
+        for source in ('startup', 'resume'):
+            with self.subTest(source=source):
+                self.seed()
+                before = self.row()
+                self.hook(source=source, transcript_path=str(Path(self.tmp.name) / 'resumed.jsonl'))
+                row = self.row()
+                for key in ('state', 'needs_review', 'revision', 'acknowledged', 'preview_users',
+                            'preview_agent', 'preview_mtime', 'preview_revision'):
+                    self.assertEqual(row[key], before[key], key)
+
+    def test_clear_does_not_reset_other_agents(self):
+        for agent in ('cursor', 'codex', 'pi'):
+            with self.subTest(agent=agent):
+                self.seed(agent=agent)
+                before = self.row()
+                self.hook(agent=agent, source='clear')
+                self.assertEqual(self.row(), before)
+
+    def test_unbound_claude_panes_still_discover_transcripts(self):
+        self.seed()
+        self.hook(source='clear')
+        with patch.object(a, 'latest_claude_transcript', return_value=str(self.old_path)):
+            self.assertEqual(a.resolve_transcript_path(self.con, self.row(), {'path': '/project'}),
+                             str(self.old_path))
+
+    def test_new_work_completes_after_clear(self):
+        self.seed('RUNNING')
+        path = str(Path(self.tmp.name) / 'new.jsonl')
+        self.hook(source='clear', transcript_path=path)
+        self.hook('UserPromptSubmit', prompt='New task', transcript_path=path)
+        self.assertEqual(self.row()['state'], 'RUNNING')
+        self.hook('Stop', last_assistant_message='New answer', transcript_path=path)
+        row = self.row()
+        self.assertEqual((row['state'], row['needs_review']), ('IDLE', 1))
+        self.assertEqual(row['preview_revision'], row['revision'])
+        self.assertEqual(a.pane_conversation_preview(self.con, row, {'path': '/project'}),
+                         {'users': ['New task'], 'agent': 'New answer'})
+
+    def test_clear_cache_reset_cannot_erase_later_work(self):
+        self.seed('RUNNING')
+        record = a.record
+        new_path = str(Path(self.tmp.name) / 'later.jsonl')
+
+        def later_work(*args, **kwargs):
+            revision = record(*args, **kwargs)
+            record(self.con, 'socket', '%1', '123', 'claude', 'RUNNING', 'Working')
+            a.remember_preview(self.con, 'socket', '%1', '123', user='Later task', agent='Later answer',
+                               transcript_path=new_path)
+            return revision
+
+        with patch.object(a, 'record', side_effect=later_work):
+            self.hook(source='clear', transcript_path=str(Path(self.tmp.name) / 'clear.jsonl'))
+        row = self.row()
+        self.assertEqual(row['state'], 'RUNNING')
+        self.assertEqual(json.loads(row['preview_users'])[-1], 'Later task')
+        self.assertEqual((row['preview_agent'], row['transcript_path']), ('Later answer', new_path))
+
+    def test_stale_poll_cannot_restore_cache_after_clear_on_an_already_idle_pane(self):
+        # record() does not bump the revision when the state is unchanged, so the reset must.
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Registered; no new work yet', False)
+        a.remember_preview(self.con, 'socket', '%1', '123', user='Old task', agent='Old answer',
+                           transcript_path=str(self.old_path))
+        stale = self.row()
+        self.hook(source='clear', transcript_path=str(Path(self.tmp.name) / 'new.jsonl'))
+        a.pane_conversation_preview(self.con, stale, {'path': '/project'})
+        row = self.row()
+        self.assertEqual((row['preview_users'], row['preview_agent']), ('[]', ''))
+        self.assertGreater(row['revision'], stale['revision'])
+
+
 class IntegrationTests(unittest.TestCase):
     def test_install_live_hooks_sidebars_navigation_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:

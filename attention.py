@@ -514,7 +514,8 @@ def resolve_transcript_path(con, row, meta):
     path = ''
     if 'transcript_path' in row.keys():
         path = row['transcript_path'] or ''
-    if path and Path(path).is_file():
+    # A new Claude session can bind its transcript before the file is created.
+    if path and (row.get('agent') == 'claude' or Path(path).is_file()):
         return path
     mapping = con.execute(
         'SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
@@ -1170,13 +1171,15 @@ def event_command(agent, event):
                 # Reattaching/restarting must not discard an unread completion.
                 existing = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock,pane,pid)).fetchone()
                 recorded_revision = None
+                clear_session = (agent == 'claude' and event in ('SessionStart', 'session_start')
+                                 and data.get('source') == 'clear')
                 if event in ('SessionEnd','session_shutdown','sessionEnd') and existing:
                     if existing['needs_review']:
                         # Keep an unread completed response after the agent exits.
                         state = None
                     if existing['state'] in ('RUNNING','WAIT'):
                         state = ('IDLE', 'Agent exited; review current work', True)
-                if event not in ('SessionStart','session_start','sessionStart') or not existing:
+                if clear_session or event not in ('SessionStart','session_start','sessionStart') or not existing:
                     if state:
                         recorded_revision = record(con, sock, pane, pid, agent, *state,event_key=(data.get('generation_id','') if agent == 'cursor' else data.get('turn_id','')))
                 user_text = hook_user_text(data) if event in (
@@ -1186,7 +1189,16 @@ def event_command(agent, event):
                     'Stop', 'stop', 'agent_settled', 'StopFailure',
                 ) else ''
                 transcript = data.get('transcript_path') or ''
-                if user_text or agent_text or transcript:
+                if clear_session and recorded_revision is not None:
+                    # Clearing starts a new conversation, even if its transcript is still empty.
+                    with con:
+                        # record() leaves the revision alone when the state did not change, so bump it here:
+                        # a poll that read the row before the reset must not be able to write the old cache back.
+                        con.execute('''UPDATE panes SET preview_users='[]',preview_agent='',preview_mtime=0,
+                            preview_revision=0,transcript_path=?,revision=revision+1
+                            WHERE socket=? AND pane=? AND pid=? AND revision=?''',
+                            (clean(transcript, 500), sock, pane, pid, recorded_revision))
+                elif user_text or agent_text or transcript:
                     if not con.execute('SELECT 1 FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone():
                         record(con, sock, pane, pid, agent, 'IDLE', 'Registered; no new work yet')
                     remember_preview(
