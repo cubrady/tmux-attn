@@ -481,6 +481,87 @@ def conversation_preview(path, agent='', limit=PREVIEW_CHARS_FULL):
     return {'users': users, 'agent': clip_preview(agent_text, limit) if agent_text else ''}
 
 
+_MODEL_CACHE = {}
+_MODEL_CACHE_LIMIT = 256
+_CLAUDE_MODEL = re.compile(r'claude-(?:(?P<fam>opus|sonnet|haiku|fable)-(?P<ver>\d+(?:-\d{1,2})?)'
+                           r'|(?P<ver2>\d+(?:-\d{1,2})?)-(?P<fam2>opus|sonnet|haiku))(?:-\d{8})?')
+
+
+def _scan_model(lines, agent):
+    model, effort = '', ''
+    for line in lines:
+        if agent == 'codex':
+            if '"turn_context"' not in line:
+                continue
+        elif '"assistant"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if agent == 'codex':
+            payload = row.get('payload') if isinstance(row.get('payload'), dict) else {}
+            if row.get('type') == 'turn_context' and payload.get('model'):
+                model, effort = str(payload['model']), str(payload.get('effort') or '')
+        elif row.get('type') == 'assistant':
+            message = row.get('message') if isinstance(row.get('message'), dict) else {}
+            found = str(message.get('model') or '')
+            if found and not found.startswith('<'):
+                model = found
+    return model, effort
+
+
+def transcript_model(path, agent=''):
+    """(model id, reasoning effort) last seen in a transcript; ('', '') when unknown.
+
+    Only Claude and Codex transcripts record the model. The tail scan can miss it during a
+    long turn, so the last value seen for a file is kept rather than blanking the badge.
+    """
+    key = str(path or '')
+    try:
+        stat_result = Path(key).stat()
+    except OSError:
+        return '', ''
+    rollout = 'rollout' in Path(key).name or agent == 'codex'
+    kind = 'codex' if rollout else agent
+    if kind not in ('codex', 'claude'):
+        return '', ''
+    signature = (stat_result.st_mtime_ns, stat_result.st_size)
+    cached = _MODEL_CACHE.get(key)
+    if cached and cached[0] == signature:
+        return cached[1], cached[2]
+    try:
+        model, effort = _scan_model(_iter_transcript_tail_lines(key), kind)
+        if not model and not cached and stat_result.st_size > TRANSCRIPT_TAIL_BYTES:
+            # Codex writes turn_context once per turn, so a long turn can push it past the tail.
+            with open(key, errors='replace') as source:
+                model, effort = _scan_model(source, kind)
+    except OSError:
+        return (cached[1], cached[2]) if cached else ('', '')
+    if not model and cached:
+        model, effort = cached[1], cached[2]
+    if len(_MODEL_CACHE) >= _MODEL_CACHE_LIMIT:
+        _MODEL_CACHE.clear()
+    _MODEL_CACHE[key] = (signature, model, effort)
+    return model, effort
+
+
+def pane_model(con, row):
+    """(model id, effort) for a tracked pane's transcript."""
+    return transcript_model(resolve_transcript_path(con, row, row), row.get('agent') or '')
+
+
+def model_label(model):
+    """Short card label: 'claude-sonnet-5-5' -> 'sonnet 5.5'; unknown ids pass through."""
+    model = clean(model, 80)
+    match = _CLAUDE_MODEL.fullmatch(model)
+    if not match:
+        return model
+    family = match.group('fam') or match.group('fam2')
+    version = match.group('ver') or match.group('ver2')
+    return f'{family} {version.replace("-", ".")}'
+
+
 def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_path=None, expected_revision=None):
     row = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
     if not row or (expected_revision is not None and row['revision'] != expected_revision):
@@ -2465,6 +2546,7 @@ def agents_payload(con, sock=None, live=None, now=None):
         reviewed = row['revision'] <= row['acknowledged'] and (row['state'] == 'WAIT' or row['needs_review'])
         command = row.get('command') or ''
         preview = pane_conversation_preview(con, row, row)
+        model, effort = pane_model(con, row)
         env = git_workdir_info(row.get('path', ''))
         agents.append({
             'pane': row['pane'],
@@ -2474,6 +2556,9 @@ def agents_payload(con, sock=None, live=None, now=None):
             'window_id': row.get('window_id', ''),
             'agent': row['agent'],
             'cli': cli_label(row['agent']),
+            'model': model,
+            'model_label': model_label(model),
+            'effort': effort,
             'command': command,
             'tracked': True,
             'project': labels.get(row['path'], Path(row['path']).name if row.get('path') else ''),
@@ -2511,6 +2596,9 @@ def agents_payload(con, sock=None, live=None, now=None):
             'window_id': meta.get('window_id', ''),
             'agent': '',
             'cli': cli,
+            'model': '',
+            'model_label': '',
+            'effort': '',
             'command': command,
             'tracked': False,
             'project': labels.get(meta['path'], Path(meta['path']).name if meta.get('path') else ''),

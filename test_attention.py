@@ -356,6 +356,66 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(preview['users'], ['修好 OAuth'])
         self.assertIn('redirect URI', preview['agent'])
 
+    def test_transcript_model_reads_latest_model_and_effort(self):
+        claude = Path(self.tmp.name) / 'model-claude.jsonl'
+        claude.write_text('\n'.join([
+            json.dumps({'type': 'assistant', 'message': {'model': 'claude-opus-5-5', 'content': 'a'}}),
+            json.dumps({'type': 'assistant', 'message': {'model': 'claude-sonnet-5-5', 'content': 'b'}}),
+            json.dumps({'type': 'assistant', 'message': {'model': '<synthetic>', 'content': 'c'}}),
+            json.dumps({'type': 'user', 'message': {'content': 'd'}}),
+        ]) + '\n')
+        self.assertEqual(a.transcript_model(claude, 'claude'), ('claude-sonnet-5-5', ''))
+        codex = Path(self.tmp.name) / 'rollout-model.jsonl'
+        codex.write_text('\n'.join([
+            json.dumps({'type': 'turn_context', 'payload': {'model': 'gpt-6-luna', 'effort': 'low'}}),
+            json.dumps({'type': 'turn_context', 'payload': {'model': 'gpt-6.1-sol', 'effort': 'xhigh'}}),
+            json.dumps({'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': 'x'}}),
+        ]) + '\n')
+        self.assertEqual(a.transcript_model(codex, 'codex'), ('gpt-6.1-sol', 'xhigh'))
+        cursor = Path(self.tmp.name) / 'cursor-model.jsonl'
+        cursor.write_text(json.dumps({'role': 'assistant', 'message': {'content': []}}) + '\n')
+        self.assertEqual(a.transcript_model(cursor, 'cursor'), ('', ''))
+        self.assertEqual(a.transcript_model(Path(self.tmp.name) / 'missing.jsonl', 'claude'), ('', ''))
+
+    def test_transcript_model_keeps_last_known_when_tail_loses_it(self):
+        path = Path(self.tmp.name) / 'model-tail.jsonl'
+        path.write_text(json.dumps({'type': 'assistant', 'message': {'model': 'claude-opus-5-5', 'content': 'a'}}) + '\n')
+        self.assertEqual(a.transcript_model(path, 'claude')[0], 'claude-opus-5-5')
+        path.write_text(json.dumps({'type': 'user', 'message': {'content': 'long tool output'}}) + '\n')
+        self.assertEqual(a.transcript_model(path, 'claude')[0], 'claude-opus-5-5')
+
+    def test_transcript_model_finds_turn_context_beyond_the_tail(self):
+        path = Path(self.tmp.name) / 'rollout-long.jsonl'
+        filler = json.dumps({'type': 'event_msg', 'payload': {'type': 'exec_command_output', 'text': 'x' * 2000}})
+        path.write_text('\n'.join(
+            [json.dumps({'type': 'turn_context', 'payload': {'model': 'gpt-6.1-sol', 'effort': 'high'}})]
+            + [filler] * ((a.TRANSCRIPT_TAIL_BYTES // 2000) + 20)) + '\n')
+        self.assertGreater(path.stat().st_size, a.TRANSCRIPT_TAIL_BYTES)
+        self.assertEqual(a.transcript_model(path, 'codex'), ('gpt-6.1-sol', 'high'))
+
+    def test_model_label_shortens_known_ids_only(self):
+        self.assertEqual(a.model_label('claude-sonnet-5-5'), 'sonnet 5.5')
+        self.assertEqual(a.model_label('claude-opus-5-5'), 'opus 5.5')
+        self.assertEqual(a.model_label('claude-haiku-4-5-20251001'), 'haiku 4.5')
+        self.assertEqual(a.model_label('claude-fable-5-1'), 'fable 5.1')
+        self.assertEqual(a.model_label('claude-3-5-sonnet-20241022'), 'sonnet 3.5')
+        self.assertEqual(a.model_label('gpt-6.1-sol'), 'gpt-6.1-sol')
+        self.assertEqual(a.model_label(''), '')
+
+    def test_agents_payload_includes_model_and_effort(self):
+        self.live = {
+            ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'},
+        }
+        rollout = Path(self.tmp.name) / 'rollout-payload.jsonl'
+        rollout.write_text(json.dumps({'type': 'turn_context', 'payload': {'model': 'gpt-6.1-sol', 'effort': 'xhigh'}}) + '\n')
+        a.record(self.con, 'socket', '%1', '123', 'codex', 'WAIT', 'Approval needed')
+        a.remember_preview(self.con, 'socket', '%1', '123', user='修好 OAuth', agent='確認', transcript_path=str(rollout))
+        row = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)['agents'][0]
+        self.assertEqual((row['model'], row['model_label'], row['effort']), ('gpt-6.1-sol', 'gpt-6.1-sol', 'xhigh'))
+        shell = {('%2', '9'): {'pane': '%2', 'pid': '9', 'session': 'work', 'window': 'two', 'window_id': '@2', 'path': '/x', 'command': 'zsh'}}
+        untracked = a.agents_payload(self.con, 'socket', shell, now=time.time()+3)['agents'][0]
+        self.assertEqual((untracked['model'], untracked['model_label'], untracked['effort']), ('', '', ''))
+
     def test_agent_sort_key_newest_pending_first(self):
         older = {'tracked': True, 'state': 'IDLE', 'needs_review': True, 'unread': True, 'pending': True, 'updated': 100, 'host': 'a', 'pane': '%1'}
         newer = {'tracked': True, 'state': 'IDLE', 'needs_review': True, 'unread': True, 'pending': True, 'updated': 200, 'host': 'a', 'pane': '%2'}
