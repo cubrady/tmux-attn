@@ -8,6 +8,7 @@ import curses
 import fcntl
 import hashlib
 import io
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -887,6 +888,18 @@ def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event
     return revision
 
 
+# A finished turn that left background work running is parked, not finished: the agent
+# wakes itself when the work reports back, so nobody has to act yet.
+BACKGROUND_WAIT = 'Background work: waiting on '
+
+
+def background_wait_reason(tasks):
+    """Reason for a Claude Stop that still has running background tasks, else ''."""
+    kinds = Counter(clean(task.get('type') or 'task', 32) for task in tasks if isinstance(task, dict)
+                    and task.get('status') == 'running') if isinstance(tasks, list) else None
+    return BACKGROUND_WAIT + ', '.join(f'{count} {kind}' for kind, count in kinds.items()) if kinds else ''
+
+
 def classify(agent, event, data):
     if agent == 'cursor':
         event = {'sessionStart':'SessionStart', 'sessionEnd':'SessionEnd',
@@ -925,8 +938,9 @@ def classify(agent, event, data):
         # Permission / AskUserQuestion / ui_prompt events remain hard WAIT.
         if last.endswith(('?', '？')):
             return 'IDLE', 'Response ends with a question; review suggested', True
-        if agent == 'claude' and any(t.get('status') == 'running' for t in data.get('background_tasks', [])):
-            return 'IDLE', 'Response finished; review needed; background tasks still running', True
+        waiting = background_wait_reason(data.get('background_tasks')) if agent == 'claude' else ''
+        if waiting:
+            return 'RUNNING', waiting, False
         return 'IDLE', 'Response finished; review needed', True
     return None
 
@@ -2195,8 +2209,17 @@ def age(stamp):
     return f'{seconds//3600}h' if seconds >= 3600 else f'{seconds//60}m' if seconds >= 60 else f'{seconds}s'
 
 
+def background_wait(row):
+    """Running only by proxy: parked on background work. Peers relay this as a flag, not a reason."""
+    keys = row.keys()
+    return bool('background_wait' in keys and row['background_wait']) or (
+        row['state'] == 'RUNNING' and str(row['reason'] or '').startswith(BACKGROUND_WAIT))
+
+
 def agent_emoji(row):
-    return STATUS_EMOJI[attention_category(row)]
+    category = attention_category(row)
+    # ⏳ tells parked-on-background apart from working; counts and window badges stay in 🏃.
+    return '⏳' if category == 'running' and background_wait(row) else STATUS_EMOJI[category]
 
 
 def agent_severity(row):
@@ -2371,7 +2394,7 @@ def tag_host(payload, host):
         item = dict(row)
         item['host'] = host
         item['category'] = attention_category(item)
-        item['emoji'] = STATUS_EMOJI[item['category']]
+        item['emoji'] = agent_emoji(item)
         agents.append(item)
     # Reclassify older peers too; their summary may still count viewed results as review.
     return agents, attention_summary(agents)
@@ -2575,6 +2598,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'revision': row['revision'],
             'acknowledged': row['acknowledged'],
             'emoji': agent_emoji(row),
+            'background_wait': background_wait(row),
             'severity': agent_severity(row),
             'source': (row['source'] if 'source' in row.keys() else 'hook') or 'hook',
             'reason': display_reason(row, reviewed),
@@ -2634,17 +2658,18 @@ def display_reason(item, reviewed):
         count = item['reason'].split(': ',1)[1]
         return f'有 {count} 個問題等你回答（agent 仍可繼續工作）'
     if item['state'] == 'IDLE':
-        background = '（背景工作仍在運行）' if 'background tasks still running' in item['reason'] else ''
         if reviewed:
-            return '已完成，已查看' + background
+            return '已完成，已查看'
         if item['needs_review']:
             if 'question' in item['reason'].lower():
-                return '回覆以問號結尾，建議查看（非確定等待）' + background
+                return '回覆以問號結尾，建議查看（非確定等待）'
             outcome = '已中斷' if 'Interrupted' in item['reason'] else '發生錯誤' if 'error' in item['reason'] else '已完成'
-            return outcome + '，尚未查看' + background
+            return outcome + '，尚未查看'
         return '閒置，等待新任務'
     if item['state'] == 'RUNNING':
-        return '背景工作仍在運行' if 'Background work' in item['reason'] else '正在工作'
+        if item['reason'].startswith(BACKGROUND_WAIT):
+            return f'等待背景工作（{item["reason"][len(BACKGROUND_WAIT):]}）· 可先看進度'
+        return '正在工作'
     reason = item['reason']
     if 'Approval' in reason or 'approval' in reason:
         return '需要批准指令或操作 · ' + reason
@@ -2661,7 +2686,7 @@ def inbox_lines(rows):
         for item in group:
             identity = (item['pane'], item['pid'])
             reviewed = item['reviewed']
-            label = window_badge([item])
+            label = agent_emoji(item)
             if reviewed:
                 label += ' · 已查看'
             reason = display_reason(item, reviewed)

@@ -1573,6 +1573,18 @@ test('a card for a running agent shows its latest prompt when there is no result
   assert.doesNotMatch(html, /older|preview-line agent/);
 });
 
+test('a card parked on background work is still a running card, marked with its own icon', () => {
+  const parked = cardHtmlFor({ state: 'RUNNING', pending: false, background_wait: true, reason: '等待背景工作（1 shell）· 可先看進度' });
+  assert.match(parked, /class="card running/);
+  assert.match(parked, /<span class="emoji"[^>]*>⏳<\/span>/);
+  assert.match(parked, /class="reason"[^>]*>等待背景工作（1 shell）/);
+  for (const overrides of [{ reason: '正在工作' }, { background_wait: false }, {}]) {
+    const working = cardHtmlFor({ state: 'RUNNING', pending: false, ...overrides });
+    assert.match(working, /<span class="emoji"[^>]*>🏃<\/span>/);
+    assert.doesNotMatch(working, /⏳/);
+  }
+});
+
 test('the sheet keeps every prompt in order while cards are shortened', async () => {
   const t = readerSetup();
   await openSheetWithPreview(t);

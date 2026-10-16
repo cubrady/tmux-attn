@@ -126,6 +126,28 @@ class ObserverTests(unittest.TestCase):
      self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),before)
    finally:a.STATE=previous
 
+ def test_claude_background_wait_survives_a_done_screen_until_it_wakes(self):
+  done='⏺ Waiting on the deploy.\n✻ Sautéed for 7m 58s · done 下午2:46\n────\n❯\n────\n⏵⏵ auto mode on'
+  table={123:(1,'zsh'),456:(123,'claude --resume root')}
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     live={('%1','123'):{'path':'/project'}}
+     a.record(con,'sock','%1','123','claude','RUNNING','Background work: waiting on 1 shell',event_time=1000000000)
+     def scan():
+      with patch('codex_observer.tmux',return_value=done),patch('codex_observer.time.time',return_value=2000000000):
+       observe_claude(con,'sock',live,table)
+     before=dict(con.execute('SELECT * FROM panes').fetchone())
+     scan()
+     self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),before)
+     # Once a hook reports the agent working again, a lost Stop is still recovered from the screen.
+     a.record(con,'sock','%1','123','claude','RUNNING','Working',event_time=1000000001)
+     scan()
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['state'],row['needs_review']),('IDLE',1))
+   finally:a.STATE=previous
+
  def test_cursor_footer_lifecycle_and_acknowledgement(self):
   def screen(body,active=False):
    return body+'\n\n → Add a follow-up'+('    ctrl+c to stop' if active else '')+'\n\n Auto · 16.6%    Run Everything\n /project · main\n'
