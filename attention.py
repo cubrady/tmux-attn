@@ -1095,6 +1095,11 @@ def paste_to_pane(pane, content, sock=None):
     tmux('paste-buffer', '-b', buf, '-t', pane, '-p', '-d', sock=sock)
 
 
+def has_control_chars(text, allowed=''):
+    """ESC would end a bracketed paste early and reach the TUI as keys; a lone surrogate cannot be pasted at all."""
+    return any(unicodedata.category(c) in ('Cc', 'Cs') and c not in allowed for c in text)
+
+
 def send_to_pane(pane, pid, text, submit=True, sock=None, images=(), files=()):
     """Paste text and uploaded attachment paths after verifying pane_pid. Returns None on success.
 
@@ -1107,6 +1112,8 @@ def send_to_pane(pane, pid, text, submit=True, sock=None, images=(), files=()):
         return 'empty message'
     if len(text) > 8000:
         return 'message too long'
+    if has_control_chars(text, '\n\r\t'):
+        return 'message contains control characters'
     paths = []
     for image_id in images:
         path = upload_path(image_id)
@@ -1571,8 +1578,7 @@ def normalize_answer(question, answer):
     text = ' '.join(text.split())
     if not text or len(text) > MAX_ANSWER_CHARS:
         return None, 'answer is empty or too long'
-    # ESC would end the bracketed paste early and reach the TUI as keys; a lone surrogate cannot be pasted at all.
-    if any(unicodedata.category(c) in ('Cc', 'Cs') for c in text):
+    if has_control_chars(text):
         return None, 'answer contains control characters'
     # The screen checks look for the answer with whitespace and markdown marks removed.
     if not squash(text):
