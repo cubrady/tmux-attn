@@ -2305,3 +2305,145 @@ test('the transcript cannot chain scrolling into the page, and motion respects r
   assert.match(html, /\.sheet-preview \{[^}]*overscroll-behavior: contain/);
   assert.match(html, /@media \(prefers-reduced-motion: no-preference\) \{\s*\.sheet \{ transition/);
 });
+
+const CODEX_QUESTIONS = [
+  { id: '["request_user_input_async","call_1",0]', group: '["request_user_input_async","call_1",0]', title: '第 2 項 Staging 要怎麼處理？',
+    header: '', options: [{ label: '保留每次 PR push（建議）', description: '' }, { label: '延後到<合併>前', description: '' }], multi: false, free_text: true },
+  { id: '["request_user_input_async","call_2",0]', group: '["request_user_input_async","call_2",0]', title: 'Naming?',
+    header: '', options: [], multi: false, free_text: true },
+];
+const CLAUDE_QUESTIONS = [
+  { id: 'toolu_1:0', group: 'toolu_1', title: 'Which database?', header: 'DB',
+    options: [{ label: 'Postgres', description: 'Relational' }, { label: 'SQLite', description: 'Embedded' }], multi: false, free_text: true },
+  { id: 'toolu_1:1', group: 'toolu_1', title: 'Features?', header: 'Feat',
+    options: [{ label: 'Logs', description: '' }, { label: 'Metrics', description: '' }, { label: 'Traces', description: '' }], multi: true, free_text: false },
+];
+
+function askSetup(questions, answer = () => jsonReply({ ok: true })) {
+  const calls = [];
+  const ui = dashboard({
+    fetchRequest: async (url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push({ url, body });
+      if (url === '/api/preview') return jsonReply({ ...PREVIEW, questions });
+      if (url === '/api/answer') return answer(body);
+      return jsonReply({ ok: true });
+    },
+  });
+  const current = { ...agent('lab', 'WAIT'), project: 'demo' };
+  const el = id => ui.elements.get(id);
+  const target = (selector, value) => ({ closest: s => (s === selector ? value : null) });
+  return {
+    ui, el, calls, current,
+    answers: () => calls.filter(call => call.url === '/api/answer'),
+    pick: (qid, option) => el('sheet-ask').listeners.click({ target: target('.ask-option', { dataset: { qid, option: String(option) } }) }),
+    submit: group => el('sheet-ask').listeners.click({ target: target('.ask-submit', { dataset: { group } }) }),
+    type: (qid, value, key) => {
+      const input = { value, dataset: { qid }, parentNode: null };
+      el('sheet-ask').listeners.input({ target: target('.ask-other', input) });
+      if (key) el('sheet-ask').listeners.keydown({ key, isComposing: false, preventDefault() {}, target: target('.ask-other', input) });
+    },
+    async open() {
+      ui.render({ agents: [current] });
+      ui.open(current);
+      await flush(); await flush();
+    },
+  };
+}
+
+test('pending questions from the preview render as a tray with numbered, escaped options', async () => {
+  const t = askSetup(CODEX_QUESTIONS);
+  await t.open();
+  const html = t.el('sheet-ask').innerHTML;
+  assert.equal(t.el('sheet-ask').hidden, false);
+  assert.match(html, /第 2 項 Staging 要怎麼處理？/);
+  assert.match(html, /<span class="ask-key" aria-hidden="true">1<\/span>/);
+  assert.match(html, /延後到&lt;合併&gt;前/);
+  assert.doesNotMatch(html, /<合併>/);
+  assert.match(html, /placeholder="其他回答（自行輸入）"/);
+  assert.match(html, /placeholder="輸入回答"/);
+  assert.equal((html.match(/class="ask-submit"/g) || []).length, 2, 'Codex questions are answered one by one');
+  const plain = askSetup([]);
+  await plain.open();
+  assert.equal(plain.el('sheet-ask').hidden, true);
+  assert.equal(plain.el('sheet-ask').innerHTML, '');
+});
+
+test('a picked option is sent to the pane host and the last answer returns to the dashboard', async () => {
+  const t = askSetup(CODEX_QUESTIONS.slice(0, 1));
+  await t.open();
+  t.pick(CODEX_QUESTIONS[0].id, 1);
+  assert.match(t.el('sheet-ask').innerHTML, /aria-checked="true" data-qid="[^"]+" data-option="1"/);
+  await t.submit(CODEX_QUESTIONS[0].group);
+  await flush();
+  assert.deepEqual(t.answers().map(call => call.body), [{
+    host: 'lab', pane: '%1', pid: '123', group: CODEX_QUESTIONS[0].group, answers: [{ id: CODEX_QUESTIONS[0].id, option: 1 }],
+  }]);
+  assert.equal(t.el('sheet-root').hidden, true);
+});
+
+test('typed text replaces the option, Enter submits it, and nothing is sent until each question is answered', async () => {
+  const t = askSetup(CODEX_QUESTIONS);
+  await t.open();
+  await t.submit(CODEX_QUESTIONS[1].group);
+  assert.equal(t.answers().length, 0);
+  assert.match(t.el('sheet-ask').innerHTML, /ask-status bad" role="status">請先選擇或輸入回答/);
+  t.pick(CODEX_QUESTIONS[0].id, 0);
+  t.type(CODEX_QUESTIONS[0].id, '  我自己的答案 ', 'Enter');
+  await flush(); await flush();
+  assert.deepEqual(t.answers()[0].body.answers, [{ id: CODEX_QUESTIONS[0].id, text: '我自己的答案' }]);
+  // The other question stays open in the sheet after this one is answered.
+  assert.equal(t.el('sheet-root').hidden, false);
+  assert.doesNotMatch(t.el('sheet-ask').innerHTML, /Staging/);
+  assert.match(t.el('sheet-ask').innerHTML, /Naming\?/);
+  assert.equal(t.el('sheet-status').textContent, '已送出回答');
+});
+
+test('a Claude question group is answered in one request, including multi-select choices', async () => {
+  const t = askSetup(CLAUDE_QUESTIONS);
+  await t.open();
+  const html = t.el('sheet-ask').innerHTML;
+  assert.equal((html.match(/class="ask-submit"/g) || []).length, 1);
+  assert.match(html, /問題 1\/2 · DB/);
+  assert.match(html, /role="checkbox"/);
+  assert.equal((html.match(/class="ask-other"/g) || []).length, 1, 'multi-select has no typed answer');
+  t.pick('toolu_1:0', 0);
+  await t.submit('toolu_1');
+  assert.match(t.el('sheet-ask').innerHTML, /每一題都要先選擇或輸入回答/);
+  t.pick('toolu_1:1', 2);
+  t.pick('toolu_1:1', 0);
+  t.pick('toolu_1:1', 2);
+  t.pick('toolu_1:1', 1);
+  await t.submit('toolu_1');
+  await flush();
+  assert.deepEqual(t.answers()[0].body.answers, [{ id: 'toolu_1:0', option: 0 }, { id: 'toolu_1:1', options: [0, 1] }]);
+});
+
+test('a refused answer keeps the choices and shows why, including for an outdated peer', async () => {
+  let reply = { ok: false, error: 'Codex 沒有接受這個回答' };
+  const t = askSetup(CODEX_QUESTIONS.slice(0, 1), () => jsonReply(reply, 409));
+  await t.open();
+  t.pick(CODEX_QUESTIONS[0].id, 1);
+  await t.submit(CODEX_QUESTIONS[0].group);
+  await flush();
+  let html = t.el('sheet-ask').innerHTML;
+  assert.match(html, /ask-status bad" role="status">Codex 沒有接受這個回答/);
+  assert.match(html, /aria-checked="true" data-qid="[^"]+" data-option="1"/);
+  assert.match(html, />送出回答</);
+  assert.equal(t.el('sheet-root').hidden, false);
+  reply = { ok: false, error: 'peer is running an older tmux-attn without this feature' };
+  await t.submit(CODEX_QUESTIONS[0].group);
+  await flush();
+  assert.match(t.el('sheet-ask').innerHTML, /版本較舊/);
+});
+
+test('controls rendered inside an agent-written question title are ignored', async () => {
+  const t = askSetup(CODEX_QUESTIONS.slice(0, 1));
+  await t.open();
+  const inTitle = (selector, value) => ({ closest: s => (s === '.ask-title' ? {} : s === selector ? value : null) });
+  t.el('sheet-ask').listeners.click({ target: inTitle('.ask-option', { dataset: { qid: CODEX_QUESTIONS[0].id, option: '1' } }) });
+  await t.el('sheet-ask').listeners.click({ target: inTitle('.ask-submit', { dataset: { group: CODEX_QUESTIONS[0].group } }) });
+  await flush();
+  assert.equal(t.answers().length, 0);
+  assert.doesNotMatch(t.el('sheet-ask').innerHTML, /aria-checked="true"/);
+});

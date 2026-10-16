@@ -22,7 +22,9 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import time
+import unicodedata
 import zipfile
 import zlib
 import xml.etree.ElementTree as ET
@@ -724,7 +726,8 @@ def local_preview_for_pane(con, pane, pid, limit=PREVIEW_CHARS_FULL, snapshot=Fa
         return None, 'content changed; refresh preview'
     return {'preview': preview, 'revision': row['revision'],
             'viewable': row['state'] == 'IDLE' and bool(row['needs_review'])
-            and preview_revision == row['revision'] and bool(preview['agent'].strip())}, None
+            and preview_revision == row['revision'] and bool(preview['agent'].strip()),
+            'questions': [public_question(q) for q in pane_questions(con, item, meta, sock)]}, None
 
 
 MAX_MESSAGE_CHARS = 200000
@@ -1138,6 +1141,484 @@ def send_to_pane(pane, pid, text, submit=True, sock=None, images=(), files=()):
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         return f'paste failed: {exc}'
     return None
+
+
+# Questions an agent is waiting on (Codex request_user_input_async, Claude AskUserQuestion).
+# The transcript supplies the wording; the pane's screen decides what is still answerable.
+
+QUESTION_SCAN_BYTES = 64 * 1024 * 1024
+QUESTION_MATCH_CHARS = 24
+QUESTION_POLL_SECONDS = 0.1
+QUESTION_WAIT_SECONDS = 2.5
+CODEX_QUESTION_MARKERS = (b'request_user_input_async', b'send_user_message_question_reply',
+                          b'"task_complete"', b'"turn_aborted"')
+CODEX_REPLY_RE = re.compile(r'<send_user_message_question_reply>\s*(.*?)\s*</send_user_message_question_reply>', re.S)
+# One writer at a time: a reply must not interleave with the keys an answer is sending.
+PANE_INPUT_LOCK = threading.Lock()
+
+
+def transcript_rows(path, wanted, limit=QUESTION_SCAN_BYTES):
+    """JSON rows from the transcript tail whose raw line passes wanted(line); skips parsing the rest."""
+    path = Path(path)
+    size = path.stat().st_size
+    with path.open('rb') as raw:
+        if size > limit:
+            raw.seek(size - limit)
+            raw.readline()
+        for line in raw:
+            if wanted(line):
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
+
+
+def codex_question_id(call_id, index):
+    """Codex's own question identity, as echoed back in the answer envelope."""
+    return json.dumps(['request_user_input_async', call_id, index], separators=(',', ':'))
+
+
+def codex_pending_questions(path):
+    """request_user_input_async questions in the current turn that have no delivered answer."""
+    pending = {}
+    for row in transcript_rows(path, lambda line: any(m in line for m in CODEX_QUESTION_MARKERS)):
+        payload = row.get('payload') if isinstance(row.get('payload'), dict) else {}
+        kind = payload.get('type')
+        if kind in ('task_complete', 'turn_aborted'):
+            # Codex drops unanswered async questions when the turn ends.
+            pending.clear()
+        elif kind == 'function_call' and payload.get('name') == 'request_user_input_async':
+            try:
+                questions = json.loads(payload.get('arguments') or '{}').get('questions') or []
+            except (ValueError, AttributeError):
+                continue
+            call_id = str(payload.get('call_id') or '')
+            for index, question in enumerate(questions if isinstance(questions, list) else []):
+                title = str(question.get('title') or '').strip() if isinstance(question, dict) else ''
+                if not call_id or not title:
+                    continue
+                options = question.get('options') if isinstance(question.get('options'), list) else []
+                qid = codex_question_id(call_id, index)
+                pending[qid] = {
+                    'id': qid, 'group': qid, 'title': clip_preview(title, PREVIEW_CHARS_FULL), 'header': '',
+                    'options': [{'label': clip_preview(str(o), 512), 'description': ''} for o in options[:32]],
+                    'multi': False, 'free_text': True, '_title': title,
+                }
+        elif kind == 'message' and payload.get('role') == 'user':
+            for match in CODEX_REPLY_RE.finditer(content_to_text(payload.get('content'))):
+                try:
+                    replies = json.loads(match.group(1))
+                except ValueError:
+                    continue
+                for reply in replies if isinstance(replies, list) else []:
+                    if isinstance(reply, dict):
+                        pending.pop(str(reply.get('questionItemId') or ''), None)
+    return list(pending.values())
+
+
+def claude_pending_questions(path):
+    """AskUserQuestion calls in a Claude transcript that have no tool_result yet, one entry per question."""
+    pending = {}
+
+    def wanted(line):
+        return b'"AskUserQuestion"' in line or (b'"tool_result"' in line and any(key.encode() in line for key in pending))
+
+    for row in transcript_rows(path, wanted):
+        message = row.get('message') if isinstance(row.get('message'), dict) else {}
+        for block in message.get('content') if isinstance(message.get('content'), list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'tool_result':
+                pending.pop(str(block.get('tool_use_id') or ''), None)
+            elif block.get('type') == 'tool_use' and block.get('name') == 'AskUserQuestion' and block.get('id'):
+                questions = (block.get('input') or {}).get('questions') if isinstance(block.get('input'), dict) else None
+                group = str(block['id'])
+                entries = []
+                for index, question in enumerate(questions if isinstance(questions, list) else []):
+                    title = str(question.get('question') or '').strip() if isinstance(question, dict) else ''
+                    options = [o for o in question.get('options') or [] if isinstance(o, dict)] if title else []
+                    if not title or not options:
+                        entries = []
+                        break
+                    multi = bool(question.get('multiSelect'))
+                    # Options with a preview change the layout: digits only move the cursor, no free-text row.
+                    previews = any(o.get('preview') for o in options)
+                    entries.append({
+                        'id': f'{group}:{index}', 'group': group, 'title': clip_preview(title, PREVIEW_CHARS_FULL),
+                        'header': clean(question.get('header') or '', 40),
+                        'options': [{'label': clip_preview(str(o.get('label') or ''), 512),
+                                     'description': clip_preview(str(o.get('description') or ''), 512)} for o in options],
+                        'multi': multi, 'free_text': not multi and not previews, '_title': title, '_previews': previews,
+                    })
+                if entries:
+                    pending[group] = entries
+    return [question for entries in pending.values() for question in entries]
+
+
+def squash(text):
+    # Drop whitespace and markdown marks so transcript text matches how a TUI wrapped and styled it.
+    return re.sub(r'[\s`*]+', '', str(text or ''))
+
+
+def keyed_questions(questions):
+    """Give each question the shortest title prefix (at least QUESTION_MATCH_CHARS) that no other one starts with.
+
+    Screens are matched on these keys; a question that cannot be told apart gets '' and is not answered from the web.
+    """
+    titles = [squash(q['_title']) for q in questions]
+    keyed = []
+    for i, (question, title) in enumerate(zip(questions, titles)):
+        shared = max((len(os.path.commonprefix([title, other])) for j, other in enumerate(titles) if j != i), default=0)
+        keyed.append(question | {'_key': title[:max(QUESTION_MATCH_CHARS, shared + 1)] if shared < len(title) else ''})
+    return keyed
+
+
+def pasted_into(before, after, text):
+    """True once the pasted text shows up more often than before the paste (it may already be an option or title)."""
+    text = squash(text)
+    return any(after.count(part) > before.count(part) for part in (text[:QUESTION_MATCH_CHARS], text[-QUESTION_MATCH_CHARS:]))
+
+
+def codex_queued_answers(screen):
+    """Answers the TUI accepted but has not yet handed to the model ("↳ > question" rows)."""
+    return [squash(line.split('↳ >', 1)[1]) for line in screen.splitlines() if line.lstrip().startswith('↳ >')]
+
+
+def codex_visible_questions(questions, screen):
+    # A queued row shows the title, cut with "…" when the terminal is narrow.
+    queued = [text.removesuffix('…') for text in codex_queued_answers(screen)]
+    return [q for q in questions if not any(text and squash(q['_title']).startswith(text) for text in queued)]
+
+
+def codex_panel(screen):
+    """(position, total, text) of Codex's expanded question panel, or None when it is not open."""
+    lines = screen.rstrip('\n').split('\n')
+    start = max((i + 1 for i, line in enumerate(lines) if line[:1] not in ('', ' ')), default=0)
+    lines = lines[start:]
+    if not any('enter submit' in line for line in [l for l in lines if l.strip()][-3:]):
+        return None
+    text = '\n'.join(lines)
+    # The text returned starts at the question title.
+    position = re.search(r'^\s*(\d+) of (\d+)\s*$', text, re.M)
+    return (int(position[1]), int(position[2]), text[position.end():]) if position else (1, 1, text)
+
+
+def codex_collapsed(screen):
+    return bool(re.search(r'^\s*\?\s+\d+ questions?\s*$', screen, re.M)) and bool(re.search(r'^\s*⇧← to answer\s*$', screen, re.M))
+
+
+class PaneKeys:
+    """The few tmux operations an answer needs, kept apart so tests can drive a fake TUI."""
+
+    def __init__(self, pane, sock=None):
+        self.pane, self.sock = pane, sock
+
+    def screen(self):
+        return tmux('capture-pane', '-p', '-J', '-t', self.pane, check=False, sock=self.sock)
+
+    def keys(self, *keys):
+        tmux('send-keys', '-t', self.pane, *keys, sock=self.sock)
+
+    def paste(self, text):
+        paste_to_pane(self.pane, text, self.sock)
+
+    def wait(self, ready, seconds=None):
+        """Poll the screen until ready(screen) is truthy; returns the last screen and the result."""
+        deadline = time.monotonic() + (QUESTION_WAIT_SECONDS if seconds is None else seconds)
+        while True:
+            screen = self.screen()
+            result = ready(screen)
+            if result or time.monotonic() >= deadline:
+                return screen, result
+            time.sleep(QUESTION_POLL_SECONDS)
+
+
+def codex_close_panel(driver, screen):
+    """Collapse the panel with ⇧→ (Esc would interrupt the turn); best effort, stops once a press changes nothing."""
+    def state(s):
+        # The narrow-terminal notice replaces the panel footer while it shows.
+        return codex_panel(s), 'Expand terminal' in s
+
+    for _ in range(40):
+        before = state(screen)
+        if before == (None, False):
+            return
+        driver.keys('S-Right')
+        screen, moved = driver.wait(lambda s: state(s) != before)
+        if not moved:
+            return
+
+
+def answer_codex_question(driver, question, option=None, text=None):
+    """Open Codex's queued question panel, find the question, answer it, and confirm it left the panel."""
+    def shows(screen):
+        panel = codex_panel(screen)
+        return bool(panel) and squash(panel[2]).startswith(question['_key'])
+
+    def move(screen, key, step):
+        # Wait for the new position itself: pressing again on a stale screen could overshoot the last question.
+        target = codex_panel(screen)[0] + step
+        driver.keys(key)
+        return driver.wait(lambda s: (codex_panel(s) or (0,))[0] == target)
+
+    if option is not None and option >= 9:
+        return '選項超過 9 個，請在終端機回答'
+    screen = driver.screen()
+    if not codex_panel(screen):
+        if not codex_collapsed(screen):
+            return 'Codex 畫面上沒有待回答的問題（可能已回答或該輪已結束）'
+        driver.keys('S-Left')
+        screen, opened = driver.wait(codex_panel)
+        if not opened:
+            return '無法開啟 Codex 的問題面板'
+    # Walk back to the first question, then forward. ⇧← past the last one would open a queued message instead.
+    while codex_panel(screen)[0] > 1:
+        screen, moved = move(screen, 'S-Right', -1)
+        if not moved:
+            codex_close_panel(driver, screen)
+            return 'Codex 的問題面板沒有回應，已停止'
+    while not shows(screen):
+        panel = codex_panel(screen)
+        if panel[0] >= panel[1]:
+            codex_close_panel(driver, screen)
+            return '找不到這個問題（可能已回答、略過或已失效）'
+        screen, moved = move(screen, 'S-Left', 1)
+        if not moved:
+            codex_close_panel(driver, screen)
+            return 'Codex 的問題面板沒有回應，已停止'
+    if option is not None:
+        driver.keys(str(option + 1))
+    else:
+        before = squash(codex_panel(screen)[2])
+        driver.paste(text)
+        screen, pasted = driver.wait(lambda s: shows(s) and pasted_into(before, squash(codex_panel(s)[2]), text))
+        if not pasted:
+            # Enter now would submit the preselected option instead of the text.
+            codex_close_panel(driver, screen)
+            return 'Codex 沒有顯示貼上的回答，已取消送出'
+        driver.keys('Enter')
+    screen, gone = driver.wait(lambda s: not shows(s) and 'Expand terminal' not in s)
+    if not gone:
+        flash = 'Expand terminal' in screen
+        codex_close_panel(driver, screen)
+        return ('終端機太小，Codex 未完整顯示選項而拒絕送出；請放大該 pane 後再試' if flash
+                else 'Codex 沒有接受這個回答')
+    codex_close_panel(driver, screen)
+    return None
+
+
+CLAUDE_TABS_RE = re.compile(r'^\s*(?:←\s+)?[☐☒]\s+\S')
+CLAUDE_OPTION_RE = re.compile(r'^\s*(?:❯\s*)?(\d+)\.\s')
+
+
+def claude_dialog(screen):
+    """Claude's AskUserQuestion dialog at the bottom of the screen: a question tab or the review step."""
+    lines = screen.rstrip('\n').split('\n')
+    header = max((i for i, line in enumerate(lines) if CLAUDE_TABS_RE.match(line)), default=None)
+    if header is None:
+        return None
+    body = lines[header + 1:]
+    shown = [line.strip() for line in body if line.strip()]
+    if not shown:
+        return None
+    footer = shown[-1]
+    if footer.startswith('Enter to select') and footer.endswith('Esc to cancel'):
+        question = []
+        for line in body:
+            if CLAUDE_OPTION_RE.match(line):
+                break
+            question.append(line)
+        checked = {int(m[1]) - 1: m[2] != ' ' for m in
+                   (re.match(r'^\s*(?:❯\s*)?(\d+)\.\s+\[(.)\]', line) for line in body) if m}
+        cursor = next((int(m[1]) - 1 for m in (re.match(r'^\s*❯\s*(\d+)\.\s', line) for line in body) if m), None)
+        return {'kind': 'question', 'title': squash('\n'.join(question)), 'body': '\n'.join(body),
+                'footer': footer, 'checked': checked, 'cursor': cursor}
+    if 'Ready to submit your answers?' in shown and any(re.match(r'^❯\s*1\.\s*Submit answers$', line) for line in shown):
+        return {'kind': 'review', 'title': '', 'body': '\n'.join(body), 'footer': footer, 'checked': {}, 'cursor': None}
+    return None
+
+
+def claude_review(body):
+    """[(question, answer)], squashed, from Claude's "Review your answers" step."""
+    text = squash(body.split('Ready to submit your answers?')[0])
+    return [tuple(item.partition('→')[::2]) for item in text.split('●')[1:]]
+
+
+def answer_claude_questions(driver, questions, answers):
+    """Answer one AskUserQuestion call tab by tab, confirming each step on screen; never sends Esc."""
+    def on(screen, question):
+        dialog = claude_dialog(screen)
+        return bool(dialog) and dialog['kind'] == 'question' and dialog['title'].startswith(question['_key'])
+
+    # Digits pick options; a two-digit number would arrive as two keys.
+    if any(len(question['options']) > 8 for question in questions):
+        return '選項太多，請在終端機回答'
+    screen = driver.screen()
+    if not claude_dialog(screen):
+        return 'Claude 畫面上沒有開啟中的問題'
+    # The dialog may sit on a later tab or the review step; ← moves back without losing answers.
+    for _ in range(len(questions) + 1):
+        before = claude_dialog(screen)
+        if on(screen, questions[0]) or not before or (before['kind'] == 'question' and len(questions) == 1):
+            break
+        driver.keys('Left')
+        screen, _ = driver.wait(lambda s: claude_dialog(s) not in (None, before))
+    if not on(screen, questions[0]):
+        return 'Claude 對話框顯示的不是這組問題'
+    for question, answer in zip(questions, answers):
+        if not on(screen, question):
+            return 'Claude 對話框沒有切到預期的問題，已停止'
+        before = claude_dialog(screen)
+        if question['multi']:
+            for index in range(len(question['options'])):
+                if not on(screen, question):
+                    return 'Claude 對話框沒有切到預期的問題，已停止'
+                if claude_dialog(screen)['checked'].get(index, False) != (index in answer['options']):
+                    driver.keys(str(index + 1))
+                    screen, flipped = driver.wait(
+                        lambda s, i=index: on(s, question) and claude_dialog(s)['checked'].get(i, False) == (i in answer['options']))
+                    if not flipped:
+                        return 'Claude 沒有切換這個選項，已停止'
+            driver.keys('Tab')
+        elif question['_previews']:
+            driver.keys(str(answer['option'] + 1))
+            screen, moved = driver.wait(lambda s: on(s, question) and claude_dialog(s)['cursor'] == answer['option'])
+            if not moved:
+                return 'Claude 沒有選到這個選項，已停止'
+            driver.keys('Enter')
+        elif answer.get('text') is None:
+            driver.keys(str(answer['option'] + 1))
+        else:
+            driver.keys(str(len(question['options']) + 1))
+            screen, focused = driver.wait(lambda s: on(s, question) and 'ctrl+g to edit in nano' in claude_dialog(s)['footer'])
+            if not focused:
+                return 'Claude 沒有進入自訂回答欄位，已停止'
+            shown = squash(claude_dialog(screen)['body'])
+            driver.paste(answer['text'])
+            screen, typed = driver.wait(
+                lambda s: on(s, question) and pasted_into(shown, squash(claude_dialog(s)['body']), answer['text']))
+            if not typed:
+                return 'Claude 沒有顯示貼上的回答，已停止'
+            driver.keys('Enter')
+        screen, _ = driver.wait(lambda s: claude_dialog(s) != before and not on(s, question))
+    dialog = claude_dialog(screen)
+    if dialog and dialog['kind'] == 'review':
+        # "2" here would cancel the whole call, so confirm the summary before choosing "1. Submit answers".
+        review = claude_review(dialog['body'])
+        for question, answer in zip(questions, answers):
+            labels = [question['options'][i]['label'] for i in answer.get('options') or [answer.get('option')] if i is not None]
+            expected = squash(answer['text'] if answer.get('text') is not None else ', '.join(labels))
+            if not any(title.startswith(question['_key']) and given == expected for title, given in review):
+                return 'Claude 確認頁的答案與選擇不符，未送出'
+        driver.keys('1')
+        screen, _ = driver.wait(lambda s: claude_dialog(s) is None)
+        dialog = claude_dialog(screen)
+    if dialog:
+        return 'Claude 沒有接受這組回答，對話框仍開著'
+    return None
+
+
+QUESTION_PARSERS = {'codex': codex_pending_questions, 'claude': claude_pending_questions}
+MAX_ANSWER_CHARS = 2000
+
+
+def pane_questions(con, row, meta, sock=None):
+    """Answerable questions for a waiting Codex/Claude pane, with their internal matching fields."""
+    parser = QUESTION_PARSERS.get(row.get('agent'))
+    if row.get('state') != 'WAIT' or not parser:
+        return []
+    path = resolve_transcript_path(con, row, meta)
+    if not path:
+        return []
+    try:
+        questions = parser(path)
+    except (OSError, ValueError):
+        return []
+    if questions and row['agent'] == 'codex':
+        questions = codex_visible_questions(questions, PaneKeys(row['pane'], sock).screen())
+    return keyed_questions(questions)
+
+
+def public_question(question):
+    return {key: value for key, value in question.items() if not key.startswith('_')}
+
+
+def normalize_answer(question, answer):
+    """One validated answer: exactly one of option, options (multi-select) or text. Returns (answer, error)."""
+    if not isinstance(answer, dict) or answer.get('id') != question['id']:
+        return None, 'answers do not match the questions'
+    given = [key for key in ('option', 'options', 'text') if answer.get(key) is not None]
+    if len(given) != 1:
+        return None, 'each answer needs exactly one of option, options or text'
+    count = len(question['options'])
+    if given == ['option']:
+        option = answer['option']
+        if question['multi'] or type(option) is not int or not 0 <= option < count:
+            return None, 'invalid option'
+        return {'option': option}, None
+    if given == ['options']:
+        options = answer['options']
+        if (not question['multi'] or not isinstance(options, list) or not options
+                or not all(type(i) is int and 0 <= i < count for i in options) or len(set(options)) != len(options)):
+            return None, 'invalid options'
+        return {'options': sorted(options)}, None
+    text = answer['text']
+    if not question['free_text'] or not isinstance(text, str):
+        return None, 'this question does not take a typed answer'
+    # One line: a pasted newline reaches the TUI as Enter.
+    text = ' '.join(text.split())
+    if not text or len(text) > MAX_ANSWER_CHARS:
+        return None, 'answer is empty or too long'
+    # ESC would end the bracketed paste early and reach the TUI as keys; a lone surrogate cannot be pasted at all.
+    if any(unicodedata.category(c) in ('Cc', 'Cs') for c in text):
+        return None, 'answer contains control characters'
+    # The screen checks look for the answer with whitespace and markdown marks removed.
+    if not squash(text):
+        return None, 'answer is empty or too long'
+    return {'text': text}, None
+
+
+def answer_pane_questions(pane, pid, group, answers, sock=None):
+    """Validate answers against the pane's pending questions, then drive its TUI. Returns None on success."""
+    sock = sock or resolve_socket()
+    meta = live_pane_meta(pane, pid, sock)
+    if not meta:
+        return 'pane not found or pid mismatch'
+    with closing(db()) as con:
+        row = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
+        if not row:
+            return 'pane is not tracked'
+        row = dict(row) | meta
+        questions = [q for q in pane_questions(con, row, meta, sock) if q['group'] == group]
+    if not questions:
+        return '找不到這個問題（可能已回答或已失效）'
+    if not isinstance(answers, list) or len(answers) != len(questions):
+        return 'answers do not match the questions'
+    if not all(q['_key'] for q in questions):
+        return '有其他問題的開頭與這題相同，請在終端機回答'
+    normalized = []
+    for question, answer in zip(questions, answers):
+        value, error = normalize_answer(question, answer)
+        if error:
+            return error
+        normalized.append(value)
+    if not PANE_INPUT_LOCK.acquire(timeout=QUESTION_WAIT_SECONDS * 4):
+        return 'another answer is still being sent'
+    try:
+        # Verify again at key time — pane ids are reused.
+        if tmux('display-message', '-p', '-t', pane, '#{pane_pid}', check=False, sock=sock) != str(pid):
+            return 'pane pid changed'
+        driver = PaneKeys(pane, sock)
+        if row['agent'] == 'codex':
+            return answer_codex_question(driver, questions[0], option=normalized[0].get('option'),
+                                         text=normalized[0].get('text'))
+        return answer_claude_questions(driver, questions, normalized)
+    except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        return f'tmux failed: {exc}'
+    finally:
+        PANE_INPUT_LOCK.release()
 
 
 def hook_target():
@@ -2343,7 +2824,8 @@ def dispatch_send(payload):
                 return 502, {'ok': False, 'error': f'peer send failed: HTTP {exc.code}'}
         except Exception as exc:
             return 502, {'ok': False, 'error': f'peer send failed: {type(exc).__name__}'}
-    error = send_to_pane(pane, pid, text, submit=bool(submit), images=images, **({'files': files} if files else {}))
+    with PANE_INPUT_LOCK:
+        error = send_to_pane(pane, pid, text, submit=bool(submit), images=images, **({'files': files} if files else {}))
     if error:
         return 409, {'ok': False, 'error': error}
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local}
@@ -2595,6 +3077,52 @@ def dispatch_peer_register(payload):
     return 200, {'ok': True, 'action': detail, 'peer': {'name': clean(name), 'url': clean(url).rstrip('/')}}
 
 
+def dispatch_answer(payload):
+    """Answer a pending agent question on its own host (local or via peer). Returns (code, body dict)."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    pane = clean(payload.get('pane') or '')
+    pid = clean(str(payload.get('pid') or ''))
+    host = clean(payload.get('host') or '')
+    group = payload.get('group')
+    answers = payload.get('answers')
+    if not pane or not pid or not isinstance(group, str) or not group or len(group) > 600:
+        return 400, {'ok': False, 'error': 'pane, pid, and group are required'}
+    if not isinstance(answers, list) or not 1 <= len(answers) <= 4:
+        return 400, {'ok': False, 'error': 'answers must be a list of 1 to 4 items'}
+    local = local_host_name()
+    if host and host != local and not payload.get('_local_only'):
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, {'ok': False, 'error': f'unknown host {host}'}
+        try:
+            request = Request(peer['url'].rstrip('/') + '/api/answer',
+                              data=json.dumps({'pane': pane, 'pid': pid, 'group': group, 'answers': answers,
+                                               '_local_only': True}).encode(),
+                              headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                              method='POST')
+            # Several confirmed key steps; a timeout after delivery would invite a duplicate answer.
+            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
+                data = json.loads(response.read().decode())
+            return (200 if data.get('ok') else 502), data
+        except HTTPError as exc:
+            if exc.code == 404:
+                return 502, {'ok': False, 'error': PEER_OUTDATED}
+            try:
+                return exc.code, json.loads(exc.read().decode())
+            except (ValueError, UnicodeError):
+                return 502, {'ok': False, 'error': f'peer answer failed: HTTP {exc.code}'}
+        except Exception as exc:
+            return 502, {'ok': False, 'error': f'peer answer failed: {type(exc).__name__}'}
+    try:
+        error = answer_pane_questions(pane, pid, group, answers)
+    except Exception as exc:
+        return 500, {'ok': False, 'error': f'{type(exc).__name__}'}
+    if error:
+        return 409, {'ok': False, 'error': error}
+    return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local}
+
+
 def make_web_handler(fleet_only=False):
     index = web_index_path()
     if not index.is_file():
@@ -2603,6 +3131,7 @@ def make_web_handler(fleet_only=False):
     actions = {
         '/api/kill': dispatch_kill, '/api/send': dispatch_send, '/api/upload': dispatch_upload,
         '/api/preview': dispatch_preview, '/api/message': dispatch_message, '/api/ack': dispatch_ack,
+        '/api/answer': dispatch_answer,
     }
 
     class Handler(BaseHTTPRequestHandler):

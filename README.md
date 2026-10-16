@@ -161,6 +161,13 @@ Report: install JSON (status_control_clicks), web health, peers, tmux status lin
 文字草稿按主機與 session 分開保存在目前瀏覽器；關閉訊息框或頁面後重新開啟仍會恢復，
 直到手動清空或成功送出。送出失敗及送出途中新增的草稿都會保留。
 
+**網頁回答問題**：Codex 排隊中的問題（`? N questions`）與 Claude Code 的 AskUserQuestion 對話框，
+會顯示在卡片 sheet 的「等你回答」區塊。點選項或自行輸入後按「送出回答」，伺服器會在該 pane 代為按鍵，
+並確認 agent 確實收到才回報成功。Codex 每題各自送出；Claude 同一組問題一起送出。
+限制：Codex 只能用前 9 個選項，終端太窄、看不到完整選項時會拒絕作答；Claude 多選題不能自行輸入；
+不支援 Codex 舊的同步 `request_user_input`。Codex 會在該輪結束時丟棄未回答的問題，之後網頁也不再顯示。
+多主機時，hub 與每台 client 都要更新到同一版。
+
 **網頁附件**：圖片在手機端先縮到長邊 2048px 並重新編碼（同時去除 EXIF），上傳到該 pane
 所在主機的 `~/.local/state/tmux-attn/uploads/`（保留 7 天、最多 200 個／256MB），送出時以絕對路徑
 各自貼上一次。Claude Code、Codex 會變成附件（`[Image #n]`）；Pi 沒有附件功能，只收到文字路徑。
