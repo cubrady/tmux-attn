@@ -1775,6 +1775,13 @@
       const icon = escapeHtml(CLI_ICONS[name]);
       return `<span class="cli ${icon}" title="${escapeHtml(name)}"><img src="/icons/${icon}.svg" alt="${escapeHtml(name)}" loading="lazy" onerror="this.closest('.cli').classList.add('broken');this.remove()"></span>`;
     }
+    // Agent-written links must never navigate the dashboard away; mailto: has no page to open.
+    function openLinkInNewWindow(node) {
+      if (node.tagName !== 'A' || !node.hasAttribute('href')) return;
+      if (/^mailto:/i.test(node.getAttribute('href'))) return;
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
     function renderMarkdown(text) {
       const raw = String(text ?? '');
       if (!raw) return '';
@@ -1782,6 +1789,7 @@
         if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
           if (!renderMarkdown._ready) {
             marked.setOptions({ gfm: true, breaks: true });
+            DOMPurify.addHook('afterSanitizeAttributes', openLinkInNewWindow);
             renderMarkdown._ready = true;
           }
           const html = marked.parse(raw, { async: false });
