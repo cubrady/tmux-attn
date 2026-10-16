@@ -2447,3 +2447,34 @@ test('controls rendered inside an agent-written question title are ignored', asy
   assert.equal(t.answers().length, 0);
   assert.doesNotMatch(t.el('sheet-ask').innerHTML, /aria-checked="true"/);
 });
+
+
+// ---- model badge
+
+test('the card shows the short model label and leaves the effort and full id for the sheet', () => {
+  const ui = dashboard();
+  const a = sheetAgent({ model: 'gpt-6.1-sol', model_label: 'gpt-6.1-sol', effort: 'xhigh' });
+  ui.render({ agents: [a] });
+  const list = ui.elements.get('list').innerHTML;
+  assert.match(list, /class="model">gpt-6\.1-sol</);
+  assert.doesNotMatch(list, /xhigh/);
+});
+
+test('the sheet meta row spells out the full model id and reasoning effort', () => {
+  const ui = dashboard();
+  const a = sheetAgent({ model: 'claude-sonnet-5-5', model_label: 'sonnet 5.5', effort: 'xhigh' });
+  ui.render({ agents: [a] });
+  ui.open(a);
+  const env = ui.elements.get('sheet-env').innerHTML;
+  assert.match(env, /class="model">claude-sonnet-5-5</);
+  assert.match(env, /class="effort">xhigh</);
+});
+
+test('agents without a known model render no model chip', () => {
+  const ui = dashboard();
+  const a = sheetAgent({ model: '', model_label: '', effort: '' });
+  ui.render({ agents: [a] });
+  ui.open(a);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /class="model"/);
+  assert.doesNotMatch(ui.elements.get('sheet-env').innerHTML, /class="model"|class="effort"/);
+});

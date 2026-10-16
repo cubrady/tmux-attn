@@ -119,6 +119,7 @@ class AttentionCategoryTests(unittest.TestCase):
         with patch.object(a, 'items', return_value=(rows, 1)), \
                 patch.object(a, 'load_project_aliases', return_value={}), \
                 patch.object(a, 'pane_conversation_preview', return_value={'users': [], 'agent': ''}), \
+                patch.object(a, 'pane_model', return_value=('', '')), \
                 patch.object(a, 'git_workdir_info', return_value={'repo': '', 'branch': '', 'dirty': False}):
             payload = a.agents_payload(None, 'fixtures', live, now=101)
         expected = {case['id']: case for case in cases}

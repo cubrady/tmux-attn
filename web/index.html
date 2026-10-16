@@ -505,6 +505,8 @@
       min-width: 0;
     }
     .env .repo { color: color-mix(in srgb, var(--fg) 72%, var(--muted)); }
+    .env .model { color: var(--muted); white-space: nowrap; }
+    .env .model::before { content: "· "; }
     .env .branch { color: var(--muted); overflow-wrap: anywhere; }
     .env .dirty {
       color: var(--wait);
@@ -522,6 +524,7 @@
     }
     .sheet-env[hidden] { display: none; }
     .sheet-env .dirty { color: var(--wait); }
+    .sheet-env .effort::before { content: "· "; }
     .path-toggle {
       padding: 1px 8px;
       border: 1px solid var(--line);
@@ -1939,6 +1942,7 @@
       if (showRepo) parts.push(`<span class="repo">${escapeHtml(repo)}</span>`);
       if (branch) parts.push(`<span class="branch">${escapeHtml(branch)}</span>`);
       if (a.dirty) parts.push('<span class="dirty">dirty</span>');
+      if (a.model_label) parts.push(`<span class="model">${escapeHtml(a.model_label)}</span>`);
       return parts.length ? `<div class="env">${parts.join('')}</div>` : '';
     }
     let sheetPathOpen = false;
@@ -1947,6 +1951,8 @@
       const bits = [];
       if (a.branch) bits.push(`<span class="branch">${escapeHtml(a.branch)}</span>`);
       if (a.dirty) bits.push('<span class="dirty">dirty</span>');
+      if (a.model) bits.push(`<span class="model">${escapeHtml(a.model)}</span>`);
+      if (a.effort) bits.push(`<span class="effort">${escapeHtml(a.effort)}</span>`);
       if (a.age) bits.push(`<span class="age-chip">${escapeHtml(a.age)}</span>`);
       if (a.path || a.repo) bits.push(`<button type="button" class="path-toggle" data-toggle-path aria-expanded="${sheetPathOpen}">路徑</button>`);
       return bits.join('');
