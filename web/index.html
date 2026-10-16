@@ -1197,6 +1197,106 @@
     .sheet-feedback.bad { color: var(--danger); }
     .sheet-feedback.ok { color: var(--running); }
 
+    /* Questions the agent is waiting on: a tray pinned above the composer, in the wait colour. */
+    .sheet-ask {
+      flex: 0 1 auto;
+      min-height: 0;
+      max-height: 60%;
+      overflow: auto;
+      overscroll-behavior: contain;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .sheet-ask[hidden] { display: none; }
+    .ask-group {
+      border: 1px solid color-mix(in srgb, var(--wait) 38%, var(--line));
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--wait) 5%, var(--bg-elevated));
+      padding: 12px 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .ask-q { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+    .ask-meta {
+      padding: 0;
+      font: 600 0.68rem var(--mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--wait);
+    }
+    .ask-title { font-size: 0.95rem; font-weight: 600; line-height: 1.5; text-wrap: pretty; overflow-wrap: anywhere; }
+    .ask-title > :first-child { margin-top: 0; }
+    .ask-title > :last-child { margin-bottom: 0; }
+    .ask-options { display: flex; flex-direction: column; gap: 6px; }
+    .ask-option {
+      display: grid;
+      grid-template-columns: 1.6rem minmax(0, 1fr);
+      align-items: start;
+      gap: 10px;
+      width: 100%;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--bg-elevated);
+      color: var(--fg);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 140ms var(--ease), background-color 140ms var(--ease);
+    }
+    .ask-key {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 1.6rem;
+      border-radius: 7px;
+      border: 1px solid var(--line);
+      font: 600 0.78rem var(--mono);
+      color: var(--muted);
+    }
+    .ask-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 2px; overflow-wrap: anywhere; }
+    .ask-label { font-weight: 600; font-size: 0.9rem; }
+    .ask-desc { font-size: 0.78rem; color: var(--muted); }
+    @media (hover: hover) {
+      .ask-option:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+    }
+    .ask-option:focus-visible, .ask-other:focus-visible, .ask-submit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .ask-option[aria-checked="true"] {
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 9%, var(--bg-elevated));
+    }
+    .ask-option[aria-checked="true"] .ask-key { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+    @media (prefers-reduced-motion: no-preference) {
+      .ask-option:active:not(:disabled) { transform: scale(0.99); }
+    }
+    .ask-other {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px dashed var(--line);
+      border-radius: 10px;
+      background: transparent;
+      color: var(--fg);
+      font: 16px/1.4 var(--font); /* 16px keeps iOS from zooming the page on focus */
+    }
+    .ask-other:not(:placeholder-shown) { border-style: solid; border-color: var(--accent); }
+    .ask-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .ask-submit {
+      padding: 8px 16px;
+      border: 0;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      font: 600 0.86rem var(--font);
+      cursor: pointer;
+    }
+    .ask-submit:disabled, .ask-option:disabled { opacity: 0.5; cursor: default; }
+    .ask-status { font-size: 0.75rem; color: var(--muted); }
+    .ask-status.bad { color: var(--danger); }
+    .ask-status.ok { color: var(--running); }
+
     .sheet-preview .preview-line[data-role] { cursor: pointer; }
     .open-full {
       grid-column: 2;
@@ -1468,6 +1568,7 @@
       <div class="sheet-path" id="sheet-path" hidden></div>
       <div class="sheet-progress" id="sheet-progress" hidden></div>
       <div class="sheet-preview" id="sheet-preview" tabindex="0"></div>
+      <section class="sheet-ask" id="sheet-ask" aria-label="待回答的問題" hidden></section>
       <form class="sheet-compose" id="sheet-form">
         <div class="composer">
           <div class="attachments" id="sheet-attachments" aria-label="已加入的附件" hidden></div>
@@ -1715,6 +1816,102 @@
       document.getElementById('sheet-preview').innerHTML = previewHtml(preview, { actionable }) || emptyPreviewHtml();
       markClippedPreviews();
     }
+    // Questions the agent is waiting on (Codex queued questions, Claude AskUserQuestion), answered on the pane's host.
+    let sheetQuestions = [];
+    const askState = new Map();
+    const askStatus = new Map();
+    const askBusy = new Set();
+    function askAnswer(q) {
+      const key = selectedKey + '|' + q.id;
+      if (!askState.has(key)) askState.set(key, { option: null, options: [], text: '' });
+      return askState.get(key);
+    }
+    function askGroups(questions) {
+      const groups = [];
+      for (const q of questions) {
+        const last = groups[groups.length - 1];
+        if (last && last.id === q.group) last.questions.push(q);
+        else groups.push({ id: q.group, questions: [q] });
+      }
+      return groups;
+    }
+    function askQuestionHtml(q, n, total) {
+      const st = askAnswer(q);
+      const qid = escapeHtml(q.id);
+      const meta = [total > 1 ? `問題 ${n + 1}/${total}` : '等你回答', q.header || ''].filter(Boolean).join(' · ');
+      const options = (q.options || []).map((o, i) => {
+        const on = q.multi ? st.options.includes(i) : st.option === i && !st.text.trim();
+        return `<button type="button" class="ask-option" role="${q.multi ? 'checkbox' : 'radio'}" aria-checked="${on}" data-qid="${qid}" data-option="${i}">` +
+          `<span class="ask-key" aria-hidden="true">${q.multi ? (on ? '✓' : '') : i + 1}</span>` +
+          `<span class="ask-text"><span class="ask-label">${escapeHtml(o.label)}</span>${
+            o.description ? `<span class="ask-desc">${escapeHtml(o.description)}</span>` : ''}</span></button>`;
+      }).join('');
+      const other = q.free_text
+        ? `<input class="ask-other" type="text" data-qid="${qid}" value="${escapeHtml(st.text)}" maxlength="2000" enterkeyhint="send" autocomplete="off" aria-label="自行輸入回答" placeholder="${
+          q.options && q.options.length ? '其他回答（自行輸入）' : '輸入回答'}">`
+        : '';
+      return `<fieldset class="ask-q"><legend class="ask-meta">${escapeHtml(meta)}</legend>` +
+        `<div class="ask-title md">${renderMarkdown(q.title)}</div>` +
+        `<div class="ask-options" role="${q.multi ? 'group' : 'radiogroup'}">${options}${other}</div></fieldset>`;
+    }
+    function renderSheetQuestions() {
+      const box = document.getElementById('sheet-ask');
+      const groups = askGroups(sheetQuestions);
+      box.hidden = !groups.length;
+      box.innerHTML = groups.map(group => {
+        const status = askStatus.get(group.id) || { kind: '', text: '' };
+        const busy = askBusy.has(group.id);
+        return `<div class="ask-group">${group.questions.map((q, n) => askQuestionHtml(q, n, group.questions.length)).join('')}` +
+          `<div class="ask-actions"><button type="button" class="ask-submit" data-group="${escapeHtml(group.id)}"${busy ? ' disabled' : ''}>${busy ? '送出中…' : '送出回答'}</button>` +
+          `<span class="ask-status${status.kind ? ' ' + status.kind : ''}" role="status">${escapeHtml(status.text)}</span></div></div>`;
+      }).join('');
+    }
+    async function submitAnswers(group) {
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      const questions = sheetQuestions.filter(q => q.group === group);
+      if (!agent || !questions.length || askBusy.has(group)) return;
+      const answers = questions.map(q => {
+        const st = askAnswer(q);
+        const text = st.text.trim();
+        if (q.multi) return st.options.length ? { id: q.id, options: st.options } : null;
+        if (text && q.free_text) return { id: q.id, text };
+        return st.option === null ? null : { id: q.id, option: st.option };
+      });
+      if (answers.includes(null)) {
+        askStatus.set(group, { kind: 'bad', text: questions.length > 1 ? '每一題都要先選擇或輸入回答' : '請先選擇或輸入回答' });
+        renderSheetQuestions();
+        return;
+      }
+      const targetKey = selectedKey;
+      askBusy.add(group);
+      askStatus.delete(group);
+      renderSheetQuestions();
+      try {
+        const res = await fetch('/api/answer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, group, answers }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        questions.forEach(q => askState.delete(targetKey + '|' + q.id));
+        sentAt.set(targetKey, Date.now());
+        refresh();
+        setTimeout(refresh, 1500);
+        if (!sheetOpen || selectedKey !== targetKey) return;
+        sheetQuestions = sheetQuestions.filter(q => q.group !== group);
+        if (!sheetQuestions.length) {
+          closeSheet();
+          return;
+        }
+        setSheetStatus('已送出回答', 'ok');
+      } catch (e) {
+        askStatus.set(group, { kind: 'bad', text: friendlyError(e.message) });
+      } finally {
+        askBusy.delete(group);
+        if (sheetOpen && selectedKey === targetKey) renderSheetQuestions();
+      }
+    }
     // A card is a glance: the result you came for first, then only the latest prompt for context.
     function cardPreviewHtml(preview) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
@@ -1891,6 +2088,8 @@
       sheetPreviewData = { users: [], agent: '' };
       sheetPreviewToken += 1;
       readerMessages.clear();
+      sheetQuestions = [];
+      renderSheetQuestions();
       document.getElementById('sheet-root').hidden = true;
       document.body.classList.remove('sheet-open');
       document.getElementById('sheet-text').value = '';
@@ -2337,6 +2536,8 @@
           return;
         }
         renderSheetPreview(data.preview, true);
+        sheetQuestions = Array.isArray(data.questions) ? data.questions : [];
+        renderSheetQuestions();
         setSheetLoading(false);
         sheetPreviewData = { users: (data.preview?.users || []).filter(Boolean), agent: data.preview?.agent || '' };
         sheetPreviewFull = true;
@@ -2430,6 +2631,8 @@
       setRefreshLabel(false);
       sheetPathOpen = false;
       sheetEarlierOpen = false;
+      sheetQuestions = [];
+      renderSheetQuestions();
       fillSheet(agent, { refreshPreview: true });
       document.getElementById('sheet-status').textContent = '';
       document.getElementById('sheet-status').className = 'sheet-feedback';
@@ -2717,6 +2920,46 @@
       if (picked.trim()) return;
       const line = event.target.closest('.preview-line[data-role]');
       if (line) openReaderFromSheet(line.dataset.role, Number(line.dataset.index));
+    });
+    // The title is agent-written markdown: controls rendered inside it are never ours.
+    const askControl = (event, selector) => !event.target.closest('.ask-title') && event.target.closest(selector);
+    document.getElementById('sheet-ask').addEventListener('click', (event) => {
+      const submit = askControl(event, '.ask-submit');
+      if (submit) {
+        submitAnswers(submit.dataset.group);
+        return;
+      }
+      const button = askControl(event, '.ask-option');
+      const q = button && sheetQuestions.find(item => item.id === button.dataset.qid);
+      if (!q) return;
+      const st = askAnswer(q);
+      const index = Number(button.dataset.option);
+      if (q.multi) {
+        st.options = st.options.includes(index) ? st.options.filter(i => i !== index) : [...st.options, index].sort((x, y) => x - y);
+      } else {
+        st.option = index;
+        st.text = '';
+      }
+      askStatus.delete(q.group);
+      renderSheetQuestions();
+    });
+    document.getElementById('sheet-ask').addEventListener('input', (event) => {
+      const input = askControl(event, '.ask-other');
+      const q = input && sheetQuestions.find(item => item.id === input.dataset.qid);
+      if (!q) return;
+      const st = askAnswer(q);
+      st.text = input.value;
+      // Typed text replaces a picked option; update in place so the field keeps focus and the keyboard stays up.
+      const typed = Boolean(st.text.trim());
+      (input.parentNode?.querySelectorAll?.('.ask-option') || []).forEach(el =>
+        el.setAttribute('aria-checked', String(!typed && Number(el.dataset.option) === st.option)));
+    });
+    document.getElementById('sheet-ask').addEventListener('keydown', (event) => {
+      const input = askControl(event, '.ask-other');
+      if (!input || event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      const q = sheetQuestions.find(item => item.id === input.dataset.qid);
+      if (q) submitAnswers(q.group);
     });
     document.getElementById('reader-back').addEventListener('click', closeReader);
     document.getElementById('reader-copy').addEventListener('click', copyReaderText);
