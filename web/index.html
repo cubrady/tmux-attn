@@ -1968,7 +1968,8 @@
     function attentionDisplay(a) {
       const cat = category(a);
       const reviewed = cat === 'idle' && (a.needs_review || a.reviewed) && !isUnread(a);
-      const emoji = SECTION_EMOJI[cat];
+      // ⏳ = running but parked on background work; it still counts and sorts as running.
+      const emoji = cat === 'running' && a.background_wait ? '⏳' : SECTION_EMOJI[cat];
       const reason = reviewed ? String(a.reason || '').replace('尚未查看', '已查看') : a.reason;
       return { cat, reviewed, emoji, reason };
     }

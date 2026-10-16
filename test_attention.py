@@ -125,9 +125,6 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(a.classify('cursor','stop',{'status':'aborted'})[0],'IDLE')
         self.assertIn('error',a.classify('cursor','stop',{'status':'error'})[1])
         self.assertIsNone(a.classify('claude','Notification',{'notification_type':'idle_prompt'}))
-        stopped=a.classify('claude','Stop',{'background_tasks':[{'status':'running'}]})
-        self.assertEqual((stopped[0],stopped[2]),('IDLE',True))
-        self.assertIn('background tasks still running',stopped[1])
         self.assertEqual(a.classify('codex','PermissionRequest',{})[0],'WAIT')
         self.assertEqual(a.classify('codex','PreToolUse',{'tool_name':'request_user_input'})[0],'WAIT')
         self.assertEqual(a.classify('pi','ui_prompt_start',{'title':'Pick one'})[0],'WAIT')
@@ -401,6 +398,38 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(a.model_label('claude-3-5-sonnet-20241022'), 'sonnet 3.5')
         self.assertEqual(a.model_label('gpt-6.1-sol'), 'gpt-6.1-sol')
         self.assertEqual(a.model_label(''), '')
+
+    def test_claude_stop_waiting_on_background_tasks_is_running(self):
+        tasks = [{'type': 'shell', 'status': 'running'}, {'type': 'subagent', 'status': 'running'},
+                 {'type': 'shell', 'status': 'running'}, {'type': 'shell', 'status': 'completed'}]
+        self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': tasks}),
+                         ('RUNNING', 'Background work: waiting on 2 shell, 1 subagent', False))
+        # Finished tasks, malformed payloads and other agents keep the normal finished-turn result.
+        for data in ({'background_tasks': [{'type': 'shell', 'status': 'completed'}]},
+                     {'background_tasks': []}, {'background_tasks': 'running'}, {'background_tasks': ['running', None]}):
+            self.assertEqual(a.classify('claude', 'Stop', data), ('IDLE', 'Response finished; review needed', True))
+        self.assertEqual(a.classify('codex', 'Stop', {'background_tasks': tasks})[0], 'IDLE')
+        # Something the user must answer outranks the wait; an untyped task is still counted.
+        self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': '要繼續嗎？', 'background_tasks': tasks})[1],
+                         'Response ends with a question; review suggested')
+        self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': [{'status': 'running'}]})[1],
+                         'Background work: waiting on 1 task')
+
+    def test_background_wait_is_a_running_row_with_its_own_icon(self):
+        a.record(self.con, 'socket', '%1', '123', 'claude', *a.classify('claude', 'Stop', {'background_tasks': [{'type': 'shell', 'status': 'running'}]}))
+        row = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)['agents'][0]
+        self.assertEqual((row['category'], row['emoji'], row['background_wait'], row['pending'], row['unread']),
+                         ('running', '⏳', True, False, False))
+        self.assertEqual(row['reason'], '等待背景工作（1 shell）· 可先看進度')
+        self.assertEqual(a.attention_summary([row])['running'], 1)
+        self.assertEqual(a.window_badge([row]), '🏃')
+        # The same row relayed through the fleet keeps its icon; a peer without the field shows the plain one.
+        self.assertEqual(a.tag_host({'agents': [row]}, 'peer')[0][0]['emoji'], '⏳')
+        self.assertEqual(a.tag_host({'agents': [{**row, 'background_wait': False}]}, 'peer')[0][0]['emoji'], '🏃')
+        # Waking up replaces the reason, so the wait marker leaves with it.
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'RUNNING', 'Working')
+        woken = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)['agents'][0]
+        self.assertEqual((woken['emoji'], woken['background_wait'], woken['reason']), ('🏃', False, '正在工作'))
 
     def test_agents_payload_includes_model_and_effort(self):
         self.live = {
@@ -1572,8 +1601,13 @@ class IntegrationTests(unittest.TestCase):
                 event('UserPromptSubmit'); event('Stop')
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 event('UserPromptSubmit',agent='claude')
-                event('Stop',{'background_tasks':[{'status':'running'}]},agent='claude')
-                wait(lambda:'背景工作仍在運行' in run('capture-pane','-p','-t',sidebar))
+                event('Stop',{'background_tasks':[{'type':'shell','status':'running'}]},agent='claude')
+                # Parked on background work is running, not an unread result.
+                wait(lambda:'等待背景工作' in run('capture-pane','-p','-t',sidebar))
+                wait(lambda:'🏃 1' in run('capture-pane','-p','-t',sidebar))
+                wait_badge('🏃')
+                # The wake-up report ends the wait with a normal unread result.
+                event('UserPromptSubmit',agent='claude'); event('Stop',agent='claude')
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 # A different agent registering in the same pane must retain unread work.
                 event('session_start',agent='pi')
