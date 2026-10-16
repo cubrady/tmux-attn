@@ -515,6 +515,18 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(a.send_to_pane('%1', '456', 'hi'), 'pane not found or pid mismatch')
             self.assertEqual(a.send_to_pane('%1', '123', '  '), 'empty message')
 
+    def test_send_to_pane_rejects_control_characters_before_pasting(self):
+        # ESC would end the bracketed paste early and reach the TUI as keys (Esc interrupts the agent).
+        live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj'}}
+        with patch.object(a, 'live_panes', return_value=live), patch.object(a, 'tmux', return_value='123'), \
+             patch.object(a, 'paste_to_pane') as paste:
+            for text in ('hi\x1b[201~\x1b', 'stop\x03', 'csi\x9b2~', 'nul\x00', 'half \ud800'):
+                self.assertEqual(a.send_to_pane('%1', '123', text), 'message contains control characters', repr(text))
+            paste.assert_not_called()
+            # Line breaks and tabs are ordinary message content.
+            self.assertIsNone(a.send_to_pane('%1', '123', 'line one\r\nline two\ttabbed'))
+            paste.assert_called_once_with('%1', 'line one\r\nline two\ttabbed', None)
+
     PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 24
     LIVE = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj'}}
 
