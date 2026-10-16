@@ -2478,3 +2478,50 @@ test('agents without a known model render no model chip', () => {
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /class="model"/);
   assert.doesNotMatch(ui.elements.get('sheet-env').innerHTML, /class="model"|class="effort"/);
 });
+
+
+// ---- external links
+
+function fakeAnchor(href, tag = 'A') {
+  const attrs = href === null ? {} : { href };
+  return {
+    tagName: tag, attrs,
+    hasAttribute: name => Object.hasOwn(attrs, name),
+    getAttribute: name => attrs[name] ?? null,
+    setAttribute(name, value) { attrs[name] = value; },
+  };
+}
+
+test('every rendered link opens in a new window without exposing the dashboard', () => {
+  const ui = dashboard();
+  for (const href of ['https://example.com/pr/1', 'http://100.97.0.79:7788/', '/api/agents', '#top']) {
+    const link = fakeAnchor(href);
+    ui.context.openLinkInNewWindow(link);
+    assert.equal(link.attrs.target, '_blank', href);
+    assert.equal(link.attrs.rel, 'noopener noreferrer', href);
+  }
+});
+
+test('mailto links and non-link nodes are left alone', () => {
+  const ui = dashboard();
+  const mail = fakeAnchor('mailto:dev@example.com');
+  const bare = fakeAnchor(null);
+  const span = fakeAnchor('https://example.com', 'SPAN');
+  for (const node of [mail, bare, span]) ui.context.openLinkInNewWindow(node);
+  assert.equal(mail.attrs.target, undefined);
+  assert.equal(bare.attrs.target, undefined);
+  assert.equal(span.attrs.target, undefined);
+});
+
+test('markdown rendering registers the new-window hook with DOMPurify once', () => {
+  const hooks = [];
+  const ui = dashboard({ globals: {
+    marked: { setOptions() {}, parse: text => `<p>${text}</p>` },
+    DOMPurify: { addHook: (name, fn) => hooks.push([name, fn]), sanitize: html => html },
+  } });
+  ui.context.renderMarkdown('one');
+  ui.context.renderMarkdown('two');
+  assert.equal(hooks.length, 1);
+  assert.equal(hooks[0][0], 'afterSanitizeAttributes');
+  assert.equal(hooks[0][1], ui.context.openLinkInNewWindow);
+});
