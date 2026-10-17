@@ -154,6 +154,8 @@ Report: install JSON (status_control_clicks), web health, peers, tmux status lin
 | 網頁卡片 | 開 sheet：回覆、附圖片／檔案、關 pane（兩次確認）；點任一則訊息的「全文」開全頁閱讀，底部可直接輸入與附檔回覆（返回鍵關閉全文） |
 
 狀態語意：🙋 要你介入 · 👀 做完未讀（含 soft `?`）· 🏃 進行中 · 💤 已看／等待新任務。
+⏳ 是 🏃 的一種：agent 已停在背景工作上（shell／subagent／workflow），做完會自己回來；
+視窗標籤只在該視窗沒有其他在工作的 agent 時顯示 ⏳，底列計數仍算在 🏃。
 成功切換到結果所在 pane 或開啟可確認版本的 web 內容，會自動標已看。
 
 **全文與草稿**：開啟卡片後會背景預抓最新 Agent 回覆；點「全文」時先顯示現有預覽，

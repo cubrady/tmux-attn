@@ -1967,6 +1967,8 @@ def acknowledge(con, item, seconds=0):
 
 STATUS_GROUPS = [('wait','🙋'),('review','👀'),('running','🏃'),('idle','💤')]
 STATUS_EMOJI = dict(STATUS_GROUPS) | {'shell': '💻'}
+# Running by proxy: counts and navigation stay in 🏃, only the icon tells them apart.
+BACKGROUND_WAIT_EMOJI = '⏳'
 STATUS_ORDER = {key: index for index, (key, _) in enumerate(STATUS_GROUPS)}
 
 
@@ -2039,7 +2041,11 @@ def cycle_category(con, sock, client, category):
 
 def window_badge(rows):
     categories = {attention_category(row) for row in rows}
-    return next((emoji for key, emoji in STATUS_GROUPS if key in categories), '')
+    badge = next((emoji for key, emoji in STATUS_GROUPS if key in categories), '')
+    # A window reads ⏳ only when every running agent in it is parked; real work keeps 🏃.
+    if badge == STATUS_EMOJI['running'] and all(background_wait(row) for row in rows if attention_category(row) == 'running'):
+        return BACKGROUND_WAIT_EMOJI
+    return badge
 
 
 def window_project_path(rows):
@@ -2226,8 +2232,7 @@ def background_wait(row):
 
 def agent_emoji(row):
     category = attention_category(row)
-    # ⏳ tells parked-on-background apart from working; counts and window badges stay in 🏃.
-    return '⏳' if category == 'running' and background_wait(row) else STATUS_EMOJI[category]
+    return BACKGROUND_WAIT_EMOJI if category == 'running' and background_wait(row) else STATUS_EMOJI[category]
 
 
 def agent_severity(row):
