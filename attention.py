@@ -891,13 +891,21 @@ def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event
 # A finished turn that left background work running is parked, not finished: the agent
 # wakes itself when the work reports back, so nobody has to act yet.
 BACKGROUND_WAIT = 'Background work: waiting on '
+# Only these task types finish and report back. Monitors and MCP tasks stay up and never wake
+# the agent, so an unknown type is treated as not waiting: a stray 👀 beats a result nobody sees.
+BACKGROUND_WAIT_TYPES = ('shell', 'subagent', 'workflow')
 
 
 def background_wait_reason(tasks):
-    """Reason for a Claude Stop that still has running background tasks, else ''."""
-    kinds = Counter(clean(task.get('type') or 'task', 32) for task in tasks if isinstance(task, dict)
-                    and task.get('status') == 'running') if isinstance(tasks, list) else None
+    """Reason for a Claude Stop that still has running background tasks it will wake for, else ''."""
+    kinds = Counter(task['type'] for task in tasks if isinstance(task, dict) and task.get('status') == 'running'
+                    and task.get('type') in BACKGROUND_WAIT_TYPES) if isinstance(tasks, list) else None
     return BACKGROUND_WAIT + ', '.join(f'{count} {kind}' for kind, count in kinds.items()) if kinds else ''
+
+
+def asks_user(text):
+    """True when the last paragraph asks something; the user, not the background work, acts next."""
+    return bool(re.search(r'[?？]', text.rsplit('\n\n', 1)[-1]))
 
 
 def classify(agent, event, data):
@@ -938,7 +946,7 @@ def classify(agent, event, data):
         # Permission / AskUserQuestion / ui_prompt events remain hard WAIT.
         if last.endswith(('?', '？')):
             return 'IDLE', 'Response ends with a question; review suggested', True
-        waiting = background_wait_reason(data.get('background_tasks')) if agent == 'claude' else ''
+        waiting = background_wait_reason(data.get('background_tasks')) if agent == 'claude' and not asks_user(last) else ''
         if waiting:
             return 'RUNNING', waiting, False
         return 'IDLE', 'Response finished; review needed', True

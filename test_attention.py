@@ -409,11 +409,26 @@ class StoreTests(unittest.TestCase):
                      {'background_tasks': []}, {'background_tasks': 'running'}, {'background_tasks': ['running', None]}):
             self.assertEqual(a.classify('claude', 'Stop', data), ('IDLE', 'Response finished; review needed', True))
         self.assertEqual(a.classify('codex', 'Stop', {'background_tasks': tasks})[0], 'IDLE')
-        # Something the user must answer outranks the wait; an untyped task is still counted.
+        # Something the user must answer outranks the wait.
         self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': '要繼續嗎？', 'background_tasks': tasks})[1],
                          'Response ends with a question; review suggested')
-        self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': [{'status': 'running'}]})[1],
-                         'Background work: waiting on 1 task')
+        # So does a question that is not the last character: the user is the next actor.
+        asked = '分析如上。\n\n要我照這個做嗎？做的話，案例 2 先不用你貼。'
+        self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': asked, 'background_tasks': tasks}),
+                         ('IDLE', 'Response finished; review needed', True))
+        # A question in an earlier paragraph does not stop the wait.
+        earlier = '為什麼失敗？因為逾時。\n\n已重新部署，等待驗證。'
+        self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': earlier, 'background_tasks': tasks})[0], 'RUNNING')
+
+    def test_only_tasks_that_report_back_count_as_waiting(self):
+        # Monitors and MCP tasks stay up and never wake the agent; an unknown or untyped task is not trusted either.
+        for kind in ('monitor', 'MCP task', 'teammate', 'cloud session', 'something-new', None):
+            task = {'status': 'running'} if kind is None else {'type': kind, 'status': 'running'}
+            self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': [task]}),
+                             ('IDLE', 'Response finished; review needed', True), kind)
+        mixed = [{'type': 'monitor', 'status': 'running'}, {'type': 'workflow', 'status': 'running'}, {'type': 'shell', 'status': 'running'}]
+        self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': mixed}),
+                         ('RUNNING', 'Background work: waiting on 1 workflow, 1 shell', False))
 
     def test_background_wait_is_a_running_row_with_its_own_icon(self):
         a.record(self.con, 'socket', '%1', '123', 'claude', *a.classify('claude', 'Stop', {'background_tasks': [{'type': 'shell', 'status': 'running'}]}))
