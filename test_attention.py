@@ -437,7 +437,15 @@ class StoreTests(unittest.TestCase):
                          ('running', '⏳', True, False, False))
         self.assertEqual(row['reason'], '等待背景工作（1 shell）· 可先看進度')
         self.assertEqual(a.attention_summary([row])['running'], 1)
-        self.assertEqual(a.window_badge([row]), '🏃')
+        self.assertEqual(a.window_badge([row]), '⏳')
+        # The window badge follows who acts next: real work, a result or a question outranks a parked agent.
+        working = {**row, 'background_wait': False, 'reason': 'Working', 'pane': '%2'}
+        for other, badge in [(working, '🏃'),
+                             ({**row, 'state': 'IDLE', 'needs_review': True, 'unread': True, 'revision': 2, 'acknowledged': 0, 'pane': '%3'}, '👀'),
+                             ({**row, 'state': 'WAIT', 'pane': '%4'}, '🙋'),
+                             ({**row, 'state': 'IDLE', 'needs_review': False, 'unread': False, 'pane': '%5'}, '⏳')]:
+            self.assertEqual(a.window_badge([row, other]), badge, other['pane'])
+        self.assertEqual(a.window_badge([row, {**row, 'pane': '%6'}]), '⏳')
         # The same row relayed through the fleet keeps its icon; a peer without the field shows the plain one.
         self.assertEqual(a.tag_host({'agents': [row]}, 'peer')[0][0]['emoji'], '⏳')
         self.assertEqual(a.tag_host({'agents': [{**row, 'background_wait': False}]}, 'peer')[0][0]['emoji'], '🏃')
@@ -1620,7 +1628,7 @@ class IntegrationTests(unittest.TestCase):
                 # Parked on background work is running, not an unread result.
                 wait(lambda:'等待背景工作' in run('capture-pane','-p','-t',sidebar))
                 wait(lambda:'🏃 1' in run('capture-pane','-p','-t',sidebar))
-                wait_badge('🏃')
+                wait_badge('⏳')
                 # The wake-up report ends the wait with a normal unread result.
                 event('UserPromptSubmit',agent='claude'); event('Stop',agent='claude')
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
