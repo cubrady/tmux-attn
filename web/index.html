@@ -380,18 +380,39 @@
     .card-later, .sheet-later {
       position: relative;
       z-index: 1;
-      border: 1px solid var(--line);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      flex: 0 0 auto;
+      height: 28px;
+      min-width: 28px;
+      border: 0;
       border-radius: 999px;
-      background: var(--bg);
+      background: transparent;
       color: var(--muted);
-      padding: 5px 9px;
-      font: 600 0.7rem var(--font);
+      padding: 0;
+      font: 600 0.72rem var(--font);
       white-space: nowrap;
       cursor: pointer;
+      transition: background 140ms var(--ease), color 140ms var(--ease);
     }
-    .card-later:hover, .sheet-later:hover { color: var(--fg); border-color: var(--accent); }
+    .card-later { margin: -2px 0; }
+    .sheet-later[hidden] { display: none; }
+    .card-later svg, .sheet-later svg { width: 16px; height: 16px; display: block; }
+    @media (hover: hover) {
+      .card-later:hover:not(.armed):not(.busy), .sheet-later:hover:not(.armed):not(.busy) {
+        color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+    }
+    .card-later.armed, .sheet-later.armed,
+    .card-later.busy, .sheet-later.busy {
+      padding: 0 8px;
+      background: var(--accent);
+      color: var(--accent-fg);
+    }
+    .card-later[aria-disabled="true"], .sheet-later[aria-disabled="true"] { cursor: default; opacity: 0.85; }
     .card-later:focus-visible, .sheet-later:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .card-later:disabled, .sheet-later:disabled { opacity: 0.5; cursor: default; }
     .review-state { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 500; color: var(--muted); }
     .review-state.unread { color: var(--review); font-weight: 600; }
     .review-state.unread::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
@@ -1204,6 +1225,7 @@
     }
     @keyframes kill-arm { from { transform: scale(0.88); } to { transform: scale(1); } }
     .card.kill-armed .age { display: none; }
+    .card.later-armed .age { display: none; }
     .sent-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 600; color: var(--running); }
     .sent-tag::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
     .kill-note { margin-top: 6px; font-size: 0.78rem; color: var(--danger); }
@@ -1569,6 +1591,7 @@
   </div>
 
   <div class="sr-only" id="kill-live" aria-live="polite"></div>
+  <div class="sr-only" id="later-live" aria-live="polite"></div>
 
   <div class="sheet-root" id="sheet-root" hidden>
     <button type="button" class="sheet-scrim" id="sheet-scrim" aria-label="關閉"></button>
@@ -1800,10 +1823,71 @@
       return agent.tracked && agent.state === 'IDLE' && category(agent) === 'idle'
         && (agent.needs_review || agent.reviewed) && !isUnread(agent);
     }
+    const LATER_ARM_MS = 5000;
+    const LATER_IDLE = { key: '', action: '', revision: 0, until: 0 };
+    const ARCHIVE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v12h14V8M10 12h4"/></svg>';
+    const RESTORE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5M4 9h9a7 7 0 1 1-6.2 10.2"/></svg>';
+    let laterState = LATER_IDLE;
+    function laterPhase(agent) {
+      const key = agentKey(agent);
+      if (laterBusy.has(key)) return 'busy';
+      const action = agent.later ? 'remove' : 'add';
+      return laterState.key === key && laterState.action === action
+        && laterState.revision === agent.revision && Date.now() < laterState.until ? 'armed' : '';
+    }
+    function laterControl(agent) {
+      const phase = laterPhase(agent);
+      const action = agent.later ? '移回' : '稍後';
+      const name = agentName(agent);
+      const aria = phase === 'armed' ? `再按一次確認${action} ${name}` : `${agent.later ? '移回' : '放到稍後'} ${name}`;
+      const tip = phase === 'armed' ? `${LATER_ARM_MS / 1000} 秒內再按一次確認${action}` : `${action}（需按兩次）`;
+      const label = phase === 'armed' ? `確認${action}` : phase === 'busy' ? '儲存中…' : '';
+      return { phase, aria, tip, content: (agent.later ? RESTORE_SVG : ARCHIVE_SVG)
+        + (label ? `<span class="later-label">${label}</span>` : '') };
+    }
+    function laterButtonHtml(agent) {
+      const { phase, aria, tip, content } = laterControl(agent);
+      return `<button type="button" class="card-later${phase ? ' ' + phase : ''}" data-later="1" aria-label="${escapeHtml(aria)}" title="${escapeHtml(tip)}"${phase === 'busy' ? ' aria-disabled="true"' : ''}>${content}</button>`;
+    }
+    function updateSheetLater(agent) {
+      const button = document.getElementById('sheet-later');
+      button.hidden = !agent.later && !canMoveLater(agent);
+      const { phase, aria, tip, content } = laterControl(agent);
+      button.className = `sheet-later${phase ? ' ' + phase : ''}`;
+      button.setAttribute('aria-label', aria);
+      button.title = tip;
+      button.innerHTML = content;
+      // Keep keyboard focus while the label changes, as with the close control.
+      button.setAttribute('aria-disabled', phase === 'busy' ? 'true' : 'false');
+    }
+    function setLaterState(next, ttl = 0) {
+      const touched = new Set([laterState.key, next.key]);
+      laterState = next;
+      if (ttl) setTimeout(() => { if (laterState === next) setLaterState(LATER_IDLE); }, ttl);
+      for (const key of touched) if (key) replaceCard(key);
+      if (sheetOpen) {
+        const agent = latestAgents.find(a => agentKey(a) === selectedKey);
+        if (agent) updateSheetLater(agent);
+      }
+    }
+    async function onLater(agent) {
+      const key = agentKey(agent);
+      if (laterBusy.has(key) || (!agent.later && !canMoveLater(agent))) return;
+      if (laterPhase(agent) !== 'armed') {
+        setLaterState({ key, action: agent.later ? 'remove' : 'add',
+          revision: agent.revision, until: Date.now() + LATER_ARM_MS }, LATER_ARM_MS);
+        document.getElementById('later-live').textContent = `再按一次確認${agent.later ? '移回' : '稍後'} ${agentName(agent)}`;
+        return;
+      }
+      setLaterState(LATER_IDLE);
+      await moveLater(agent);
+    }
     async function moveLater(agent) {
       const key = agentKey(agent);
       if (laterBusy.has(key) || (!agent.later && !canMoveLater(agent))) return;
       laterBusy.add(key);
+      replaceCard(key);
+      if (sheetOpen && selectedKey === key) updateSheetLater(agent);
       const action = agent.later ? 'remove' : 'add';
       try {
         const res = await fetch('/api/later', {
@@ -1831,6 +1915,8 @@
         refresh();
       } finally {
         laterBusy.delete(key);
+        replaceCard(key);
+        if (sheetOpen && selectedKey === key) updateSheetLater(agent);
       }
     }
     const CLI_ICONS = { claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi' };
@@ -2051,9 +2137,10 @@
       const sentTag = sentRecently(key) && cat !== 'running' ? '<span class="sent-tag">已送出</span>' : '';
       const name = agentName(a);
       const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
+      const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
       const killNote = killState.key === key && killState.note
         ? `<div class="kill-note">${escapeHtml(killState.note)}</div>` : '';
-      return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}${killClass}" data-key="${escapeHtml(key)}">
+      return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}${killClass}${laterClass}" data-key="${escapeHtml(key)}">
         ${a.tracked ? `<button type="button" class="card-open" aria-label="開啟 ${escapeHtml(name)}"></button>` : ''}
         <div class="row1">
           <div class="title">
@@ -2064,7 +2151,7 @@
           </div>
           <div class="row1-side">
             <div class="age">${escapeHtml(a.age)}</div>
-            ${a.later || canMoveLater(a) ? `<button type="button" class="card-later" data-later="1" aria-label="${a.later ? '移回' : '放到稍後'} ${escapeHtml(name)}">${a.later ? '移回' : '稍後'}</button>` : ''}
+            ${a.later || canMoveLater(a) ? laterButtonHtml(a) : ''}
             ${a.tracked ? killButtonHtml(key, name) : ''}
           </div>
         </div>
@@ -2101,7 +2188,8 @@
       if (!el || !agent) return;
       // Swapping the markup drops focus, so hand it back to the control the user was on.
       const active = document.activeElement;
-      const refocus = active && el.contains(active) ? (active.closest('[data-kill]') ? '[data-kill]' : '.card-open') : '';
+      const refocus = active && el.contains(active)
+        ? (active.closest('[data-kill]') ? '[data-kill]' : active.closest('[data-later]') ? '[data-later]' : '.card-open') : '';
       el.outerHTML = cardHtml(agent, { newest: el.classList.contains('newest') });
       const target = refocus && (document.querySelector(selector) || { querySelector: () => null }).querySelector(refocus);
       if (target) target.focus();
@@ -2535,10 +2623,7 @@
       path.hidden = !sheetPathOpen || !path.textContent;
       document.getElementById('sheet-reason').textContent = reason || '';
       const current = latestAgents.find(row => agentKey(row) === agentKey(agent)) || agent;
-      const later = document.getElementById('sheet-later');
-      later.hidden = !current.later && !canMoveLater(current);
-      later.textContent = current.later ? '移回' : '稍後';
-      later.disabled = laterBusy.has(agentKey(current));
+      updateSheetLater(current);
     }
     function setRefreshLabel(newer) {
       // Short while visible so it cannot squeeze the title; the full sentence stays in the tooltip.
@@ -2938,7 +3023,7 @@
       if (event.target.closest('[data-kill]')) return onCardKill(card.dataset.key);
       const agent = latestAgents.find(a => agentKey(a) === card.dataset.key);
       if (!agent || !agent.tracked) return;
-      if (event.target.closest('[data-later]')) return moveLater(agent);
+      if (event.target.closest('[data-later]')) return onLater(agent);
       openSheet(agent);
     });
     document.getElementById('list').addEventListener('toggle', (event) => {
@@ -2948,7 +3033,7 @@
     document.getElementById('sheet-close').addEventListener('click', closeSheet);
     document.getElementById('sheet-later').addEventListener('click', () => {
       const agent = latestAgents.find(a => agentKey(a) === selectedKey);
-      if (agent) moveLater(agent);
+      if (agent) onLater(agent);
     });
     document.getElementById('sheet-refresh').addEventListener('click', () => {
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
