@@ -399,43 +399,37 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(a.model_label('gpt-6.1-sol'), 'gpt-6.1-sol')
         self.assertEqual(a.model_label(''), '')
 
-    def test_claude_stop_waiting_on_background_tasks_is_running(self):
+    def test_claude_stop_with_background_tasks_is_a_finished_turn(self):
         tasks = [{'type': 'shell', 'status': 'running'}, {'type': 'subagent', 'status': 'running'},
                  {'type': 'shell', 'status': 'running'}, {'type': 'shell', 'status': 'completed'}]
         self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': tasks}),
-                         ('RUNNING', 'Background work: waiting on 2 shell, 1 subagent', False))
+                         ('IDLE', 'Response finished; review needed', True))
         # Finished tasks, malformed payloads and other agents keep the normal finished-turn result.
         for data in ({'background_tasks': [{'type': 'shell', 'status': 'completed'}]},
                      {'background_tasks': []}, {'background_tasks': 'running'}, {'background_tasks': ['running', None]}):
             self.assertEqual(a.classify('claude', 'Stop', data), ('IDLE', 'Response finished; review needed', True))
         self.assertEqual(a.classify('codex', 'Stop', {'background_tasks': tasks})[0], 'IDLE')
-        # Something the user must answer outranks the wait.
+        # A question in the response still gets the question-specific reason.
         self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': '要繼續嗎？', 'background_tasks': tasks})[1],
                          'Response ends with a question; review suggested')
-        # So does a question that is not the last character: the user is the next actor.
         asked = '分析如上。\n\n要我照這個做嗎？做的話，案例 2 先不用你貼。'
         self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': asked, 'background_tasks': tasks}),
                          ('IDLE', 'Response finished; review needed', True))
-        # A question in an earlier paragraph does not stop the wait.
         earlier = '為什麼失敗？因為逾時。\n\n已重新部署，等待驗證。'
-        self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': earlier, 'background_tasks': tasks})[0], 'RUNNING')
+        self.assertEqual(a.classify('claude', 'Stop', {'last_assistant_message': earlier, 'background_tasks': tasks})[0], 'IDLE')
 
-    def test_only_tasks_that_report_back_count_as_waiting(self):
-        # Monitors and MCP tasks stay up and never wake the agent; an unknown or untyped task is not trusted either.
-        for kind in ('monitor', 'MCP task', 'teammate', 'cloud session', 'something-new', None):
+    def test_background_task_type_never_proves_the_agent_is_waiting(self):
+        for kind in ('shell', 'subagent', 'workflow', 'monitor', 'MCP task', 'teammate', 'cloud session', 'something-new', None):
             task = {'status': 'running'} if kind is None else {'type': kind, 'status': 'running'}
             self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': [task]}),
                              ('IDLE', 'Response finished; review needed', True), kind)
-        mixed = [{'type': 'monitor', 'status': 'running'}, {'type': 'workflow', 'status': 'running'}, {'type': 'shell', 'status': 'running'}]
-        self.assertEqual(a.classify('claude', 'Stop', {'background_tasks': mixed}),
-                         ('RUNNING', 'Background work: waiting on 1 workflow, 1 shell', False))
 
     def test_background_wait_is_a_running_row_with_its_own_icon(self):
-        a.record(self.con, 'socket', '%1', '123', 'claude', *a.classify('claude', 'Stop', {'background_tasks': [{'type': 'shell', 'status': 'running'}]}))
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'RUNNING', 'Background work: waiting on 1 subagent')
         row = a.agents_payload(self.con, 'socket', self.live, now=time.time()+3)['agents'][0]
         self.assertEqual((row['category'], row['emoji'], row['background_wait'], row['pending'], row['unread']),
                          ('running', '⏳', True, False, False))
-        self.assertEqual(row['reason'], '等待背景工作（1 shell）· 可先看進度')
+        self.assertEqual(row['reason'], '等待背景工作（1 subagent）· 可先看進度')
         self.assertEqual(a.attention_summary([row])['running'], 1)
         self.assertEqual(a.window_badge([row]), '⏳')
         # The window badge follows who acts next: real work, a result or a question outranks a parked agent.
@@ -1645,11 +1639,9 @@ class IntegrationTests(unittest.TestCase):
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 event('UserPromptSubmit',agent='claude')
                 event('Stop',{'background_tasks':[{'type':'shell','status':'running'}]},agent='claude')
-                # Parked on background work is running, not an unread result.
-                wait(lambda:'等待背景工作' in run('capture-pane','-p','-t',sidebar))
-                wait(lambda:'🏃 1' in run('capture-pane','-p','-t',sidebar))
-                wait_badge('⏳')
-                # The wake-up report ends the wait with a normal unread result.
+                # A running shell does not prove the foreground agent waits for it.
+                wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
+                wait_badge('👀')
                 event('UserPromptSubmit',agent='claude'); event('Stop',agent='claude')
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 # A different agent registering in the same pane must retain unread work.

@@ -13,7 +13,7 @@ import subprocess
 import time
 
 from attention import (
-    STATE, background_wait, classify, codex_root_transcript, codex_transcript_meta, db, live_panes,
+    STATE, BACKGROUND_WAIT, background_wait, classify, codex_root_transcript, codex_transcript_meta, db, live_panes,
     prune_stale_panes, record, resolve_socket, tmux, observer_lock_path, log_observer_error,
 )
 
@@ -151,8 +151,12 @@ def claude_screen(screen):
         line = lines[index].strip()
         if not re.match(r'^[·✢✳✶✻✽]\s',line):
             continue
-        if re.match(r'^[·✢✳✶✻✽]\s+Waiting for \d+ background agents? to finish\s*$',line):
-            return 'RUNNING','Working',False
+        waiting = re.match(r'^[·✢✳✶✻✽]\s+Waiting for (\d+) background agents? to finish\s*$',line)
+        if waiting:
+            # A prompt drawn after this line means the wait is only scrollback.
+            if any(re.match(r'^\s*❯(?:\s|$)', later) for later in lines[index+1:]):
+                continue
+            return 'RUNNING',f'Background work: waiting on {waiting[1]} subagent',False
         if re.search(r'…\s*\(',line) and 'esc to interrupt' in tail.lower():
             return 'RUNNING','Working',False
         if re.search(r'\bfor\s+\d+[hms](?:\s|\b)',line) and 'esc to interrupt' not in tail.lower():
@@ -169,13 +173,13 @@ def observe_claude(con, sock, live, table):
             continue
         screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
         state = claude_screen(screen)
-        # A turn that ended with background work running looks finished on screen; only the
-        # wake-up hooks may end that wait.
-        if state and background_wait(current):
-            continue
         # Let a freshly emitted native permission/stop event settle before a
         # screen update can replace it. Delayed old notifications still recover.
-        if state and current['state'] != state[0] and time.time()-max(current['updated'],current['last_event_time']) >= 2:
+        running_wait_changed = (state and state[0] == current['state'] == 'RUNNING'
+                                and (state[1].startswith(BACKGROUND_WAIT) != background_wait(current)
+                                     or (background_wait(current) and current['reason'] != state[1])))
+        if (state and (current['state'] != state[0] or running_wait_changed)
+                and time.time()-max(current['updated'],current['last_event_time']) >= 2):
             record(con,sock,pane,pid,'claude',*state,source='observer')
 
 
