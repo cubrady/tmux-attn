@@ -220,10 +220,12 @@ test('later sessions leave the Web idle count and appear in a collapsed group', 
   assert.match(list, /🗃️ 稍後 <span class="count">1<\/span>/);
   assert.match(list, /aria-label="移回 tomorrow"/);
   assert.match(list, /aria-label="放到稍後 now"/);
+  assert.match(list, /class="card-later" data-later="1"[^>]*><svg/);
+  assert.doesNotMatch(list, /class="card-later"[^>]*>稍後|class="card-later"[^>]*>移回/);
   assert.match(ui.elements.get('hosts').innerHTML, /^$/);
 });
 
-test('later action saves on the Web service and can be reversed', async () => {
+test('later icon needs two taps to save and two taps to restore', async () => {
   const calls = [];
   const ui = dashboard(async (url, options) => {
     calls.push({ url, body: JSON.parse(options.body) });
@@ -237,13 +239,113 @@ test('later action saves on the Web service and can be reversed', async () => {
   } });
   clickLater();
   await settle();
+  assert.equal(calls.length, 0);
+  assert.match(ui.context.cardHtml(current), /class="card-later armed" data-later="1" aria-label="再按一次確認稍後 tomorrow"/);
+  assert.match(ui.context.cardHtml(current), /class="later-label">確認稍後/);
+  clickLater();
+  await settle();
   assert.equal(calls[0].url, '/api/later');
   assert.deepEqual(calls[0].body, { action: 'add', host: 'work', pane: '%tomorrow', pid: '123', revision: 2 });
   assert.match(ui.elements.get('list').innerHTML, /id="group-later"/);
   clickLater();
   await settle();
+  assert.equal(calls.length, 1);
+  assert.match(ui.context.cardHtml(current), /class="card-later armed" data-later="1" aria-label="再按一次確認移回 tomorrow"/);
+  clickLater();
+  await settle();
   assert.equal(calls[1].body.action, 'remove');
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /id="group-later"/);
+});
+
+test('later confirmation expires, and arming a different session cancels the first', async () => {
+  let now = 0;
+  const timers = [];
+  const FakeDate = class extends Date { static now() { return now; } };
+  const calls = [];
+  const ui = dashboard({
+    globals: { Date: FakeDate, setTimeout: (fn, ms) => timers.push({ fn, at: now + ms }) },
+    fetchRequest: async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      return response({ ok: true, later: true });
+    },
+  });
+  const first = review('first', 2, 2);
+  const second = review('second', 2, 2);
+  ui.render({ agents: [first, second] });
+  const tap = agent => ui.context.onLater(agent);
+  await tap(first);
+  now = 5000;
+  timers[0].fn();
+  assert.doesNotMatch(ui.context.cardHtml(first), /card-later armed/);
+  await tap(first);
+  assert.equal(calls.length, 0);
+  await tap(second);
+  assert.doesNotMatch(ui.context.cardHtml(first), /card-later armed/);
+  assert.match(ui.context.cardHtml(second), /card-later armed/);
+  await tap(second);
+  assert.deepEqual(calls.map(call => call.body.pane), ['%second']);
+});
+
+test('a newly reviewed revision needs its own two taps', async () => {
+  const calls = [];
+  const ui = dashboard(async (url, options) => {
+    calls.push(JSON.parse(options.body));
+    return response({ ok: true, later: true });
+  });
+  const old = review('task', 2, 2);
+  ui.render({ agents: [old] });
+  await ui.context.onLater(old);
+  const newer = review('task', 3, 3);
+  ui.render({ agents: [newer] });
+  await ui.context.onLater(newer);
+  assert.equal(calls.length, 0);
+  assert.match(ui.context.cardHtml(newer), /card-later armed/);
+  await ui.context.onLater(newer);
+  assert.deepEqual(calls.map(call => call.revision), [3]);
+});
+
+test('keyboard focus stays on the later button when confirmation changes its markup', async () => {
+  const focused = [];
+  let ui;
+  const doc = {
+    querySelector(selector) {
+      if (!selector.startsWith('.card[data-key=')) return null;
+      return {
+        classList: { contains: () => false },
+        contains: node => node === ui.document.activeElement,
+        set outerHTML(_) {},
+        querySelector: inner => ({ focus: () => focused.push(inner) }),
+      };
+    },
+  };
+  ui = dashboard({ document: doc });
+  const current = review('keyboard', 2, 2);
+  ui.render({ agents: [current] });
+  ui.document.activeElement = { closest: selector => selector === '[data-later]' ? {} : null };
+  await ui.context.onLater(current);
+  assert.deepEqual(focused, ['[data-later]']);
+});
+
+test('sheet later control is an icon and also requires confirmation', async () => {
+  const calls = [];
+  const ui = dashboard(async (url, options) => {
+    calls.push(url);
+    return response(url === '/api/later' ? { ok: true, later: true }
+      : { ok: true, preview: { agent: 'result' }, revision: 2, viewable: true });
+  });
+  const current = review('sheet', 2, 2);
+  ui.render({ agents: [current] });
+  ui.open(current);
+  const button = ui.elements.get('sheet-later');
+  assert.match(button.innerHTML, /^<svg/);
+  assert.equal(button.className, 'sheet-later');
+  button.listeners.click();
+  assert.equal(calls.filter(url => url === '/api/later').length, 0);
+  assert.equal(button.className, 'sheet-later armed');
+  assert.match(button.innerHTML, /確認稍後/);
+  button.listeners.click();
+  await settle();
+  assert.equal(calls.filter(url => url === '/api/later').length, 1);
 });
 
 test('review and idle counts reflect only selected hosts', () => {
