@@ -2498,6 +2498,73 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
     }
 
 
+def web_later_db():
+    """Web-only grouping; no pane event, tmux status, or hook reads this database."""
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    con = sqlite3.connect(STATE / 'web-later.sqlite3', timeout=3)
+    try:
+        con.execute('''CREATE TABLE IF NOT EXISTS later (
+            host TEXT NOT NULL, pane TEXT NOT NULL, pid TEXT NOT NULL,
+            revision INTEGER NOT NULL, PRIMARY KEY(host,pane,pid))''')
+        return con
+    except Exception:
+        con.close()
+        raise
+
+
+def web_later_key(agent):
+    return (str(agent.get('host') or ''), str(agent.get('pane') or ''), str(agent.get('pid') or ''))
+
+
+def web_later_fleet(fleet):
+    """Mark live cards and release them when their agent changes or their pane closes."""
+    agents = {web_later_key(agent): agent for agent in fleet['agents'] if agent.get('tracked')}
+    online = {host['name'] for host in fleet['hosts'] if host.get('ok')}
+    with closing(web_later_db()) as con, con:
+        saved = con.execute('SELECT host,pane,pid,revision FROM later').fetchall()
+        for host, pane, pid, revision in saved:
+            agent = agents.get((host, pane, pid))
+            current_revision = agent.get('revision') if agent else 0
+            if host in online and (agent is None or agent.get('state') != 'IDLE'
+                                   or agent.get('unread')
+                                   or (isinstance(current_revision, int) and current_revision > revision)):
+                con.execute('DELETE FROM later WHERE host=? AND pane=? AND pid=?', (host, pane, pid))
+            elif agent is not None:
+                agent['later'] = True
+    return fleet
+
+
+def dispatch_web_later(payload, include_local=True):
+    """Move a viewed completion into/out of the Web-only later group."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    host, pane, pid = (payload.get(key) for key in ('host', 'pane', 'pid'))
+    action = payload.get('action')
+    if any(not isinstance(value, str) or not value or len(value) > 240 for value in (host, pane, pid)):
+        return 400, {'ok': False, 'error': 'host, pane, and pid are required'}
+    if action not in ('add', 'remove'):
+        return 400, {'ok': False, 'error': 'action must be add or remove'}
+    if action == 'remove':
+        with closing(web_later_db()) as con, con:
+            con.execute('DELETE FROM later WHERE host=? AND pane=? AND pid=?', (host, pane, pid))
+        return 200, {'ok': True, 'later': False}
+    revision = payload.get('revision')
+    if type(revision) is not int or revision < 1:
+        return 400, {'ok': False, 'error': 'positive integer revision required'}
+    fleet = fleet_payload(include_local=include_local)
+    if host not in {row['name'] for row in fleet['hosts'] if row.get('ok')}:
+        return 409, {'ok': False, 'error': 'host is offline'}
+    agent = next((row for row in fleet['agents'] if web_later_key(row) == (host, pane, pid)), None)
+    if (not agent or not agent.get('tracked') or agent.get('state') != 'IDLE'
+            or not agent.get('needs_review') or not agent.get('reviewed')
+            or agent.get('unread') or agent.get('revision') != revision):
+        return 409, {'ok': False, 'error': 'session is no longer a viewed completion'}
+    with closing(web_later_db()) as con, con:
+        con.execute('INSERT OR REPLACE INTO later(host,pane,pid,revision) VALUES(?,?,?,?)',
+                    (host, pane, pid, revision))
+    return 200, {'ok': True, 'later': True}
+
+
 _GIT_ENV_CACHE = {}
 _GIT_ENV_TTL = 25.0
 
@@ -3305,7 +3372,7 @@ def make_web_handler(fleet_only=False):
                 return
             if path == '/api/fleet':
                 try:
-                    payload = fleet_payload(include_local=not fleet_only)
+                    payload = web_later_fleet(fleet_payload(include_local=not fleet_only))
                     self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
                     sys.stderr.write(f'web /api/fleet: {type(exc).__name__}: {exc}\n')
@@ -3349,6 +3416,14 @@ def make_web_handler(fleet_only=False):
             payload.pop('_local_only', None)
             if path == '/api/peers':
                 code, body = dispatch_peer_register(payload)
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
+            if path == '/api/later':
+                try:
+                    code, body = dispatch_web_later(payload, include_local=not fleet_only)
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/later: {type(exc).__name__}: {exc}\n')
+                    code, body = 500, {'ok': False, 'error': 'failed to update later group'}
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             action = actions.get(path)
