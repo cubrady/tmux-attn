@@ -216,6 +216,7 @@ test('later sessions leave the Web idle count and appear in a collapsed group', 
   ui.render({ agents: [parked, review('now', 2, 2)] });
   const list = ui.elements.get('list').innerHTML;
   assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /class="summary-later" data-later-jump aria-label="稍後 1，展開並跳到稍後"/);
   assert.match(list, /<details class="later-group" id="group-later">/);
   assert.match(list, /🗃️ 稍後 <span class="count">1<\/span>/);
   assert.match(list, /aria-label="移回 tomorrow"/);
@@ -223,6 +224,42 @@ test('later sessions leave the Web idle count and appear in a collapsed group', 
   assert.match(list, /class="card-later" data-later="1"[^>]*><svg/);
   assert.doesNotMatch(list, /class="card-later"[^>]*>稍後|class="card-later"[^>]*>移回/);
   assert.match(ui.elements.get('hosts').innerHTML, /^$/);
+  ui.render({ agents: [review('now', 2, 2)] });
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /summary-later/);
+});
+
+test('later header count follows host filters and opens the collapsed group', () => {
+  const ui = dashboard();
+  const group = { open: false, style: {}, scrollIntoView() { this.scrolled = true; } };
+  ui.document.getElementById = id => id === 'group-later' ? group : ui.elements.get(id);
+  const hosts = [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }];
+  ui.render({ hosts, agents: [
+    { ...review('one', 2, 2), host: 'alpha', later: true },
+    { ...review('two', 2, 2), host: 'beta', later: true },
+  ] });
+  assert.match(ui.elements.get('summary').innerHTML, /稍後 2，展開並跳到稍後/);
+  ui.elements.get('hosts').listeners.click({ target: {
+    closest: () => ({ dataset: { host: 'alpha' } }),
+  } });
+  assert.match(ui.elements.get('summary').innerHTML, /稍後 1，展開並跳到稍後/);
+  ui.elements.get('summary').listeners.click({ target: {
+    closest: selector => selector === '[data-later-jump]' ? {} : null,
+  } });
+  assert.equal(group.open, true);
+  assert.equal(group.scrolled, true);
+  ui.render({ hosts, agents: [{ ...review('one', 2, 2), host: 'alpha', later: true }] });
+  assert.match(ui.elements.get('list').innerHTML, /id="group-later" open/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /class="stat active"/);
+});
+
+test('first load consumes the fleet request started in the page head', async () => {
+  const payload = { ok: true, agents: [review('early', 2, 2)] };
+  const ui = dashboard({ window: { initialFleetRequest: Promise.resolve({ res: response(payload) }) } });
+  await settle();
+  assert.match(ui.elements.get('list').innerHTML, /early/);
+  assert.equal(ui.context.window.initialFleetRequest, null);
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.ok(html.indexOf('id="early-fleet-request"') < html.indexOf('fonts.googleapis.com'));
 });
 
 test('later icon needs two taps to save and two taps to restore', async () => {

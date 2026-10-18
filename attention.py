@@ -2438,31 +2438,32 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
     agents = []
     summaries = []
     hosts = []
-    if include_local:
-        host = local_host_name()
-        cache_key = ('local', host)
-        try:
-            with closing(db()) as con:
-                local = agents_payload(con)
-            tagged, summary = tag_host(local, host)
-            _remember_fleet_host(cache_key, now, tagged, summary)
-            agents.extend(tagged)
-            summaries.append(summary)
-            hosts.append({'name': host, 'ok': True, 'source': 'local', 'version': install_version()})
-        except Exception as exc:
-            cached = _cached_fleet_host(cache_key, now, stale_ttl)
-            host_row = {'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'}
-            if cached:
-                tagged, summary, stale_age = cached
+    peers = load_peers()
+    # Start peer I/O before the local tmux/DB scan so the two waits overlap.
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(peers)))) as pool:
+        futures = {pool.submit(fetch_peer_agents, peer['url'], peer_timeout): peer for peer in peers}
+        if include_local:
+            host = local_host_name()
+            cache_key = ('local', host)
+            try:
+                with closing(db()) as con:
+                    local = agents_payload(con)
+                tagged, summary = tag_host(local, host)
+                _remember_fleet_host(cache_key, now, tagged, summary)
                 agents.extend(tagged)
                 summaries.append(summary)
-                host_row['stale'] = True
-                host_row['stale_age'] = stale_age
-            hosts.append(host_row)
-    peers = load_peers()
-    if peers:
-        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
-            futures = {pool.submit(fetch_peer_agents, peer['url'], peer_timeout): peer for peer in peers}
+                hosts.append({'name': host, 'ok': True, 'source': 'local', 'version': install_version()})
+            except Exception as exc:
+                cached = _cached_fleet_host(cache_key, now, stale_ttl)
+                host_row = {'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'}
+                if cached:
+                    tagged, summary, stale_age = cached
+                    agents.extend(tagged)
+                    summaries.append(summary)
+                    host_row['stale'] = True
+                    host_row['stale_age'] = stale_age
+                hosts.append(host_row)
+        if futures:
             for future in as_completed(futures):
                 peer = futures[future]
                 cache_key = ('peer', peer['name'], peer['url'])

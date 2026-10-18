@@ -6,6 +6,11 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="tmux attention — multi-host agent status">
   <title>Attention</title>
+  <script id="early-fleet-request">
+    // Start the first status request before font and Markdown resources block page scripts.
+    window.initialFleetRequest = fetch('/api/fleet', { cache: 'no-store' })
+      .then(res => ({ res }), error => ({ error }));
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@450;500&display=swap" rel="stylesheet">
@@ -249,6 +254,23 @@
       letter-spacing: 0.02em;
       color: var(--muted);
     }
+    .summary-later {
+      grid-column: 1 / -1;
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 5px;
+      min-height: 28px;
+      padding: 3px 12px;
+      border: 0;
+      background: var(--card);
+      color: var(--muted);
+      font: 600 0.72rem var(--font);
+      cursor: pointer;
+    }
+    .summary-later:hover { color: var(--fg); background: color-mix(in srgb, var(--accent) 6%, var(--card)); }
+    .summary-later:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .summary-later .count { font-family: var(--mono); font-variant-numeric: tabular-nums; }
     .hosts {
       display: flex;
       flex-wrap: wrap;
@@ -2833,7 +2855,7 @@
       setRefreshLabel(newer);
     }
     function renderSummary(counts) {
-      document.getElementById('summary').innerHTML = [
+      const stats = [
         ['wait', '🙋', counts.wait || 0, '等待'],
         ['review', '👀', counts.review || 0, '待看'],
         ['idle', '💤', counts.idle || 0, '閒置'],
@@ -2845,11 +2867,15 @@
         const ariaLabel = `${l} ${n}，${title}`;
         return `<button type="button" class="stat${active}" data-group="${key}"${disabled} title="${title}" aria-label="${ariaLabel}"><div class="n">${e} ${n}</div><div class="l">${l}</div></button>`;
       }).join('');
+      const later = counts.later || 0;
+      document.getElementById('summary').innerHTML = stats + (later
+        ? `<button type="button" class="summary-later" data-later-jump aria-label="稍後 ${later}，展開並跳到稍後">🗃️ 稍後 <span class="count">${later}</span><span aria-hidden="true">›</span></button>`
+        : '');
     }
     function visibleSummaryCounts(agents) {
-      const counts = { wait: 0, review: 0, running: 0, idle: 0 };
+      const counts = { wait: 0, review: 0, running: 0, idle: 0, later: 0 };
       for (const a of agents) {
-        if (a.later) continue;
+        if (a.later) { counts.later += 1; continue; }
         const key = category(a);
         if (key in counts) counts[key] += 1;
       }
@@ -2982,6 +3008,17 @@
       });
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
+    function jumpToLater() {
+      const group = document.getElementById('group-later');
+      if (!group) return;
+      activeGroup = 'later';
+      document.querySelectorAll('.stat[data-group]').forEach(btn => btn.classList.remove('active'));
+      laterExpanded = true;
+      group.open = true;
+      const header = document.querySelector('header');
+      group.style.scrollMarginTop = `${Math.ceil(header?.getBoundingClientRect().height || 0) + 8}px`;
+      group.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -3000,6 +3037,7 @@
       }
     });
     document.getElementById('summary').addEventListener('click', (event) => {
+      if (event.target.closest('[data-later-jump]')) return jumpToLater();
       const btn = event.target.closest('.stat[data-group]');
       if (!btn || btn.disabled) return;
       jumpToGroup(btn.dataset.group);
@@ -3263,7 +3301,11 @@
       if (cold) setColdSkeleton(true);
       else setRefreshing(true);
       try {
-        const res = await fetch('/api/fleet', { cache: 'no-store' });
+        const first = cold && window.initialFleetRequest;
+        window.initialFleetRequest = null;
+        const result = first ? await first : { res: await fetch('/api/fleet', { cache: 'no-store' }) };
+        if (result.error) throw result.error;
+        const res = result.res;
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || 'payload error');
