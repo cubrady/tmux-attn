@@ -367,6 +367,31 @@
       background: color-mix(in srgb, var(--review) 16%, transparent);
       opacity: 1;
     }
+    .later-group { margin-top: 16px; }
+    .later-group summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 10px 2px;
+    }
+    .later-group summary:focus-visible { outline: 2px solid var(--accent); }
+    .later-group .card { margin-top: 8px; }
+    .card-later, .sheet-later {
+      position: relative;
+      z-index: 1;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--bg);
+      color: var(--muted);
+      padding: 5px 9px;
+      font: 600 0.7rem var(--font);
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .card-later:hover, .sheet-later:hover { color: var(--fg); border-color: var(--accent); }
+    .card-later:focus-visible, .sheet-later:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .card-later:disabled, .sheet-later:disabled { opacity: 0.5; cursor: default; }
     .review-state { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 500; color: var(--muted); }
     .review-state.unread { color: var(--review); font-weight: 600; }
     .review-state.unread::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
@@ -1559,6 +1584,7 @@
               <span class="sheet-env" id="sheet-env" hidden></span>
             </div>
           </div>
+          <button type="button" class="sheet-later" id="sheet-later" hidden></button>
           <button type="button" class="icon-btn refresh" id="sheet-refresh" title="重新整理內容">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
             <span class="refresh-label sr-only" id="sheet-refresh-label">重新整理內容</span>
@@ -1633,6 +1659,8 @@
     let latestPayload = null;
     let hostFilters = new Set(); // empty = show all hosts
     let activeGroup = '';
+    let laterExpanded = false;
+    const laterBusy = new Set();
     let sheetOpen = false;
     let sheetPreviewKey = '';
     let sheetPreviewFull = false;
@@ -1767,6 +1795,43 @@
       const acknowledged = Math.max(Number(agent.acknowledged) || 0, acknowledgedVersions.get(agentKey(agent)) || 0);
       if (Number.isInteger(agent.revision) && agent.revision > 0) return agent.revision > acknowledged;
       return agent.unread ?? agent.pending ?? !agent.reviewed;
+    }
+    function canMoveLater(agent) {
+      return agent.tracked && agent.state === 'IDLE' && category(agent) === 'idle'
+        && (agent.needs_review || agent.reviewed) && !isUnread(agent);
+    }
+    async function moveLater(agent) {
+      const key = agentKey(agent);
+      if (laterBusy.has(key) || (!agent.later && !canMoveLater(agent))) return;
+      laterBusy.add(key);
+      const action = agent.later ? 'remove' : 'add';
+      try {
+        const res = await fetch('/api/later', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, host: agentHostName(agent), pane: agent.pane,
+            pid: String(agent.pid), revision: agent.revision }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        agent.later = !!data.later;
+        if (sheetOpen && selectedKey === key) closeSheet();
+        if (latestPayload) render(latestPayload);
+        refresh();
+      } catch (error) {
+        const message = '稍後分組儲存失敗：' + error.message;
+        if (sheetOpen && selectedKey === key) {
+          const status = document.getElementById('sheet-status');
+          status.className = 'sheet-feedback bad';
+          status.textContent = message;
+        } else {
+          const banner = document.getElementById('error');
+          banner.textContent = message;
+          banner.hidden = false;
+        }
+        refresh();
+      } finally {
+        laterBusy.delete(key);
+      }
     }
     const CLI_ICONS = { claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi' };
     function cliBadge(cli) {
@@ -1999,6 +2064,7 @@
           </div>
           <div class="row1-side">
             <div class="age">${escapeHtml(a.age)}</div>
+            ${a.later || canMoveLater(a) ? `<button type="button" class="card-later" data-later="1" aria-label="${a.later ? '移回' : '放到稍後'} ${escapeHtml(name)}">${a.later ? '移回' : '稍後'}</button>` : ''}
             ${a.tracked ? killButtonHtml(key, name) : ''}
           </div>
         </div>
@@ -2468,6 +2534,11 @@
       path.textContent = agent.path || agent.repo || '';
       path.hidden = !sheetPathOpen || !path.textContent;
       document.getElementById('sheet-reason').textContent = reason || '';
+      const current = latestAgents.find(row => agentKey(row) === agentKey(agent)) || agent;
+      const later = document.getElementById('sheet-later');
+      later.hidden = !current.later && !canMoveLater(current);
+      later.textContent = current.later ? '移回' : '稍後';
+      later.disabled = laterBusy.has(agentKey(current));
     }
     function setRefreshLabel(newer) {
       // Short while visible so it cannot squeeze the title; the full sentence stays in the tooltip.
@@ -2693,6 +2764,7 @@
     function visibleSummaryCounts(agents) {
       const counts = { wait: 0, review: 0, running: 0, idle: 0 };
       for (const a of agents) {
+        if (a.later) continue;
         const key = category(a);
         if (key in counts) counts[key] += 1;
       }
@@ -2797,7 +2869,11 @@
       }
       empty.hidden = true;
       const grouped = Object.fromEntries(SECTIONS.map(([key]) => [key, []]));
-      for (const a of shown) grouped[category(a)].push(a);
+      const later = [];
+      for (const a of shown) {
+        if (a.later) later.push(a);
+        else grouped[category(a)].push(a);
+      }
       for (const key of Object.keys(grouped)) {
         grouped[key].sort((a, b) => (b.updated || 0) - (a.updated || 0));
       }
@@ -2806,7 +2882,9 @@
         if (!rows.length) return '';
         const heading = `<div class="section" id="group-${key}" data-group="${key}"><span>${SECTION_EMOJI[key]} ${title}</span><span class="count">${rows.length}</span></div>`;
         return heading + rows.map((a, i) => cardHtml(a, { newest: key === 'review' && i === 0 })).join('');
-      }).join('');
+      }).join('') + (later.length ? `<details class="later-group" id="group-later"${laterExpanded ? ' open' : ''}>` +
+        `<summary>🗃️ 稍後 <span class="count">${later.length}</span></summary>` +
+        later.map(a => cardHtml(a)).join('') + '</details>' : '');
       markClippedPreviews();
       syncSheetFromData();
     }
@@ -2860,10 +2938,18 @@
       if (event.target.closest('[data-kill]')) return onCardKill(card.dataset.key);
       const agent = latestAgents.find(a => agentKey(a) === card.dataset.key);
       if (!agent || !agent.tracked) return;
+      if (event.target.closest('[data-later]')) return moveLater(agent);
       openSheet(agent);
     });
+    document.getElementById('list').addEventListener('toggle', (event) => {
+      if (event.target.id === 'group-later') laterExpanded = event.target.open;
+    }, true);
     document.getElementById('sheet-scrim').addEventListener('click', closeSheet);
     document.getElementById('sheet-close').addEventListener('click', closeSheet);
+    document.getElementById('sheet-later').addEventListener('click', () => {
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey);
+      if (agent) moveLater(agent);
+    });
     document.getElementById('sheet-refresh').addEventListener('click', () => {
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
       if (!sheetOpen || !agent) return;

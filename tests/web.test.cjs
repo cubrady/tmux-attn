@@ -210,6 +210,42 @@ test('only viewed results disable review navigation and enable idle; legacy pend
   assert.match(ui.elements.get('summary').innerHTML, /class="l">待看<\/div>/);
 });
 
+test('later sessions leave the Web idle count and appear in a collapsed group', () => {
+  const ui = dashboard();
+  const parked = { ...review('tomorrow', 2, 2), later: true };
+  ui.render({ agents: [parked, review('now', 2, 2)] });
+  const list = ui.elements.get('list').innerHTML;
+  assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
+  assert.match(list, /<details class="later-group" id="group-later">/);
+  assert.match(list, /🗃️ 稍後 <span class="count">1<\/span>/);
+  assert.match(list, /aria-label="移回 tomorrow"/);
+  assert.match(list, /aria-label="放到稍後 now"/);
+  assert.match(ui.elements.get('hosts').innerHTML, /^$/);
+});
+
+test('later action saves on the Web service and can be reversed', async () => {
+  const calls = [];
+  const ui = dashboard(async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return response({ ok: true, later: calls.length === 1 });
+  });
+  const current = review('tomorrow', 2, 2);
+  ui.render({ agents: [current] });
+  const clickLater = () => ui.elements.get('list').listeners.click({ target: {
+    closest: selector => selector === '.card[data-key]' ? { dataset: { key: ui.context.agentKey(current) } }
+      : selector === '[data-later]' ? {} : null,
+  } });
+  clickLater();
+  await settle();
+  assert.equal(calls[0].url, '/api/later');
+  assert.deepEqual(calls[0].body, { action: 'add', host: 'work', pane: '%tomorrow', pid: '123', revision: 2 });
+  assert.match(ui.elements.get('list').innerHTML, /id="group-later"/);
+  clickLater();
+  await settle();
+  assert.equal(calls[1].body.action, 'remove');
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /id="group-later"/);
+});
+
 test('review and idle counts reflect only selected hosts', () => {
   const ui = dashboard();
   ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [
@@ -1683,7 +1719,8 @@ function killSetup({ kill, names = ['demo'] } = {}) {
   ui.render({ agents });
   const keyOf = i => ui.context.agentKey(agents[i]);
   const tap = (i = 0, onKill = true) => ui.elements.get('list').listeners.click({
-    target: { closest: selector => (selector === '[data-kill]' ? (onKill ? {} : null) : { dataset: { key: keyOf(i) } }) },
+    target: { closest: selector => (selector === '[data-kill]' ? (onKill ? {} : null)
+      : selector === '[data-later]' ? null : { dataset: { key: keyOf(i) } }) },
   });
   const list = () => { ui.render({ agents }); return ui.elements.get('list').innerHTML; };
   const advance = ms => {
