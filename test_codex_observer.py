@@ -91,7 +91,8 @@ class ObserverTests(unittest.TestCase):
   done='⏺ Finished the update.\n✻ Sautéed for 7m 58s · done 下午2:46\n────\n❯\n────\n⏵⏵ auto mode on'
   self.assertEqual(claude_screen(busy),('RUNNING','Working',False))
   waiting='✻ Waiting for 5 background agents to finish\n'+('\n'.join(['agents panel']*20))
-  self.assertEqual(claude_screen(waiting),('RUNNING','Working',False))
+  self.assertEqual(claude_screen(waiting),('RUNNING','Background work: waiting on 5 subagent',False))
+  self.assertIsNone(claude_screen(waiting+'\n────\n❯\n────'))
   self.assertEqual(claude_screen(waiting+'\n'+done)[0],'IDLE')
   self.assertEqual(claude_screen(done)[0],'IDLE')
   for question in ('Which option?', 'Which option？'):
@@ -126,7 +127,7 @@ class ObserverTests(unittest.TestCase):
      self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),before)
    finally:a.STATE=previous
 
- def test_claude_background_wait_survives_a_done_screen_until_it_wakes(self):
+ def test_claude_background_wait_clears_when_a_done_screen_appears(self):
   done='⏺ Waiting on the deploy.\n✻ Sautéed for 7m 58s · done 下午2:46\n────\n❯\n────\n⏵⏵ auto mode on'
   table={123:(1,'zsh'),456:(123,'claude --resume root')}
   with tempfile.TemporaryDirectory() as directory:
@@ -140,10 +141,29 @@ class ObserverTests(unittest.TestCase):
        observe_claude(con,'sock',live,table)
      before=dict(con.execute('SELECT * FROM panes').fetchone())
      scan()
-     self.assertEqual(dict(con.execute('SELECT * FROM panes').fetchone()),before)
-     # Once a hook reports the agent working again, a lost Stop is still recovered from the screen.
-     a.record(con,'sock','%1','123','claude','RUNNING','Working',event_time=1000000001)
-     scan()
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['state'],row['needs_review']),('IDLE',1))
+     self.assertGreater(row['revision'],before['revision'])
+   finally:a.STATE=previous
+
+ def test_claude_explicit_wait_overrides_working_then_clears_on_completion(self):
+  waiting='✻ Waiting for 2 background agents to finish\n'+'\n'.join(['agents panel']*20)
+  done='⏺ Finished.\n✻ Sautéed for 3m 12s · done 下午2:46\n────\n❯\n────\n⏵⏵ auto mode on'
+  table={123:(1,'zsh'),456:(123,'claude --resume root')}
+  with tempfile.TemporaryDirectory() as directory:
+   previous=a.STATE;a.STATE=Path(directory)
+   try:
+    with closing(a.db()) as con:
+     live={('%1','123'):{'path':'/project'}}
+     a.record(con,'sock','%1','123','claude','RUNNING','Working',event_time=1000000000)
+     def scan(screen,now):
+      with patch('codex_observer.tmux',return_value=screen),patch('codex_observer.time.time',return_value=now):
+       observe_claude(con,'sock',live,table)
+     scan(waiting,2000000000)
+     row=con.execute('SELECT * FROM panes').fetchone()
+     self.assertEqual((row['state'],row['reason'],row['needs_review']),
+                      ('RUNNING','Background work: waiting on 2 subagent',0))
+     scan(done,2000000003)
      row=con.execute('SELECT * FROM panes').fetchone()
      self.assertEqual((row['state'],row['needs_review']),('IDLE',1))
    finally:a.STATE=previous
