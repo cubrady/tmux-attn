@@ -1298,6 +1298,26 @@ class StoreTests(unittest.TestCase):
         status = {row['name']: row['ok'] for row in fleet['hosts']}
         self.assertEqual(status, {'home': True, 'lab': True, 'down': False})
 
+    def test_fleet_starts_peer_fetch_before_local_scan_finishes(self):
+        peer_started = threading.Event()
+
+        def peer_fetch(url, timeout):
+            peer_started.set()
+            return {'ok': True, 'agents': []}
+
+        def local_scan(con):
+            if not peer_started.wait(1):
+                raise AssertionError('peer fetch did not overlap local scan')
+            return {'ok': True, 'agents': []}
+
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'fetch_peer_agents', side_effect=peer_fetch), \
+             patch.object(a, 'agents_payload', side_effect=local_scan):
+            fleet = a.fleet_payload(include_local=True)
+        self.assertEqual({row['name']: row['ok'] for row in fleet['hosts']},
+                         {'home': True, 'lab': True})
+
     def test_fleet_retains_stale_peer_on_transient_failure_until_ttl_expires(self):
         a._FLEET_HOST_CACHE.clear()
         peer_payload = {
