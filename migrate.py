@@ -17,6 +17,7 @@ FILES = [
     'contrib/launchd/web-run.sh',
     'web/icons/claude.svg', 'web/icons/codex.svg', 'web/icons/agent.svg', 'web/icons/pi.svg',
     'web/icons/favicon.svg',
+    'docs/coding-agent-status-research.md',
 
     'test_attention.py', 'test_codex_observer.py', 'test_observer_recovery.py',
     'test_migration.py', 'tests/popup_roundtrip.py',

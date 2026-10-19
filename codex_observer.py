@@ -183,6 +183,70 @@ def observe_claude(con, sock, live, table):
             record(con,sock,pane,pid,'claude',*state,source='observer')
 
 
+def native_pi_pids(pane_pid, table):
+    descendants = {int(pane_pid)}
+    for _ in range(30):
+        more = {pid for pid,(parent,_) in table.items() if parent in descendants}
+        if more.issubset(descendants):
+            break
+        descendants |= more
+    roots = []
+    for pid in descendants:
+        args = table.get(pid, (0, ''))[1]
+        exe = Path((args.split(None, 1)[0] if args else '')).name
+        if exe in ('pi', 'pi-agent') or 'pi-coding-agent' in args:
+            tokens = args.split()
+            if 'daemon' in tokens or '--managed-daemon' in tokens:
+                continue
+            roots.append(pid)
+    return roots
+
+
+def pi_extension_heartbeat_age(pane):
+    path = STATE / 'pi-heartbeats' / f'{str(pane).lstrip("%")}.json'
+    try:
+        data = json.loads(path.read_text())
+        return time.time() - float(data.get('at') or 0)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def pi_screen(screen):
+    """Fallback when extension UI prompts did not report (non-ctx.ui dialogs)."""
+    lines = screen.rstrip().splitlines()
+    tail = '\n'.join(lines[-30:])
+    if re.search(
+        r'(?:\(Y/n\)|\(y/N\)|\[Y/n\]|\[y/N\]|Yes\s*/\s*No|Confirm\?|Select an option|Enter a value)',
+        tail, re.I,
+    ):
+        return 'WAIT', 'Answer or decision needed', False
+    if re.search(r'(?:Thinking|Working|Running tools|Streaming)\b', tail, re.I):
+        return 'RUNNING', 'Working', False
+    return None
+
+
+def observe_pi(con, sock, live, table):
+    for (pane, pid) in live:
+        if len(native_pi_pids(pid, table)) != 1:
+            continue
+        current = con.execute(
+            'SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)
+        ).fetchone()
+        screen = tmux('capture-pane', '-p', '-J', '-t', pane, check=False, sock=sock)
+        state = pi_screen(screen)
+        if not state:
+            heartbeat_age = pi_extension_heartbeat_age(pane)
+            # Extension silent while Pi is alive: keep a tracked IDLE row so status sees it.
+            if not current and (heartbeat_age is None or heartbeat_age > 30):
+                record(con, sock, pane, pid, 'pi', 'IDLE', 'Pi running; extension heartbeat stale', source='observer')
+            continue
+        if current and current['agent'] == 'pi' and current['state'] == state[0]:
+            continue
+        if current and time.time() - max(current['updated'], current['last_event_time']) < 2:
+            continue
+        record(con, sock, pane, pid, 'pi', *state, source='observer')
+
+
 def process_start(pid):
     p = subprocess.run(['ps','-p',str(pid),'-o','lstart='],env=os.environ|{'TZ':'UTC','LC_ALL':'C'},capture_output=True,text=True,timeout=4)
     return int(datetime.strptime(p.stdout.strip(),'%a %b %d %H:%M:%S %Y').replace(tzinfo=timezone.utc).timestamp())
@@ -478,6 +542,7 @@ def observe():
                     discover(con,sock,live,table,attempted)
                 observe_cursor(con,sock,live,table)
                 observe_claude(con,sock,live,table)
+                observe_pi(con,sock,live,table)
                 observe_codex_unmapped(con,sock,live,table)
                 for mapping in con.execute('SELECT * FROM codex_sessions WHERE socket=?',(sock,)).fetchall():
                     pane,pid = mapping['pane'],mapping['pid']

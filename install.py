@@ -177,6 +177,37 @@ pi = (ROOT/'pi-attention.ts').read_text().replace('__PYTHON__', python).replace(
 paths[4].parent.mkdir(parents=True, exist_ok=True)
 paths[4].write_text(pi)
 
+def snake_event(name):
+    out = []
+    for i, ch in enumerate(name):
+        if ch.isupper() and i:
+            out.append('_')
+        out.append(ch.lower())
+    return ''.join(out)
+
+
+def codex_hook_trust_report(hooks_path, config_text, hooks_data, events):
+    """Compare installed Codex events against persisted [hooks.state] trust keys."""
+    trusted = set(re.findall(r'\[hooks\.state\."([^"]+)"\]', config_text or ''))
+    missing = []
+    configured = hooks_data.get('hooks', {}) if isinstance(hooks_data, dict) else {}
+    for event in events:
+        groups = configured.get(event) or []
+        snake = snake_event(event)
+        found = False
+        for gi, group in enumerate(groups):
+            for hi, _handler in enumerate(group.get('hooks') or []):
+                key = f'{hooks_path}:{snake}:{gi}:{hi}'
+                if key in trusted:
+                    found = True
+        # Also accept legacy :0:0 if our handler is the only/first group.
+        if not found and f'{hooks_path}:{snake}:0:0' in trusted:
+            found = True
+        if not found:
+            missing.append(event)
+    return missing
+
+
 for agent, path in [('claude', paths[1]), ('codex', paths[2])]:
     data = json.loads(path.read_text()) if path.exists() else {}
     hooks = data.setdefault('hooks', {})
@@ -185,24 +216,50 @@ for agent, path in [('claude', paths[1]), ('codex', paths[2])]:
         for group in groups:
             group['hooks'] = [h for h in group.get('hooks', []) if 'tmux-agent-status/hooks/' not in h.get('command','') and str(app) not in h.get('command','')]
         hooks[event] = [g for g in groups if g.get('hooks')]
-    events = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest', 'Stop', 'SessionEnd']
-    events += ['Notification', 'StopFailure'] if agent == 'claude' else ['Interrupt']
+    events = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop']
+    if agent == 'claude':
+        events += ['Notification', 'StopFailure', 'Elicitation', 'ElicitationResult', 'TeammateIdle', 'PostToolUseFailure']
+    else:
+        events += ['Interrupt']
     for event in events:
         group = {'hooks': [{'type':'command','command':shlex.join([python, str(app), 'event', agent, event])}]}
         if event == 'Notification':
-            group['matcher'] = 'permission_prompt|elicitation_dialog|agent_needs_input|worker_permission_prompt'
+            group['matcher'] = (
+                'permission_prompt|elicitation_dialog|elicitation_url_dialog|'
+                'agent_needs_input|worker_permission_prompt|agent_completed'
+            )
         hooks.setdefault(event, []).append(group)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2)+'\n')
 
+codex_events = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest',
+                'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop', 'Interrupt']
+codex_hooks_data = json.loads(paths[2].read_text()) if paths[2].exists() else {}
+codex_trust_missing = codex_hook_trust_report(
+    str(paths[2]),
+    (new_codex_text if new_codex_text is not None else codex_text),
+    codex_hooks_data,
+    codex_events,
+)
+if codex_trust_missing:
+    print(
+        'warning: Codex hooks need /hooks trust for: ' + ', '.join(codex_trust_missing)
+        + '. Untrusted hooks are skipped silently until you approve them in Codex.',
+        file=sys.stderr,
+    )
+
 # Native Cursor stop is required: its CLI does not invoke inherited Claude Stop
-# unless a native stop handler exists. Use observational hooks only.
+# unless a native stop handler exists. Use observational hooks only (never deny).
 cursor_path = paths[10]
 cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {'version':1}
 cursor_hooks = cursor.setdefault('hooks', {})
 for event, handlers in cursor_hooks.items():
     cursor_hooks[event] = [h for h in handlers if str(app) not in h.get('command','')]
-for event in ['sessionStart', 'beforeSubmitPrompt', 'postToolUse', 'stop', 'sessionEnd']:
+for event in [
+    'sessionStart', 'beforeSubmitPrompt', 'preToolUse', 'postToolUse', 'postToolUseFailure',
+    'beforeShellExecution', 'beforeMCPExecution', 'afterAgentResponse', 'subagentStop',
+    'stop', 'sessionEnd',
+]:
     cursor_hooks.setdefault(event, []).append({'command':shlex.join([python,str(app),'event','cursor',event])})
 cursor_path.parent.mkdir(parents=True, exist_ok=True)
 cursor_path.write_text(json.dumps(cursor,indent=2)+'\n')
@@ -288,4 +345,5 @@ print(json.dumps({
     'config': str(config),
     'status_control_clicks': control_clicks,
     'web_service': str(web_service),
+    'codex_hooks_untrusted': codex_trust_missing,
 }, indent=2))
