@@ -3368,6 +3368,14 @@ def make_web_handler(fleet_only=False):
                     return
                 self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
                 return
+            # Browsers often request /favicon.ico before reading <link rel="icon">.
+            if path in ('/favicon.ico', '/favicon.svg'):
+                icon = web_icon_path('favicon.svg')
+                if icon:
+                    self._send(200, icon.read_bytes(), 'image/svg+xml')
+                    return
+                self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
+                return
             if path in ('/', '/index.html'):
                 self._send(200, index.read_bytes(), 'text/html; charset=utf-8')
                 return

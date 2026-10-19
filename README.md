@@ -1,5 +1,7 @@
 # tmux Attention
 
+<img src="web/icons/favicon.svg" width="72" height="72" alt="tmux Attention">
+
 **同時開一堆 coding agent 時，你不該再一個 pane 一個 pane 猜誰在等你。**
 
 tmux Attention 讓你一眼知道：誰在問你、誰做完還沒看、誰還在跑——在 tmux 底列、手機或另一台電腦的網頁上都一樣。
