@@ -11,8 +11,8 @@
   <meta name="theme-color" content="#0f766e" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0c0c0e" media="(prefers-color-scheme: dark)">
   <script id="early-fleet-request">
-    // Start the first status request before font and Markdown resources block page scripts.
-    window.initialFleetRequest = fetch('/api/fleet', { cache: 'no-store' })
+    // Start the host roster before font and Markdown resources block page scripts.
+    window.initialFleetPlanRequest = fetch('/api/fleet/plan', { cache: 'no-store' })
       .then(res => ({ res }), error => ({ error }));
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -161,9 +161,13 @@
       font-size: 0.68rem;
       font-weight: 600;
       letter-spacing: 0.04em;
-      text-transform: uppercase;
+      text-transform: none;
       line-height: 1;
       padding: 5px 9px 5px 8px;
+      max-width: 9.5rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       border-radius: 999px;
       border: 1px solid color-mix(in srgb, var(--running) 35%, var(--line));
       color: var(--running);
@@ -318,6 +322,26 @@
       opacity: 0.72;
       text-decoration: line-through;
       text-decoration-thickness: 1px;
+    }
+    .host-pill.pending {
+      opacity: 0.78;
+      border-style: dashed;
+    }
+    .host-pill.pending::after {
+      content: "";
+      display: inline-block;
+      width: 0.55em;
+      height: 0.55em;
+      margin-left: 0.35em;
+      border-radius: 50%;
+      border: 1.5px solid currentColor;
+      border-right-color: transparent;
+      vertical-align: -0.05em;
+      animation: host-spin 0.7s linear infinite;
+    }
+    @keyframes host-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .host-pill.pending::after { animation: none; border-right-color: currentColor; opacity: 0.5; }
     }
     .host-pill.active {
       box-shadow: 0 0 0 2px color-mix(in srgb, var(--host-fg, var(--accent)) 55%, transparent);
@@ -2949,13 +2973,14 @@
         const tone = hostTone(row.name);
         const active = hostFilters.has(row.name);
         const dim = filtered && !active;
-        const offline = row.ok ? '' : (row.stale ? ' bad stale' : ' bad');
+        const pending = !!row.pending;
+        const offline = pending ? '' : (row.ok ? '' : (row.stale ? ' bad stale' : ' bad'));
         const n = sessionCounts[row.name] || 0;
-        const empty = (row.ok && n === 0) ? ' empty' : '';
-        const stateSuffix = row.ok ? '' : (row.stale ? ' stale' : ' offline');
+        const empty = (!pending && row.ok && n === 0) ? ' empty' : '';
+        const stateSuffix = pending ? '' : (row.ok ? '' : (row.stale ? ' stale' : ' offline'));
         const label = escapeHtml(row.name) + stateSuffix + `<span class="count">(${n})</span>`;
         hostButtons.push(
-          `<button type="button" class="host-pill tone-${tone}${offline}${empty}${active ? ' active' : ''}${dim ? ' dim' : ''}" data-host="${escapeHtml(row.name)}" title="${escapeHtml(row.error || row.url || row.source || '')}" aria-pressed="${active ? 'true' : 'false'}">${label}</button>`
+          `<button type="button" class="host-pill tone-${tone}${offline}${empty}${pending ? ' pending' : ''}${active ? ' active' : ''}${dim ? ' dim' : ''}" data-host="${escapeHtml(row.name)}" title="${escapeHtml(row.error || row.url || row.source || (pending ? '載入中' : ''))}" aria-pressed="${active ? 'true' : 'false'}"${pending ? ' aria-busy="true"' : ''}>${label}</button>`
         );
       }
       document.getElementById('hosts').innerHTML = hostButtons.join('');
@@ -3269,7 +3294,9 @@
     const POLL_MS = 10000;
     let refreshInFlight = false;
     let hasLoaded = false;
-
+    let lastSuccessAt = 0;
+    let refreshEpoch = 0;
+    const hostSliceByName = new Map();
     const REFRESH_HINT_MIN_MS = 280;
 
     function setColdSkeleton(on) {
@@ -3284,37 +3311,180 @@
     function setRefreshing(on) {
       const header = document.querySelector('header');
       const bar = document.getElementById('refresh-bar');
-      const clock = document.getElementById('clock');
       if (header) header.classList.toggle('is-refreshing', on);
       if (bar) {
         bar.hidden = !on;
         bar.setAttribute('aria-hidden', on ? 'false' : 'true');
       }
-      if (on && clock.dataset.state !== 'offline') {
-        clock.textContent = 'live';
-        clock.dataset.state = 'updating';
+      if (on) paintClock('updating');
+    }
+
+    function formatSuccessAge(ms) {
+      const sec = Math.max(0, Math.floor(ms / 1000));
+      if (sec < 5) return '剛剛';
+      if (sec < 60) return sec + ' 秒前';
+      const min = Math.floor(sec / 60);
+      if (min < 60) return min + ' 分鐘前';
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return hr + ' 小時前';
+      return Math.floor(hr / 24) + ' 天前';
+    }
+
+    function paintClock(state) {
+      const clock = document.getElementById('clock');
+      if (!clock) return;
+      if (state) clock.dataset.state = state;
+      const mode = clock.dataset.state;
+      if (mode === 'loading') {
+        clock.textContent = '…';
+        return;
       }
+      if (mode === 'offline') {
+        clock.textContent = lastSuccessAt ? ('離線 · ' + formatSuccessAge(Date.now() - lastSuccessAt)) : 'offline';
+        return;
+      }
+      if (!lastSuccessAt) {
+        clock.textContent = mode === 'updating' ? '更新中' : '…';
+        return;
+      }
+      const age = formatSuccessAge(Date.now() - lastSuccessAt);
+      clock.textContent = mode === 'updating' ? ('更新中 · ' + age) : age;
+      clock.title = new Date(lastSuccessAt).toLocaleString();
+    }
+
+    function markSuccess() {
+      lastSuccessAt = Date.now();
+      paintClock(document.getElementById('clock')?.dataset.state === 'updating' ? 'updating' : 'live');
+    }
+
+    function assembleFleet(version) {
+      const hosts = [];
+      const agents = [];
+      const summaries = [];
+      for (const slice of hostSliceByName.values()) {
+        const host = slice.hosts && slice.hosts[0];
+        if (host) hosts.push(host);
+        if (slice.agents) agents.push(...slice.agents);
+        if (slice.summary) summaries.push(slice.summary);
+      }
+      hosts.sort((a, b) => {
+        const ap = a.pending ? 1 : 0, bp = b.pending ? 1 : 0;
+        if (ap !== bp) return ap - bp;
+        const ao = a.ok ? 0 : 1, bo = b.ok ? 0 : 1;
+        if (ao !== bo) return ao - bo;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+      });
+      agents.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+      const summary = { wait: 0, review: 0, review_seen: 0, running: 0, idle: 0, tracked: 0, untracked: 0 };
+      for (const part of summaries) {
+        for (const key of Object.keys(summary)) summary[key] += Number(part[key] || 0);
+      }
+      return { ok: true, hosts, agents, summary, version: version || (latestPayload && latestPayload.version) || '' };
+    }
+
+    function applyHostSlice(slice, version) {
+      const host = slice.hosts && slice.hosts[0];
+      if (!host || !host.name) return;
+      hostSliceByName.set(host.name, {
+        hosts: [host],
+        agents: slice.agents || [],
+        summary: slice.summary || {},
+      });
+      render(assembleFleet(version || slice.version));
+      markSuccess();
+      if (!hasLoaded) {
+        hasLoaded = true;
+        setColdSkeleton(false);
+      }
+    }
+
+    function seedPendingHosts(plan) {
+      for (const row of plan.hosts || []) {
+        if (!row.name || hostSliceByName.has(row.name)) continue;
+        hostSliceByName.set(row.name, {
+          hosts: [{ name: row.name, source: row.source || '', ok: true, pending: true }],
+          agents: [],
+          summary: {},
+        });
+      }
+      render(assembleFleet(plan.version));
+    }
+
+    async function readJsonResponse(result) {
+      if (result.error) throw result.error;
+      const res = result.res;
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'payload error');
+      return data;
+    }
+
+    async function fetchFleetPlan() {
+      const early = window.initialFleetPlanRequest;
+      window.initialFleetPlanRequest = null;
+      const result = early ? await early : { res: await fetch('/api/fleet/plan', { cache: 'no-store' }) };
+      return readJsonResponse(result);
+    }
+
+    async function fetchHostSlice(name) {
+      const res = await fetch('/api/fleet/host?name=' + encodeURIComponent(name), { cache: 'no-store' });
+      return readJsonResponse({ res });
     }
 
     async function refresh() {
       if (refreshInFlight) return;
       refreshInFlight = true;
-      const clock = document.getElementById('clock');
+      const epoch = ++refreshEpoch;
       const cold = !hasLoaded;
       const started = performance.now();
       if (cold) setColdSkeleton(true);
       else setRefreshing(true);
+      let sawHost = false;
       try {
-        const first = cold && window.initialFleetRequest;
-        window.initialFleetRequest = null;
-        const result = first ? await first : { res: await fetch('/api/fleet', { cache: 'no-store' }) };
-        if (result.error) throw result.error;
-        const res = result.res;
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        if (!data.ok) throw new Error(data.error || 'payload error');
-        render(data);
-        hasLoaded = true;
+        const plan = await fetchFleetPlan();
+        if (epoch !== refreshEpoch) return;
+        if (cold) seedPendingHosts(plan);
+        document.getElementById('error').hidden = true;
+        const names = (plan.hosts || []).map(h => h.name).filter(Boolean);
+        const nameSet = new Set(names);
+        for (const existing of [...hostSliceByName.keys()]) {
+          if (!nameSet.has(existing)) hostSliceByName.delete(existing);
+        }
+        if (!names.length) {
+          hostSliceByName.clear();
+          render({ ok: true, hosts: [], agents: [], summary: {}, version: plan.version || '' });
+          hasLoaded = true;
+          setColdSkeleton(false);
+          markSuccess();
+        } else {
+          await Promise.all(names.map(async (name) => {
+            try {
+              const slice = await fetchHostSlice(name);
+              if (epoch !== refreshEpoch) return;
+              applyHostSlice(slice, plan.version);
+              sawHost = true;
+            } catch (hostErr) {
+              if (epoch !== refreshEpoch) return;
+              const prev = hostSliceByName.get(name);
+              const prevHost = prev && prev.hosts && prev.hosts[0];
+              hostSliceByName.set(name, {
+                hosts: [{
+                  name,
+                  source: (prevHost && prevHost.source) || '',
+                  url: prevHost && prevHost.url,
+                  ok: false,
+                  error: hostErr.message || 'failed',
+                  stale: !!(prev && prev.agents && prev.agents.length),
+                }],
+                agents: (prev && prev.agents) || [],
+                summary: (prev && prev.summary) || {},
+              });
+              render(assembleFleet(plan.version));
+            }
+          }));
+        }
+        if (epoch !== refreshEpoch) return;
+        if (!sawHost) throw new Error('所有主機都無法讀取');
         document.getElementById('error').hidden = true;
         if (cold) {
           setColdSkeleton(false);
@@ -3325,24 +3495,27 @@
           }
           setRefreshing(false);
         }
-        clock.textContent = 'live';
-        clock.dataset.state = 'live';
+        paintClock('live');
       } catch (e) {
+        if (epoch !== refreshEpoch) return;
         document.getElementById('error').hidden = false;
         document.getElementById('error').textContent = '無法讀取狀態：' + e.message;
-        if (cold) {
-          // Stay on skeleton until first success.
+        if (cold && !hasLoaded) {
+          // Stay on skeleton until first successful host.
         } else {
           setRefreshing(false);
         }
-        clock.textContent = 'offline';
-        clock.dataset.state = 'offline';
+        paintClock('offline');
       } finally {
-        refreshInFlight = false;
+        if (epoch === refreshEpoch) refreshInFlight = false;
       }
     }
     refresh();
     setInterval(refresh, POLL_MS);
+    setInterval(() => {
+      const state = document.getElementById('clock')?.dataset.state;
+      if (state === 'live' || state === 'offline' || state === 'updating') paintClock();
+    }, 1000);
   </script>
 </body>
 </html>

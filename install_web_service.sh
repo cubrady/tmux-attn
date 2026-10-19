@@ -91,8 +91,16 @@ case "$(uname -s)" in
         stop_ad_hoc
         plist=$(darwin_plist_path)
         mkdir -p "$(dirname "$plist")"
+        mkdir -p "${HOME}/Library/Caches/tmux-attn-tmp"
+        mkdir -p "${HOME}/.local/share/tmux-attn/contrib/launchd"
+        if [ -f "$script_dir/contrib/launchd/web-run.sh" ]; then
+          cp "$script_dir/contrib/launchd/web-run.sh" "${HOME}/.local/share/tmux-attn/contrib/launchd/web-run.sh"
+          chmod +x "${HOME}/.local/share/tmux-attn/contrib/launchd/web-run.sh"
+        fi
+        user_name=$(id -un)
         sed -e "s|__HOME__|${HOME}|g" \
-            -e "s|0\\.0\\.0\\.0|${HOST}|g" \
+            -e "s|__USER__|${user_name}|g" \
+            -e "s|0\.0\.0\.0|${HOST}|g" \
             -e "s|7788|${PORT}|g" \
             "$script_dir/contrib/launchd/ai.tmux-attn.web.plist" > "$plist"
         launchctl bootout "$(darwin_domain)" 2>/dev/null || true

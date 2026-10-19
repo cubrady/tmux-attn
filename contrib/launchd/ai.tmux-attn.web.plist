@@ -6,17 +6,19 @@
   <string>ai.tmux-attn.web</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__HOME__/.local/bin/tmux-attn</string>
-    <string>web</string>
+    <string>/bin/bash</string>
+    <string>__HOME__/.local/share/tmux-attn/contrib/launchd/web-run.sh</string>
     <string>0.0.0.0</string>
     <string>7788</string>
   </array>
+  <key>WorkingDirectory</key>
+  <string>__HOME__</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>ProcessType</key>
-  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
   <key>StandardOutPath</key>
   <string>__HOME__/.local/state/tmux-attn/web.out.log</string>
   <key>StandardErrorPath</key>
@@ -25,6 +27,14 @@
   <dict>
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>USER</key>
+    <string>__USER__</string>
+    <key>LOGNAME</key>
+    <string>__USER__</string>
+    <key>TMPDIR</key>
+    <string>__HOME__/Library/Caches/tmux-attn-tmp</string>
   </dict>
 </dict>
 </plist>

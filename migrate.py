@@ -14,6 +14,7 @@ FILES = [
     'web/index.html', 'peers.example.json', 'join_peer.py', 'install.sh',
     'install_web_service.sh', 'update.py', 'update.sh',
     'contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist',
+    'contrib/launchd/web-run.sh',
     'web/icons/claude.svg', 'web/icons/codex.svg', 'web/icons/agent.svg', 'web/icons/pi.svg',
     'web/icons/favicon.svg',
 

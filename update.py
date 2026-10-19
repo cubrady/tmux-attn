@@ -33,6 +33,7 @@ RECORD = 'INSTALL.json'
 RUNTIME_FILES = (
     'attention.py', 'codex_observer.py', 'install_web_service.sh', 'web/index.html',
     'contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist',
+    'contrib/launchd/web-run.sh',
 )
 RUNTIME_DIRS = ('web/icons',)
 # Changing these means tmux or agent hooks may need re-installing, which update never does silently.
