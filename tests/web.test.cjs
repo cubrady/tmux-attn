@@ -2918,6 +2918,18 @@ test('session hierarchy omits absent context and keeps fallback names and inbox 
   }
 });
 
+test('card and inbox show the agent session title, and a workstream label overrides it', () => {
+  const ui = dashboard();
+  const a = handoffAgent('cory', [], { pane: '%3', title: 'Cory 專案列表與內頁模組', preview: { users: [], agent: '' } });
+  ui.render({ agents: [a] });
+  const shown = ui.elements.get('list').innerHTML + ui.elements.get('decision-inbox').innerHTML;
+  assert.ok(shown.includes('<span class="session-context">Cory 專案列表與內頁模組</span>'));
+  ui.render({ agents: [{ ...a, workstream_label: 'P1 / #42' }] });
+  const labelled = ui.elements.get('list').innerHTML;
+  assert.ok(labelled.includes('P1 / #42'));
+  assert.ok(!labelled.includes('Cory 專案列表與內頁模組'));
+});
+
 test('session names and subordinate labels wrap long English and CJK text independently', () => {
   const ui = dashboard();
   const project = 'cory專案'.repeat(12);

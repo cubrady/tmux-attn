@@ -1903,6 +1903,10 @@
       }
       return excerpt(a.preview?.agent);
     }
+    // The user's own label wins; otherwise the title the agent gave this session.
+    function sessionLabel(a) {
+      return inboxText(a.workstream_label, 80).trim() || inboxText(a.title, 80).trim();
+    }
     function workstreamName(a) {
       const identity = `${inboxText(agentHostName(a), 60)} ${inboxText(a.pane, 24)} · pid ${inboxText(String(a.pid || ''), 24)}`;
       return [agentName(a), a.workstream_label ? '' : taskHint(a) || inboxText(a.branch || a.session, 60), identity].filter(Boolean).join(' · ');
@@ -1928,7 +1932,7 @@
       });
     }
     function inboxHeader(a) {
-      const context = inboxText(a.workstream_label, 80).trim() || taskHint(a) || inboxText(a.branch || a.session, 60);
+      const context = sessionLabel(a) || taskHint(a) || inboxText(a.branch || a.session, 60);
       const identity = `${inboxText(agentHostName(a), 60)} ${inboxText(a.pane, 24)} · pid ${inboxText(String(a.pid || ''), 24)}`;
       return `<div class="inbox-heading"><div><div class="inbox-stream">${escapeHtml(projectName(a))}</div>` +
         (context ? `<div class="session-context">${escapeHtml(context)}</div>` : '') +
@@ -2398,7 +2402,7 @@
       if (cat === 'running') sentAt.delete(key); // it started: the tag has done its job and must not return later
       const sentTag = sentRecently(key) && cat !== 'running' ? '<span class="sent-tag">已送出</span>' : '';
       const name = sessionTitle(a);
-      const label = inboxText(a.workstream_label, 80).trim();
+      const label = sessionLabel(a);
       const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
       const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
       const killNote = killState.key === key && killState.note
