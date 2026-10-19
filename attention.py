@@ -186,6 +186,8 @@ def db():
             ('preview_users', "TEXT DEFAULT '[]'"),
             ('preview_mtime', 'REAL DEFAULT 0'),
             ('preview_revision', 'INTEGER DEFAULT 0'),
+            ('handoff_response', "TEXT DEFAULT ''"),
+            ('handoff_revision', 'INTEGER DEFAULT 0'),
         ]:
             if column not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
                 try:
@@ -595,6 +597,10 @@ def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_
              row['revision'] if agent and str(agent).strip() else row['preview_revision'],
              baseline_mtime, path, path, sock, pane, pid, row['revision']),
         )
+        if agent and isinstance(agent, str) and agent.strip():
+            con.execute('''UPDATE panes SET handoff_response=?,handoff_revision=?
+                           WHERE socket=? AND pane=? AND pid=? AND revision=?''',
+                        (agent[:INBOX_SCAN_CHARS + 1], row['revision'], sock, pane, pid, row['revision']))
 
 
 def resolve_transcript_path(con, row, meta):
@@ -623,7 +629,7 @@ def resolve_transcript_path(con, row, meta):
     return path if path and Path(path).is_file() else ''
 
 
-def completed_transcript_matches_revision(path, row, displayed_agent):
+def completed_transcript_matches_revision(path, row, displayed_agent, *, lines=None):
     """Recognize an already cached final turn from its completion marker.
 
     Callers must separately verify transcript ownership. Text or file changes
@@ -649,7 +655,7 @@ def completed_transcript_matches_revision(path, row, displayed_agent):
             return None
 
     try:
-        with Path(path).open(errors='replace') as source:
+        with (Path(path).open(errors='replace') if lines is None else nullcontext(lines)) as source:
             for line in source:
                 if not line.endswith('\n'):
                     return False
@@ -2438,6 +2444,11 @@ def tag_host(payload, host):
         item['host'] = host
         item['category'] = attention_category(item)
         item['emoji'] = agent_emoji(item)
+        safe = sanitized_handoff(item)
+        item.pop('handoff', None)
+        item.pop('workstream_label', None)
+        if safe is not None:
+            item['handoff'] = safe
         agents.append(item)
     # Reclassify older peers too; their summary may still count viewed results as review.
     return agents, attention_summary(agents)
@@ -2580,6 +2591,13 @@ def web_later_db():
         con.execute('''CREATE TABLE IF NOT EXISTS later (
             host TEXT NOT NULL, pane TEXT NOT NULL, pid TEXT NOT NULL,
             revision INTEGER NOT NULL, PRIMARY KEY(host,pane,pid))''')
+        con.execute('''CREATE TABLE IF NOT EXISTS workstreams (
+            host TEXT NOT NULL, pane TEXT NOT NULL, pid TEXT NOT NULL,
+            label TEXT NOT NULL, PRIMARY KEY(host,pane,pid))''')
+        con.execute('''CREATE TABLE IF NOT EXISTS handled_actions (
+            host TEXT NOT NULL, pane TEXT NOT NULL, pid TEXT NOT NULL,
+            revision INTEGER NOT NULL, item_id TEXT NOT NULL,
+            PRIMARY KEY(host,pane,pid,revision,item_id))''')
         return con
     except Exception:
         con.close()
@@ -2605,7 +2623,7 @@ def web_later_fleet(fleet):
                 con.execute('DELETE FROM later WHERE host=? AND pane=? AND pid=?', (host, pane, pid))
             elif agent is not None:
                 agent['later'] = True
-    return fleet
+    return web_inbox_fleet(fleet)
 
 
 def dispatch_web_later(payload, include_local=True):
@@ -2637,6 +2655,117 @@ def dispatch_web_later(payload, include_local=True):
         con.execute('INSERT OR REPLACE INTO later(host,pane,pid,revision) VALUES(?,?,?,?)',
                     (host, pane, pid, revision))
     return 200, {'ok': True, 'later': True}
+
+
+def sanitized_handoff(agent):
+    """Treat new peer fields as optional and untrusted; never infer from a clip."""
+    value = agent.get('handoff')
+    revision = agent.get('revision')
+    if (not isinstance(value, dict) or not agent.get('tracked') or agent.get('state') != 'IDLE'
+            or not agent.get('needs_review') or type(revision) is not int
+            or not 1 <= revision <= INBOX_MAX_REVISION
+            or type(value.get('revision')) is not int or value['revision'] != revision):
+        return None
+    items = value.get('items')
+    if not isinstance(items, list):
+        return None
+    safe, seen = [], set()
+    for item in items[:INBOX_MAX_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        identity = item.get('id')
+        if (not isinstance(identity, str) or len(identity) != 24 or not re.fullmatch(r'[a-f0-9]{24}', identity)
+                or identity in seen or item.get('kind') not in ('decision', 'operation')
+                or any(not isinstance(item.get(key), str) or not item[key][:360].strip()
+                       for key in ('next_step', 'evidence', 'rule'))):
+            continue
+        seen.add(identity)
+        safe.append({'id': identity, 'kind': item['kind'], 'handled': False,
+                     **{key: clean(item[key][:limit], limit) for key, limit in
+                        (('next_step', 240), ('evidence', 360), ('rule', 80))}})
+    source = 'completed response' if value.get('source') == 'completed response' else 'unavailable'
+    return {'revision': revision, 'source': source, 'items': safe if source == 'completed response' else [],
+            'truncated': value.get('truncated') is True or len(items) > INBOX_MAX_ITEMS}
+
+
+def web_inbox_fleet(fleet):
+    """Hub-owned, web-only metadata; labels outlive responses, handled items do not."""
+    agents = {web_later_key(agent): agent for agent in fleet['agents'] if agent.get('tracked')}
+    online = {host['name'] for host in fleet['hosts'] if host.get('ok')}
+    for agent in agents.values():
+        agent.pop('workstream_label', None)
+        safe = sanitized_handoff(agent)
+        agent.pop('handoff', None)
+        if safe is not None:
+            agent['handoff'] = safe
+    with closing(web_later_db()) as con, con:
+        for host, pane, pid, label in con.execute('SELECT host,pane,pid,label FROM workstreams').fetchall():
+            key = host, pane, pid
+            if host in online and key not in agents:
+                con.execute('DELETE FROM workstreams WHERE host=? AND pane=? AND pid=?', key)
+            elif key in agents:
+                agents[key]['workstream_label'] = clean(label[:80], 80)
+        for host, pane, pid, revision, item_id in con.execute(
+                'SELECT host,pane,pid,revision,item_id FROM handled_actions').fetchall():
+            key = host, pane, pid
+            agent = agents.get(key)
+            current_revision = agent.get('revision') if agent else None
+            superseded = (type(current_revision) is int and
+                          (current_revision > revision or
+                           (current_revision == revision and agent.get('state') != 'IDLE')))
+            if host in online and (not agent or superseded):
+                con.execute('DELETE FROM handled_actions WHERE host=? AND pane=? AND pid=? AND revision=? AND item_id=?',
+                            (*key, revision, item_id))
+            elif agent and agent.get('revision') == revision:
+                for item in agent.get('handoff', {}).get('items', []):
+                    if item['id'] == item_id:
+                        item['handled'] = True
+    return fleet
+
+
+def dispatch_web_inbox(payload, include_local=True):
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    identity = tuple(payload.get(key) for key in ('host', 'pane', 'pid'))
+    if any(not isinstance(value, str) or not value or len(value) > 240 for value in identity):
+        return 400, {'ok': False, 'error': 'host, pane, and pid are required'}
+    action = payload.get('action')
+    if action not in ('label', 'handle', 'restore'):
+        return 400, {'ok': False, 'error': 'invalid inbox action'}
+    if action == 'label':
+        label = payload.get('label')
+        if not isinstance(label, str) or len(label) > 80:
+            return 400, {'ok': False, 'error': 'label must be at most 80 characters'}
+        label = clean(label, 80).strip()
+    else:
+        revision, item_id = payload.get('revision'), payload.get('item_id')
+        if (type(revision) is not int or not 1 <= revision <= INBOX_MAX_REVISION
+                or not isinstance(item_id, str) or not re.fullmatch(r'[a-f0-9]{24}', item_id)):
+            return 400, {'ok': False, 'error': 'valid revision and item_id required'}
+    fleet = fleet_payload(include_local=include_local)
+    if identity[0] not in {host['name'] for host in fleet['hosts'] if host.get('ok')}:
+        return 409, {'ok': False, 'error': 'host is offline; refresh before editing'}
+    agent = next((row for row in fleet['agents'] if web_later_key(row) == identity and row.get('tracked')), None)
+    if not agent:
+        return 409, {'ok': False, 'error': 'session changed; refresh'}
+    if action != 'label':
+        handoff = sanitized_handoff(agent)
+        if (not handoff or handoff['revision'] != revision
+                or not any(item['id'] == item_id for item in handoff['items'])):
+            return 409, {'ok': False, 'error': 'response changed; refresh'}
+    with closing(web_later_db()) as con, con:
+        if action == 'label':
+            if label:
+                con.execute('INSERT OR REPLACE INTO workstreams(host,pane,pid,label) VALUES(?,?,?,?)', (*identity, label))
+            else:
+                con.execute('DELETE FROM workstreams WHERE host=? AND pane=? AND pid=?', identity)
+        elif action == 'handle':
+            con.execute('INSERT OR IGNORE INTO handled_actions(host,pane,pid,revision,item_id) VALUES(?,?,?,?,?)',
+                        (*identity, revision, item_id))
+        else:
+            con.execute('DELETE FROM handled_actions WHERE host=? AND pane=? AND pid=? AND revision=? AND item_id=?',
+                        (*identity, revision, item_id))
+    return 200, {'ok': True}
 
 
 _GIT_ENV_CACHE = {}
@@ -2702,6 +2831,182 @@ def git_workdir_info(path):
     return info
 
 
+INBOX_SCAN_CHARS = 65536
+INBOX_MAX_ITEMS = 12
+INBOX_MAX_REVISION = 2**53 - 1
+
+
+def extract_decision_inbox(text):
+    """Explicit wording only. These are candidates, never native WAIT or advice."""
+    if not isinstance(text, str):
+        return {'items': [], 'truncated': False}
+    truncated = len(text) > INBOX_SCAN_CHARS or text.endswith('…')
+    text = normalize_preview(text[:INBOX_SCAN_CHARS])
+    result, decision_section, fenced = [], False, False
+    for raw in text.splitlines():
+        if raw.lstrip().startswith(('```', '~~~')):
+            fenced = not fenced
+            decision_section = False
+            continue
+        if fenced or raw.lstrip().startswith('>'):
+            continue
+        line = raw.strip().strip('*_').strip()
+        if not line:
+            continue
+        # Quoted examples and code are deliberately ignored. No inference from CI,
+        # blocked state, generic questions, or the opening paragraph of a report.
+        if re.search(r"不用你|不需要你|無需你|无需你|no (?:decision|action|approval) (?:is )?(?:needed|required)"
+                     r"|\b(?:don't|doesn't|do not|does not|no longer) (?:need|require)"
+                     r"|\byour (?:approval|decision|consent) is not (?:required|needed)", line, re.I):
+            decision_section = False
+            continue
+        heading = re.sub(r'^#{1,6}\s*', '', line).strip('*_:： ')
+        if re.fullmatch(r'(?:要你決定|需要你決定|請你決定|需要你决定|请你决定|decisions? (?:needed|required)|your decisions?)(?:的事項|的事)?', heading, re.I):
+            decision_section = True
+            continue
+        numbered = re.match(r'^(?:\d{1,2}[.)、]|[-*])\s+(.+)', line)
+        question = bool(re.search(r'[?？]|要不要|怎麼|怎么|是否', line))
+        explicit_decision = re.search(
+            r'(?:需要你|要你|請你|请你|等你|待你)(?:同意|批准|核准|授權|授权|決定|决定|確認是否|确认是否)'
+            r'|(?:need|needs|require|requires) (?:your|you to) (?:approval|consent|decision|approve|decide)'
+            r'|please (?:decide|approve|choose)\b', line, re.I)
+        explicit_operation = re.search(
+            r'(?:需要你|請你|请你|要你)(?:在[^。！？\n]{0,120})?(?:點|点|取消|執行|执行|操作|登入|登录|手動|手动|打開|打开|重啟|重启|按|提供|填寫|填写|上傳|上传)'
+            r'|(?:need you to|please) (?:click|cancel|run|log in|open|restart|upload|provide)\b', line, re.I)
+        kind = ('decision' if explicit_decision else 'operation' if explicit_operation
+                else 'decision' if decision_section and numbered and question else '')
+        if kind:
+            if len(result) >= INBOX_MAX_ITEMS:
+                truncated = True
+                continue
+            step = numbered[1] if numbered else line
+            rule = ('explicit human ' + kind + ' phrase' if explicit_decision or explicit_operation
+                    else 'explicit decision section')
+            identity = f'{kind}\0{line}\0{len(result)}'
+            result.append({'id': hashlib.sha256(identity.encode()).hexdigest()[:24], 'kind': kind, 'handled': False,
+                           'next_step': clean(step, 240), 'evidence': clean(line, 360), 'rule': rule})
+        # A new heading/prose ends a decision list, so unrelated later lists do
+        # not acquire its meaning. Blank lines within a list are permitted.
+        if decision_section and not numbered:
+            decision_section = False
+    return {'items': result, 'truncated': truncated}
+
+
+def _bounded_handoff_lines(path):
+    """Read at most one tail window, with no unbounded transcript fallback."""
+    try:
+        lines = []
+        with Path(path).open('rb') as source:
+            size = os.fstat(source.fileno()).st_size
+            offset = max(0, size - TRANSCRIPT_TAIL_BYTES)
+            source.seek(offset)
+            chunk = source.read(TRANSCRIPT_TAIL_BYTES)
+        if offset:
+            # Even if the first partial JSON happens to parse, it isn't a row.
+            chunk = chunk.partition(b'\n')[2]
+        for line in chunk.decode('utf-8', errors='replace').splitlines(keepends=True):
+            if not line.endswith('\n'):
+                continue
+            try:
+                entry = json.loads(line)
+                if not isinstance(entry, dict):
+                    continue
+                # Sanitize content shapes before using the existing line parsers.
+                message = entry.get('message')
+                payload = entry.get('payload')
+                content = message.get('content') if isinstance(message, dict) else None
+                if isinstance(payload, dict) and 'content' in payload:
+                    content = payload['content']
+                if isinstance(content, list) and any(
+                    not isinstance(part, (str, dict)) or
+                    (isinstance(part, dict) and not isinstance(part.get('text', ''), str))
+                    for part in content
+                ):
+                    continue
+                lines.append(line)
+            except (ValueError, RecursionError):
+                continue
+        return lines
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        return []
+
+
+def _handoff_parser(agent):
+    return _parse_codex_lines if agent == 'codex' else _parse_cursor_lines if agent == 'cursor' else _parse_claude_lines
+
+
+def _bounded_handoff_transcript(path, agent, row=None):
+    lines = _bounded_handoff_lines(path)
+    users, text = _handoff_parser(agent)(lines)
+    if row is not None and not completed_transcript_matches_revision(
+            path, row, clip_preview(text, PREVIEW_CHARS_FULL), lines=lines):
+        return [], ''
+    return users, text
+
+
+def _handoff_source_advanced(lines, parser, cached_text, cached_users):
+    """A matching owned answer followed by a real user turn supersedes the cache.
+
+    A mismatch alone proves nothing: the transcript may lag a fresh hook.
+    Compare user context too, to avoid anchoring a repeated answer to an older task.
+    """
+    users, matched = [], False
+    for line in lines:
+        new_users, response = parser([line])
+        if new_users:
+            if matched:
+                return True
+            users = (users + [clip_preview(user, PREVIEW_CHARS_FULL) for user in new_users])[-PREVIEW_USERS:]
+        if response and clip_preview(response, PREVIEW_CHARS_FULL) == clip_preview(cached_text, PREVIEW_CHARS_FULL):
+            # Hooks may start caching midway through an existing conversation.
+            matched = not cached_users or users[-len(cached_users):] == cached_users
+    return False
+
+
+def pane_handoff(con, row):
+    """Use only a completed, revision-bound cache; transcript can expand that cache.
+
+    Discovery by cwd is not proof of ownership. A missing/stale source yields no
+    candidates, even if the old display preview still contains a human request.
+    """
+    empty = {'revision': row['revision'], 'source': 'unavailable', 'items': [], 'truncated': False}
+    if row['state'] != 'IDLE' or not row['needs_review']:
+        return empty
+    if row.get('handoff_revision') == row['revision'] and row.get('handoff_response'):
+        text = row['handoff_response']
+    elif row.get('preview_revision') == row['revision'] and row.get('preview_agent'):
+        text = row['preview_agent']
+    else:
+        return empty
+    # Check every cache against its owned source, even a short, fresh hook cache.
+    # Never discover by cwd here, and read only one bounded tail window.
+    path = row.get('transcript_path') or ''
+    if not path:
+        mapping = con.execute('SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
+                              (row['socket'], row['pane'], row['pid'])).fetchone()
+        path = mapping['rollout_path'] if mapping else ''
+    if path:
+        lines = _bounded_handoff_lines(path)
+        parser = _handoff_parser(row.get('agent', ''))
+        try:
+            cached_users = json.loads(row.get('preview_users') or '[]')
+        except (ValueError, TypeError):
+            cached_users = None
+        if not isinstance(cached_users, list) or any(not isinstance(user, str) for user in cached_users):
+            cached_users = None
+        if _handoff_source_advanced(lines, parser, text, cached_users):
+            return empty | {'truncated': text.endswith('…') or len(text) > INBOX_SCAN_CHARS}
+        # Expansion also requires the latest context and a completion marker.
+        if text.endswith('…') or len(text) > INBOX_SCAN_CHARS:
+            users, full = parser(lines)
+            same_users = (bool(cached_users)
+                          and [clip_preview(user, PREVIEW_CHARS_FULL) for user in users[-PREVIEW_USERS:]] == cached_users)
+            if (same_users and full and clip_preview(full, PREVIEW_CHARS_FULL) == clip_preview(text, PREVIEW_CHARS_FULL)
+                    and completed_transcript_matches_revision(path, row, clip_preview(full, PREVIEW_CHARS_FULL), lines=lines)):
+                text = full
+    return {'revision': row['revision'], 'source': 'completed response', **extract_decision_inbox(text)}
+
+
 def agents_payload(con, sock=None, live=None, now=None):
     """JSON-ready status for the mobile web panel and future clients."""
     now = time.time() if now is None else now
@@ -2723,6 +3028,13 @@ def agents_payload(con, sock=None, live=None, now=None):
         reviewed = row['revision'] <= row['acknowledged'] and (row['state'] == 'WAIT' or row['needs_review'])
         command = row.get('command') or ''
         preview = pane_conversation_preview(con, row, row)
+        # preview refresh may have verified a source; reread its revision-bound
+        # cache without letting an old poll attach it to a newer response.
+        cached = (con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',
+                              (row['socket'], row['pane'], row['pid'])).fetchone()
+                  if con is not None else None)
+        handoff = pane_handoff(con, dict(cached)) if cached and cached['revision'] == row['revision'] else {
+            'revision': row['revision'], 'source': 'unavailable', 'items': [], 'truncated': False}
         model, effort = pane_model(con, row)
         env = git_workdir_info(row.get('path', ''))
         agents.append({
@@ -2757,6 +3069,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'source': (row['source'] if 'source' in row.keys() else 'hook') or 'hook',
             'reason': display_reason(row, reviewed),
             'preview': preview,
+            'handoff': handoff,
             'updated': row['updated'],
             'age': age(row['updated']),
         })
@@ -3521,6 +3834,14 @@ def make_web_handler(fleet_only=False):
                 except Exception as exc:
                     sys.stderr.write(f'web /api/later: {type(exc).__name__}: {exc}\n')
                     code, body = 500, {'ok': False, 'error': 'failed to update later group'}
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
+            if path == '/api/inbox':
+                try:
+                    code, body = dispatch_web_inbox(payload, include_local=not fleet_only)
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/inbox: {type(exc).__name__}: {exc}\n')
+                    code, body = 500, {'ok': False, 'error': 'failed to update inbox'}
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             action = actions.get(path)
