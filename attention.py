@@ -1954,7 +1954,7 @@ def event_command(agent, event):
 
 
 def live_panes(sock=None):
-    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}\t#{pane_current_command}\t#{@tmux_attn_view_revision}'
+    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}\t#{pane_current_command}\t#{@tmux_attn_view_revision}\t#{pane_title}'
     result = {}
     for line in tmux('list-panes', '-a', '-F', fmt, check=False, sock=sock).splitlines():
         parts = line.split('\t')
@@ -1963,8 +1963,28 @@ def live_panes(sock=None):
                 pane=parts[0], pid=parts[1], session=parts[2], window=clean(parts[3]),
                 path=parts[4], window_id=parts[6], command=clean(parts[7] if len(parts) > 7 else ''),
                 view_revision=parts[8] if len(parts) > 8 else '',
+                pane_title=clean(parts[9]) if len(parts) > 9 else '',
             )
     return result
+
+
+SESSION_TITLE_CHARS = 80
+# Agents write their session title into the tmux pane title: Claude Code as "<glyph> title",
+# Codex as "title | project". Anything else here is a shell prompt or a default placeholder.
+GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'cursor', 'cursor agent', 'agent', 'pi', 'zsh', 'bash', 'fish', 'sh', 'tmux'}
+
+
+def pane_session_title(raw, path='', command=''):
+    title = clean(raw).strip()
+    title = re.sub(r'^[^\w]+\s+', '', title)  # status glyph or spinner frame
+    project = Path(path).name if path else ''
+    if project and title.endswith(f' | {project}'):
+        title = title[:-len(project) - 3].strip()
+    lowered = title.lower()
+    if (not title or lowered in GENERIC_PANE_TITLES or lowered in {project.lower(), clean(command).lower()}
+            or re.fullmatch(r'[\w.-]+@[\w.-]+', title)):
+        return ''
+    return title[:SESSION_TITLE_CHARS]
 
 
 def items(con, sock, live, all_states=False, now=None):
@@ -3051,6 +3071,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'command': command,
             'tracked': True,
             'project': labels.get(row['path'], Path(row['path']).name if row.get('path') else ''),
+            'title': pane_session_title(row.get('pane_title'), row.get('path', ''), command),
             'path': row.get('path', ''),
             'repo': env['repo'],
             'branch': env['branch'],
