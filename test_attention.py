@@ -135,6 +135,40 @@ class StoreTests(unittest.TestCase):
         soft_en=a.classify('codex','Stop',{'last_assistant_message':'Which option do you prefer?'})
         self.assertEqual((soft_en[0],soft_en[2]),('IDLE',True))
         self.assertEqual(a.classify('codex','Stop',{'last_assistant_message':'All done.'})[0],'IDLE')
+        self.assertEqual(a.classify('claude','Elicitation',{'url':'https://mcp.example/auth'})[0],'WAIT')
+        self.assertEqual(a.classify('claude','ElicitationResult',{})[0],'RUNNING')
+        self.assertEqual(a.classify('claude','Notification',{'notification_type':'elicitation_url_dialog'})[0],'WAIT')
+        completed=a.classify('claude','Notification',{'notification_type':'agent_completed'})
+        self.assertEqual((completed[0],completed[2]),('IDLE',True))
+        self.assertEqual(a.classify('claude','TeammateIdle',{})[0],'IDLE')
+        self.assertTrue(a.classify('claude','SubagentStart',{})[1].startswith(a.BACKGROUND_WAIT))
+        self.assertEqual(a.classify('claude','SubagentStop',{})[0],'RUNNING')
+        self.assertEqual(a.classify('claude','PostToolUseFailure',{'tool_name':'Bash'})[0],'RUNNING')
+        self.assertEqual(a.classify('codex','SubagentStart',{})[0],'RUNNING')
+        self.assertEqual(a.classify('cursor','beforeShellExecution',{'command':'npm test'})[0],'RUNNING')
+        self.assertEqual(a.classify('cursor','beforeMCPExecution',{'tool_name':'browser_navigate'})[0],'RUNNING')
+        self.assertEqual(a.classify('cursor','preToolUse',{'tool_name':'Shell'})[0],'RUNNING')
+        self.assertEqual(a.classify('cursor','afterAgentResponse',{})[0],'RUNNING')
+        self.assertEqual(a.classify('cursor','subagentStop',{'status':'completed'})[0],'RUNNING')
+        self.assertEqual(a.classify('cursor','subagentStop',{'status':'error'})[0],'RUNNING')
+        self.assertEqual(a.classify('pi','ui_prompt_start',{'title':'Go?','kind':'confirm'})[1],'confirm: Go?')
+        self.assertEqual(a.classify('pi','tool_execution_start',{})[0],'RUNNING')
+
+    def test_cursor_permission_hooks_allow_without_blocking(self):
+        with patch.object(a.sys,'stdin',io.StringIO(json.dumps({'command':'ls'}))), \
+             patch.object(a.sys,'stdout',io.StringIO()) as out, \
+             patch.object(a,'hook_target',return_value=('socket','%1','123')):
+            a.event_command('cursor','beforeShellExecution')
+        self.assertEqual(json.loads(out.getvalue()),{'permission':'allow'})
+        self.assertEqual(self.con.execute('SELECT state FROM panes').fetchone()[0],'RUNNING')
+
+    def test_claude_pretooluse_under_cursor_still_allows(self):
+        with patch.object(a.sys,'stdin',io.StringIO(json.dumps({'cursor_version':'1','tool_name':'Shell'}))), \
+             patch.object(a.sys,'stdout',io.StringIO()) as out, \
+             patch.object(a,'hook_target',return_value=('socket','%1','123')):
+            a.event_command('claude','PreToolUse')
+        self.assertEqual(json.loads(out.getvalue()),{'permission':'allow'})
+        self.assertEqual(self.con.execute('SELECT agent,state FROM panes').fetchone()[0],'cursor')
 
     def test_cursor_fast_completion_and_inherited_identity(self):
         def hook(agent,event,data):

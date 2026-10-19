@@ -894,33 +894,75 @@ BACKGROUND_WAIT = 'Background work: waiting on '
 
 def classify(agent, event, data):
     if agent == 'cursor':
-        event = {'sessionStart':'SessionStart', 'sessionEnd':'SessionEnd',
-                 'postToolUse':'PostToolUse', 'beforeSubmitPrompt':'UserPromptSubmit', 'stop':'Stop'}.get(event,event)
+        event = {
+            'sessionStart': 'SessionStart', 'sessionEnd': 'SessionEnd',
+            'postToolUse': 'PostToolUse', 'preToolUse': 'PreToolUse',
+            'beforeSubmitPrompt': 'UserPromptSubmit', 'stop': 'Stop',
+            'beforeShellExecution': 'beforeShellExecution',
+            'beforeMCPExecution': 'beforeMCPExecution',
+            'afterAgentResponse': 'afterAgentResponse',
+            'subagentStop': 'subagentStop',
+            'postToolUseFailure': 'PostToolUseFailure',
+        }.get(event, event)
         if event == 'Stop' and data.get('status') == 'aborted':
             return 'IDLE', 'Interrupted; review current work', True
         if event == 'Stop' and data.get('status') == 'error':
             return 'IDLE', 'Agent stopped with an error; review needed', True
+        if event == 'subagentStop':
+            # Never park the parent pane IDLE; the parent agent often keeps working.
+            status = data.get('status') or 'completed'
+            if status == 'error':
+                return 'RUNNING', 'Subagent error; parent may continue'
+            if status == 'aborted':
+                return 'RUNNING', 'Subagent interrupted; parent may continue'
+            return 'RUNNING', 'Subagent finished; parent may continue'
+        if event == 'afterAgentResponse':
+            return 'RUNNING', 'Working'
+        if event in ('beforeShellExecution', 'beforeMCPExecution'):
+            # Observational only: Cursor has no waiting-for-approval hook. Returning
+            # allow must not invent 🙋 WAIT (auto-run would false-positive). Pane
+            # scrape remains the WAIT source; this marks early RUNNING.
+            detail = (data.get('command') or data.get('tool_name') or 'tool')
+            return 'RUNNING', 'Tool proposed: ' + clean(str(detail), 120)
     if event in ('SessionStart', 'session_start'):
         return 'IDLE', 'Registered; no new work yet'
     if event in ('SessionEnd', 'session_shutdown'):
         return 'IDLE', 'Agent exited'
     if event == 'idle_no_review':
         return 'IDLE', 'Waiting for next task'
-    if event in ('UserPromptSubmit', 'agent_start', 'ui_prompt_end', 'PostToolUse'):
+    if event in ('UserPromptSubmit', 'agent_start', 'ui_prompt_end', 'PostToolUse',
+                 'ElicitationResult', 'tool_execution_start'):
         return 'RUNNING', 'Working'
     if event in ('Interrupt',):
         return 'IDLE', 'Interrupted; review current work', True
     if event == 'PermissionRequest':
         return 'WAIT', 'Approval needed: ' + (data.get('tool_input', {}).get('description') or 'Tool operation')
+    if event == 'Elicitation':
+        return 'WAIT', data.get('message') or data.get('url') or 'MCP elicitation needs input'
     if event == 'ui_prompt_start':
-        return 'WAIT', data.get('title') or 'Answer or decision needed'
+        kind = data.get('kind')
+        title = data.get('title') or 'Answer or decision needed'
+        return 'WAIT', f'{kind}: {title}' if kind else title
     if event == 'PreToolUse':
         if data.get('tool_name', '').split('__')[-1].rsplit('.',1)[-1] in ('AskUserQuestion', 'request_user_input', 'request_user_input_async', 'ask_question'):
             return 'WAIT', 'Answer or decision needed'
         return 'RUNNING', 'Working'
+    if event == 'SubagentStart':
+        return 'RUNNING', BACKGROUND_WAIT + 'subagent'
+    if event == 'SubagentStop':
+        return 'RUNNING', 'Subagent finished; parent may continue'
+    if event == 'TeammateIdle':
+        return 'IDLE', 'Teammate idle; review or continue', True
+    if event == 'PostToolUseFailure':
+        tool = data.get('tool_name') or 'tool'
+        return 'RUNNING', f'Tool failed ({tool}); continuing'
     if event == 'Notification':
-        if data.get('notification_type') in ('permission_prompt', 'elicitation_dialog', 'agent_needs_input', 'worker_permission_prompt'):
+        note = data.get('notification_type')
+        if note in ('permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog',
+                    'agent_needs_input', 'worker_permission_prompt'):
             return 'WAIT', data.get('message') or 'Input needed'
+        if note == 'agent_completed':
+            return 'IDLE', data.get('message') or 'Agent completed; review needed', True
         return None
     if event == 'StopFailure':
         return 'IDLE', 'Agent stopped with an error; review needed', True
@@ -1894,8 +1936,15 @@ def event_command(agent, event):
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (STATE / 'hook-errors.log').open('a') as f:
             f.write(f'{time.time():.0f} {agent}/{event}: {type(exc).__name__}: {exc}\n')
-    # Codex Stop requires JSON output; {} has no decision effects.
-    print('{}')
+    # Cursor permission hooks require a schema-valid allow; never block agent work.
+    # Codex Stop and other agents accept {} with no decision effects.
+    if agent == 'cursor' and event in (
+        'beforeShellExecution', 'beforeMCPExecution',
+        'preToolUse', 'PreToolUse', 'beforeReadFile', 'beforeTabFileRead',
+    ):
+        print(json.dumps({'permission': 'allow'}))
+    else:
+        print('{}')
 
 
 def live_panes(sock=None):

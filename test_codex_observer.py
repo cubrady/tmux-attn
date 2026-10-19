@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
-from codex_observer import approval_screen,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli
+from codex_observer import approval_screen,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli,pi_screen,native_pi_pids
 from codex_observer import queued_questions_screen,sync_attention_overlay,observe_codex_unmapped
 
 class ObserverTests(unittest.TestCase):
@@ -418,6 +418,17 @@ class RepairTests(unittest.TestCase):
      row=con.execute('SELECT agent,state,reason,source FROM panes').fetchone()
      self.assertEqual(tuple(row),('codex','IDLE','Waiting for next task','observer'))
    finally:a.STATE=previous
+
+
+class PiObserverTests(unittest.TestCase):
+ def test_pi_screen_detects_confirm_and_working(self):
+  self.assertEqual(pi_screen('Confirm?\n(Y/n)')[0], 'WAIT')
+  self.assertEqual(pi_screen('Thinking…\nStreaming tokens')[0], 'RUNNING')
+  self.assertIsNone(pi_screen('pi> ready'))
+
+ def test_native_pi_pids_finds_cli(self):
+  table={1:(0,'zsh'),2:(1,'pi --offline'),3:(1,'node /x/pi-coding-agent/dist/cli.js'),4:(1,'pi-agent daemon')}
+  self.assertEqual(sorted(native_pi_pids(1, table)), [2, 3])
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
