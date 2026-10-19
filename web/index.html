@@ -535,6 +535,7 @@
     }
     .title {
       display: flex;
+      flex: 1;
       align-items: center;
       gap: 7px;
       flex-wrap: wrap;
@@ -545,6 +546,18 @@
     }
     .emoji { font-size: 1.05rem; line-height: 1; }
     .project { min-width: 0; overflow-wrap: anywhere; }
+    .session-heading { flex: 1; min-width: 0; }
+    .session-heading .project { display: block; }
+    .session-context {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: .78rem;
+      font-weight: 400;
+      letter-spacing: normal;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
     .cli {
       display: inline-flex;
       align-items: center;
@@ -1601,8 +1614,8 @@
     .inbox-row { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 10px 12px; margin-top: 8px; min-width: 0; }
     .inbox-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; }
     .inbox-heading { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
-    .inbox-heading > div { min-width: 0; }
-    .inbox-stream { font-size: .88rem; font-weight: 600; color: var(--fg); }
+    .inbox-heading > div { flex: 1; min-width: 0; }
+    .inbox-stream { font-size: .98rem; font-weight: 600; color: var(--fg); }
     .inbox-caution { margin: 4px 0; }
     .inbox-kind { font-size: .76rem; color: var(--wait); }
     .inbox-next { margin: 7px 0; font-size: .9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1855,8 +1868,11 @@
         el.innerHTML = html;
       }
     }
+    function projectName(a) {
+      return inboxText(a.project || a.repo || a.window, 80) || '未命名專案';
+    }
     function agentName(a) {
-      const project = inboxText(a.project || a.repo || a.window, 80) || '未命名專案';
+      const project = projectName(a);
       const hint = inboxText(a.workstream_label, 80).trim();
       return [project, hint].filter(Boolean).join(' · ');
     }
@@ -1912,10 +1928,11 @@
       });
     }
     function inboxHeader(a) {
-      const hint = a.workstream_label ? '' : taskHint(a);
+      const context = inboxText(a.workstream_label, 80).trim() || taskHint(a) || inboxText(a.branch || a.session, 60);
       const identity = `${inboxText(agentHostName(a), 60)} ${inboxText(a.pane, 24)} · pid ${inboxText(String(a.pid || ''), 24)}`;
-      return `<div class="inbox-heading"><div><div class="inbox-stream">${escapeHtml(hint || a.workstream_label ? sessionTitle(a) : workstreamName(a))}</div>` +
-        (hint || a.workstream_label ? `<div class="inbox-source">${escapeHtml(identity)}</div>` : '') +
+      return `<div class="inbox-heading"><div><div class="inbox-stream">${escapeHtml(projectName(a))}</div>` +
+        (context ? `<div class="session-context">${escapeHtml(context)}</div>` : '') +
+        `<div class="inbox-source">${escapeHtml(identity)}</div>` +
         `</div><button type="button" data-inbox-open aria-label="開啟 ${escapeHtml(sessionTitle(a))} 的 agent／原文">開啟原文</button></div>`;
     }
     function inboxRow(a, kind) {
@@ -2381,6 +2398,7 @@
       if (cat === 'running') sentAt.delete(key); // it started: the tag has done its job and must not return later
       const sentTag = sentRecently(key) && cat !== 'running' ? '<span class="sent-tag">已送出</span>' : '';
       const name = sessionTitle(a);
+      const label = inboxText(a.workstream_label, 80).trim();
       const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
       const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
       const killNote = killState.key === key && killState.note
@@ -2391,7 +2409,7 @@
           <div class="title">
             <span class="emoji" aria-hidden="true">${emoji}</span>
             ${cliBadge(a.cli || a.agent)}
-            <span class="project">${escapeHtml(name)}</span>
+            <div class="session-heading"><span class="project">${escapeHtml(projectName(a))}</span>${label ? `<span class="session-context">${escapeHtml(label)}</span>` : ''}</div>
             ${reviewState}${sentTag}
           </div>
           <div class="row1-side">

@@ -2852,8 +2852,8 @@ test('native WAIT precedes candidates and inbox follows host filters while keepi
   let inbox = ui.elements.get('decision-inbox').innerHTML;
   assert.ok(inbox.indexOf('data-inbox-kind="wait"') < inbox.indexOf('data-inbox-kind="decision"'));
   assert.ok(inbox.indexOf('data-inbox-kind="decision"') < inbox.indexOf('data-inbox-kind="operation"'));
-  assert.match(inbox, /Atlas · one · alpha %3/);
-  assert.match(inbox, /Atlas · two · beta %22782/);
+  assert.match(inbox, /class="inbox-stream">Atlas<\/div><div class="session-context">one<\/div><div class="inbox-source">alpha %3/);
+  assert.match(inbox, /class="inbox-stream">Atlas<\/div><div class="session-context">two<\/div><div class="inbox-source">beta %22782/);
   ui.elements.get('hosts').listeners.click({ target: { closest: () => ({ dataset: { host: 'beta' } }) } });
   inbox = ui.elements.get('decision-inbox').innerHTML;
   assert.match(inbox, /Second/);
@@ -2877,28 +2877,73 @@ test('Atlas workstreams use literal task context, ignore generic prompts, and re
   ];
   ui.render({ agents: rows });
   const inbox = ui.elements.get('decision-inbox').innerHTML;
-  assert.match(inbox, /Atlas · 對,CI 已經恢復/);
-  assert.match(inbox, /Atlas · P1 要不要照上面做？/);
-  assert.match(inbox, /Atlas · 任務 e5f6a7b8 還卡在 blocked/);
+  assert.match(inbox, /class="inbox-stream">Atlas<\/div><div class="session-context">對,CI 已經恢復/);
+  assert.match(inbox, /class="inbox-stream">Atlas<\/div><div class="session-context">P1 要不要照上面做？/);
+  assert.match(inbox, /class="inbox-stream">Atlas<\/div><div class="session-context">任務 e5f6a7b8 還卡在 blocked/);
   assert.match(ui.context.workstreamName(rows[3]), /^Atlas · 修正登入時的 cookie 過期問題 · work %4/);
   assert.equal(ui.context.agentName(rows[4]), 'Atlas');
   assert.match(ui.context.workstreamName(rows[4]), /work %5 · pid 123/);
   assert.doesNotMatch(inbox, /Atlas · (?:status check|continue|進度如何|check progress)/);
   const cards = ui.elements.get('list').innerHTML;
-  assert.match(cards, /class="project">Atlas · 對,CI 已經恢復/);
-  assert.match(cards, /class="project">Atlas · P1 要不要照上面做？/);
-  assert.match(cards, /class="project">Atlas · 任務 e5f6a7b8 還卡在 blocked/);
-  assert.match(cards, /class="project">Atlas · 修正登入時的 cookie 過期問題<\/span>/);
-  assert.match(cards, /class="project">Atlas<\/span>/);
-  assert.doesNotMatch(cards, /class="project">Atlas · (?:status check|continue|進度如何|check progress)/);
+  assert.equal((cards.match(/class="session-heading"><span class="project">Atlas<\/span><\/div>/g) || []).length, 5);
+  assert.doesNotMatch(cards, /class="session-context"/, 'prompt context stays in the preview rather than repeating in the title');
+  assert.match(cards, /class="preview-line agent"[^>]*>[\s\S]*?對,CI 已經恢復/);
+  assert.match(cards, /class="preview-line user"[^>]*>[\s\S]*?繼續/);
+  assert.match(cards, /aria-label="開啟 Atlas · P1 要不要照上面做？"/);
   assert.equal(ui.context.agentName({ ...rows[1], workstream_label: 'P1 / #42' }), 'Atlas · P1 / #42');
   assert.match(ui.context.workstreamName({ ...rows[1], workstream_label: 'P1 / #42' }), /^Atlas · P1 \/ #42/);
   assert.ok(ui.context.workstreamName({ ...rows[1], preview: { users: ['x'.repeat(10000)] } }).length < 100);
   ui.render({ agents: [{ ...rows[1], workstream_label: 'P1 / #42' }] });
-  assert.match(ui.elements.get('decision-inbox').innerHTML, /class="inbox-stream">Atlas · P1 \/ #42<\/div>/);
+  assert.match(ui.elements.get('decision-inbox').innerHTML, /class="inbox-stream">Atlas<\/div><div class="session-context">P1 \/ #42<\/div>/);
   assert.match(ui.elements.get('decision-inbox').innerHTML, /class="inbox-source">work %3 · pid 123<\/div>/);
-  assert.match(ui.elements.get('list').innerHTML, /class="project">Atlas · P1 \/ #42<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="session-heading"><span class="project">Atlas<\/span><span class="session-context">P1 \/ #42<\/span><\/div>/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /class="project">[^<]*要不要/);
+});
+
+test('session hierarchy omits absent context and keeps fallback names and inbox identity separate', () => {
+  const ui = dashboard();
+  for (const [fields, name] of [
+    [{}, '未命名專案'],
+    [{ repo: 'tmux' }, 'tmux'],
+    [{ window: 'cory' }, 'cory'],
+    [{ project: 'cory', workstream_label: '   ', preview: { users: ['continue'], agent: '' } }, 'cory'],
+  ]) {
+    const a = handoffAgent('', [], { pane: '%3', preview: { users: [], agent: '' }, ...fields });
+    ui.render({ agents: [a] });
+    const cards = ui.elements.get('list').innerHTML;
+    const inbox = ui.elements.get('decision-inbox').innerHTML;
+    assert.ok(cards.includes(`<div class="session-heading"><span class="project">${name}</span></div>`));
+    assert.ok(inbox.includes(`<div class="inbox-stream">${name}</div><div class="inbox-source">work %3 · pid 123</div>`));
+    assert.doesNotMatch(cards + inbox, /class="session-context"/);
+  }
+});
+
+test('session names and subordinate labels wrap long English and CJK text independently', () => {
+  const ui = dashboard();
+  const project = 'cory專案'.repeat(12);
+  const label = 'tmux工作流'.repeat(11);
+  const prompt = '我貼了 latest prompt';
+  const a = handoffAgent(project, [], { workstream_label: label, preview: { users: [prompt], agent: '' } });
+  ui.render({ agents: [a] });
+  const cards = ui.elements.get('list').innerHTML;
+  const inbox = ui.elements.get('decision-inbox').innerHTML;
+  assert.ok(cards.includes(`<span class="project">${project}</span><span class="session-context">${label}</span>`));
+  assert.ok(inbox.includes(`<div class="inbox-stream">${project}</div><div class="session-context">${label}</div>`));
+  assert.equal((cards.replace(/aria-label="[^"]*"/g, '').match(/我貼了 latest prompt/g) || []).length, 1);
+  assert.doesNotMatch(inbox, /class="session-context">我貼了/);
+  assert.ok(cards.includes(`aria-label="開啟 ${project} · ${label}"`));
+  assert.ok(inbox.includes(`aria-label="開啟 ${project} · ${label} 的 agent／原文"`));
+  ui.render({ agents: [{ ...a, workstream_label: '' }] });
+  const promptCard = ui.elements.get('list').innerHTML;
+  assert.doesNotMatch(promptCard, /class="session-context"/);
+  assert.equal((promptCard.replace(/aria-label="[^"]*"/g, '').match(/我貼了 latest prompt/g) || []).length, 1);
+  assert.match(ui.elements.get('decision-inbox').innerHTML, /class="session-context">我貼了 latest prompt<\/div>/);
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /\.title \{[^}]*flex: 1;[^}]*flex-wrap: wrap;[^}]*min-width: 0;/);
+  assert.match(html, /\.session-heading \{[^}]*flex: 1;[^}]*min-width: 0;/);
+  assert.match(html, /\.project \{[^}]*overflow-wrap: anywhere;/);
+  assert.match(html, /\.session-context \{[^}]*color: var\(--muted\);[^}]*font-weight: 400;[^}]*overflow-wrap: anywhere;/);
+  assert.match(html, /\.inbox-heading > div \{[^}]*flex: 1;[^}]*min-width: 0;/);
 });
 
 test('grouped mixed candidates keep kinds, item order, identity boundaries and source verification', () => {
@@ -2977,10 +3022,15 @@ test('session titles bound and escape task hints and manual labels while keeping
   const a = handoffAgent('Atlas', [], { preview: { users: [hostile] } });
   assert.ok(ui.context.sessionTitle(a).length <= a.project.length + 59);
   ui.render({ agents: [a] });
-  assert.match(ui.elements.get('list').innerHTML, /class="project">Atlas · &lt;script&gt;/);
+  assert.match(ui.elements.get('list').innerHTML, /class="project">Atlas<\/span>/);
+  assert.match(ui.elements.get('decision-inbox').innerHTML, /class="inbox-stream">Atlas<\/div><div class="session-context">&lt;script&gt;/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /<script>/);
   ui.render({ agents: [{ ...a, workstream_label: '<manual>' }] });
-  assert.match(ui.elements.get('list').innerHTML, /class="project">Atlas · &lt;manual&gt;<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="project">Atlas<\/span><span class="session-context">&lt;manual&gt;<\/span>/);
+  assert.match(ui.elements.get('decision-inbox').innerHTML, /class="inbox-stream">Atlas<\/div><div class="session-context">&lt;manual&gt;<\/div>/);
+  ui.render({ agents: [{ ...a, project: '<project>"&', workstream_label: '<manual>' }] });
+  assert.match(ui.elements.get('list').innerHTML, /class="project">&lt;project&gt;&quot;&amp;<\/span>/);
+  assert.match(ui.elements.get('decision-inbox').innerHTML, /class="inbox-stream">&lt;project&gt;&quot;&amp;<\/div>/);
 });
 
 test('inbox rejects malformed and stale handoffs and safely bounds escaped peer text', () => {
@@ -3064,7 +3114,7 @@ test('workstream label saves only session identity and candidate source opens th
   ui.elements.get('workstream-label').value = 'P1 / merge';
   await ui.elements.get('workstream-form').listeners.submit({ preventDefault() {} });
   assert.deepEqual(calls.find(([url]) => url === '/api/inbox'), ['/api/inbox', { host: 'work', pane: '%3', pid: '345', action: 'label', label: 'P1 / merge' }]);
-  assert.match(ui.elements.get('decision-inbox').innerHTML, /Atlas · P1 \/ merge<\/div>/);
+  assert.match(ui.elements.get('decision-inbox').innerHTML, /class="inbox-stream">Atlas<\/div><div class="session-context">P1 \/ merge<\/div>/);
   assert.match(ui.elements.get('decision-inbox').innerHTML, /work %3 · pid 345/);
   assert.equal(b.workstream_label, undefined);
   assert.equal(a.acknowledged, 0);
