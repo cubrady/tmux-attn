@@ -1,7 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="tmux Attention">
-  <!-- Original mark for tmux-attn: status rows with one highlighted (needs attention). -->
+  <!-- Many agent panes; one is waiting for you. -->
   <rect width="32" height="32" rx="8" fill="#0f766e"/>
-  <rect x="7" y="8" width="18" height="4" rx="1.5" fill="#99f6e4"/>
-  <rect x="7" y="14" width="18" height="4" rx="1.5" fill="#f8fafc"/>
-  <rect x="7" y="20" width="12" height="4" rx="1.5" fill="#5eead4"/>
+  <rect x="5" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/>
+  <rect x="5" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/>
+  <rect x="17" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/>
+  <rect x="17" y="5" width="10" height="10" rx="2.2" fill="#f8fafc"/>
+  <circle cx="24.8" cy="7.2" r="2.8" fill="#c2410c"/>
 </svg>
