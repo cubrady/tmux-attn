@@ -43,7 +43,11 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
   const context = vm.createContext({
     window: win, navigator: nav, location: win.location,
     document, performance: { now: () => nowMs },
-    fetch: (url, options) => (url === '/api/fleet' || !fetchRequest) ? new Promise(() => {}) : fetchRequest(url, options),
+    fetch: (url, options) => {
+      const fleetPoll = typeof url === 'string' && (url === '/api/fleet' || url.startsWith('/api/fleet/'));
+      if (!fetchRequest || (fleetPoll && !overrides.allowFleetFetch)) return new Promise(() => {});
+      return fetchRequest(url, options);
+    },
     setInterval() {}, setTimeout() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => String(value) },
     ...(overrides.globals || {}),
   });
@@ -252,14 +256,91 @@ test('later header count follows host filters and opens the collapsed group', ()
   assert.doesNotMatch(ui.elements.get('summary').innerHTML, /class="stat active"/);
 });
 
-test('first load consumes the fleet request started in the page head', async () => {
-  const payload = { ok: true, agents: [review('early', 2, 2)] };
-  const ui = dashboard({ window: { initialFleetRequest: Promise.resolve({ res: response(payload) }) } });
-  await settle();
+test('first load consumes the fleet plan request started in the page head', async () => {
+  const agentRow = review('early', 2, 2);
+  const calls = [];
+  let hostFetched;
+  const hostDone = new Promise(resolve => { hostFetched = resolve; });
+  const ui = dashboard({
+    allowFleetFetch: true,
+    window: {
+      initialFleetPlanRequest: Promise.resolve({
+        res: response({ ok: true, hosts: [{ name: 'work', source: 'local' }], version: 'abc' }),
+      }),
+    },
+    fetchRequest: async (url) => {
+      calls.push(url);
+      assert.equal(url, '/api/fleet/host?name=work');
+      hostFetched();
+      return response({
+        ok: true,
+        version: 'abc',
+        summary: { wait: 0, review: 1, running: 0, idle: 0, tracked: 1, untracked: 0 },
+        hosts: [{ name: 'work', ok: true, source: 'local' }],
+        agents: [agentRow],
+      });
+    },
+  });
+  await hostDone;
+  for (let i = 0; i < 8; i++) await settle();
   assert.match(ui.elements.get('list').innerHTML, /early/);
-  assert.equal(ui.context.window.initialFleetRequest, null);
+  assert.equal(ui.context.window.initialFleetPlanRequest, null);
+  assert.deepEqual(calls, ['/api/fleet/host?name=work']);
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   assert.ok(html.indexOf('id="early-fleet-request"') < html.indexOf('fonts.googleapis.com'));
+  assert.match(html, /initialFleetPlanRequest/);
+});
+
+test('progressive refresh paints a fast host before a slow host finishes', async () => {
+  let releaseSlow;
+  const slow = new Promise(resolve => { releaseSlow = resolve; });
+  let sawSlow;
+  const slowStarted = new Promise(resolve => { sawSlow = resolve; });
+  const ui = dashboard({
+    allowFleetFetch: true,
+    fetchRequest: async (url) => {
+      if (url === '/api/fleet/plan') {
+        return response({
+          ok: true,
+          hosts: [
+            { name: 'fast', source: 'peer' },
+            { name: 'slow', source: 'local' },
+          ],
+          version: 'v1',
+        });
+      }
+      if (url.includes('name=fast')) {
+        return response({
+          ok: true,
+          version: 'v1',
+          summary: { wait: 1, review: 0, running: 0, idle: 0, tracked: 1, untracked: 0 },
+          hosts: [{ name: 'fast', ok: true, source: 'peer' }],
+          agents: [{ ...review('fast-card', 2, 2), host: 'fast' }],
+        });
+      }
+      if (url.includes('name=slow')) {
+        sawSlow();
+        await slow;
+        return response({
+          ok: true,
+          version: 'v1',
+          summary: { wait: 0, review: 0, running: 1, idle: 0, tracked: 1, untracked: 0 },
+          hosts: [{ name: 'slow', ok: true, source: 'local' }],
+          agents: [{ ...agent('slow', 'RUNNING'), project: 'slow-card', pane: '%slow', updated: 1 }],
+        });
+      }
+      throw new Error('unexpected ' + url);
+    },
+  });
+  await slowStarted;
+  await settle();
+  assert.match(ui.elements.get('list').innerHTML, /fast-card/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /slow-card/);
+  assert.match(ui.elements.get('hosts').innerHTML, /pending/);
+  releaseSlow();
+  for (let i = 0; i < 8; i++) await settle();
+  assert.match(ui.elements.get('list').innerHTML, /slow-card/);
+  assert.doesNotMatch(ui.elements.get('hosts').innerHTML, /pending/);
 });
 
 test('later icon needs two taps to save and two taps to restore', async () => {

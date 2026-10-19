@@ -97,6 +97,7 @@ paths.extend([
     DEST/'web/icons', DEST/'install_web_service.sh',
     DEST/'contrib/systemd/tmux-attn-web.service',
     DEST/'contrib/launchd/ai.tmux-attn.web.plist',
+    DEST/'contrib/launchd/web-run.sh',
 ])
 paths.append(DEST/'INSTALL.json')
 manifest = []
@@ -155,12 +156,14 @@ if icons_src.is_dir():
 web_service = DEST / 'install_web_service.sh'
 shutil.copy2(ROOT / 'install_web_service.sh', web_service)
 web_service.chmod(0o755)
-for unit in ['contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist']:
+for unit in ['contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist', 'contrib/launchd/web-run.sh']:
     src = ROOT / unit
     if src.is_file():
         dest = DEST / unit
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
+        if dest.suffix == '.sh':
+            dest.chmod(0o755)
 # Lets `tmux-attn update` find this checkout and lets the panel report which version is installed.
 try:
     if update:

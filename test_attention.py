@@ -1292,7 +1292,40 @@ class StoreTests(unittest.TestCase):
         status = {row['name']: row['ok'] for row in fleet['hosts']}
         self.assertEqual(status, {'home': True, 'lab': True, 'down': False})
 
+    def test_fleet_plan_lists_local_and_peers_without_io(self):
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'agents_payload', side_effect=AssertionError('plan must not scan')), \
+             patch.object(a, 'fetch_peer_agents', side_effect=AssertionError('plan must not fetch')):
+            plan = a.fleet_plan(include_local=True)
+        self.assertEqual(plan['hosts'], [
+            {'name': 'home', 'source': 'local'},
+            {'name': 'lab', 'source': 'peer'},
+        ])
+
+    def test_fleet_host_slice_loads_one_peer(self):
+        a._FLEET_HOST_CACHE.clear()
+        peer_payload = {
+            'ok': True,
+            'agents': [{
+                'pane': '%9', 'pid': '999', 'session': 'x', 'window': 'y', 'window_id': '@9',
+                'agent': 'codex', 'cli': 'codex', 'command': 'codex', 'tracked': True,
+                'project': 'other', 'path': '/other', 'state': 'RUNNING', 'pending': False,
+                'emoji': '🏃', 'reason': '正在工作', 'updated': 1.0, 'age': '1s',
+            }],
+        }
+        with patch.object(a, 'local_host_name', return_value='home'), \
+             patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
+             patch.object(a, 'fetch_peer_agents', return_value=peer_payload), \
+             patch.object(a, 'web_later_fleet', side_effect=lambda fleet: fleet):
+            slice_ = a.fleet_host_slice('lab')
+        self.assertTrue(slice_['ok'])
+        self.assertEqual([row['name'] for row in slice_['hosts']], ['lab'])
+        self.assertEqual(slice_['agents'][0]['host'], 'lab')
+        self.assertEqual(a.fleet_host_slice('missing'), {'ok': False, 'error': 'unknown host'})
+
     def test_fleet_starts_peer_fetch_before_local_scan_finishes(self):
+
         peer_started = threading.Event()
 
         def peer_fetch(url, timeout):

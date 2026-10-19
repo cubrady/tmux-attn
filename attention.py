@@ -28,7 +28,7 @@ import unicodedata
 import zipfile
 import zlib
 import xml.etree.ElementTree as ET
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -2413,6 +2413,84 @@ def _cached_fleet_host(cache_key, now, stale_ttl):
     return [dict(item) for item in tagged], dict(summary), int(age_s)
 
 
+def fleet_plan(include_local=True):
+    """Fast host roster for progressive web loads. No tmux/peer I/O."""
+    hosts = []
+    if include_local:
+        hosts.append({'name': local_host_name(), 'source': 'local'})
+    for peer in load_peers():
+        hosts.append({'name': peer['name'], 'source': 'peer'})
+    return {'ok': True, 'hosts': hosts, 'version': install_version()}
+
+
+def _fleet_local_slice(now, stale_ttl):
+    host = local_host_name()
+    cache_key = ('local', host)
+    try:
+        with closing(db()) as con:
+            local = agents_payload(con)
+        tagged, summary = tag_host(local, host)
+        _remember_fleet_host(cache_key, now, tagged, summary)
+        return {'name': host, 'ok': True, 'source': 'local', 'version': install_version()}, tagged, summary
+    except Exception as exc:
+        cached = _cached_fleet_host(cache_key, now, stale_ttl)
+        host_row = {'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'}
+        if cached:
+            tagged, summary, stale_age = cached
+            host_row['stale'] = True
+            host_row['stale_age'] = stale_age
+            return host_row, tagged, summary
+        return host_row, [], empty_summary()
+
+
+def _fleet_peer_slice(peer, peer_timeout, now, stale_ttl):
+    cache_key = ('peer', peer['name'], peer['url'])
+    try:
+        payload = fetch_peer_agents(peer['url'], peer_timeout)
+        tagged, summary = tag_host(payload, peer['name'])
+        _remember_fleet_host(cache_key, now, tagged, summary)
+        host_row = {
+            'name': peer['name'], 'ok': True, 'source': 'peer', 'url': peer['url'],
+            'version': str(payload.get('version') or ''),
+        }
+        return host_row, tagged, summary
+    except Exception as exc:
+        cached = _cached_fleet_host(cache_key, now, stale_ttl)
+        host_row = {
+            'name': peer['name'], 'ok': False, 'source': 'peer', 'url': peer['url'],
+            'error': f'{type(exc).__name__}',
+        }
+        if cached:
+            tagged, summary, stale_age = cached
+            host_row['stale'] = True
+            host_row['stale_age'] = stale_age
+            return host_row, tagged, summary
+        return host_row, [], empty_summary()
+
+
+def fleet_host_slice(name, include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None, stale_ttl=_FLEET_STALE_TTL):
+    """One host's agents for progressive /api/fleet/host loads."""
+    now = time.time() if now is None else float(now)
+    want = clean(name)
+    if not want:
+        return {'ok': False, 'error': 'host required'}
+    if include_local and want == local_host_name():
+        host_row, tagged, summary = _fleet_local_slice(now, stale_ttl)
+    else:
+        peer = next((row for row in load_peers() if row['name'] == want), None)
+        if peer is None:
+            return {'ok': False, 'error': 'unknown host'}
+        host_row, tagged, summary = _fleet_peer_slice(peer, peer_timeout, now, stale_ttl)
+    tagged = sorted(tagged, key=agent_sort_key)
+    return web_later_fleet({
+        'ok': True,
+        'summary': summary,
+        'agents': tagged,
+        'hosts': [host_row],
+        'version': install_version(),
+    })
+
+
 def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None, stale_ttl=_FLEET_STALE_TTL):
     """Aggregate local and/or Tailscale/LAN peer /api/agents feeds."""
     now = time.time() if now is None else float(now)
@@ -2422,53 +2500,18 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
     peers = load_peers()
     # Start peer I/O before the local tmux/DB scan so the two waits overlap.
     with ThreadPoolExecutor(max_workers=max(1, min(8, len(peers)))) as pool:
-        futures = {pool.submit(fetch_peer_agents, peer['url'], peer_timeout): peer for peer in peers}
+        futures = {pool.submit(_fleet_peer_slice, peer, peer_timeout, now, stale_ttl): peer for peer in peers}
         if include_local:
-            host = local_host_name()
-            cache_key = ('local', host)
-            try:
-                with closing(db()) as con:
-                    local = agents_payload(con)
-                tagged, summary = tag_host(local, host)
-                _remember_fleet_host(cache_key, now, tagged, summary)
-                agents.extend(tagged)
-                summaries.append(summary)
-                hosts.append({'name': host, 'ok': True, 'source': 'local', 'version': install_version()})
-            except Exception as exc:
-                cached = _cached_fleet_host(cache_key, now, stale_ttl)
-                host_row = {'name': host, 'ok': False, 'source': 'local', 'error': f'{type(exc).__name__}'}
-                if cached:
-                    tagged, summary, stale_age = cached
-                    agents.extend(tagged)
-                    summaries.append(summary)
-                    host_row['stale'] = True
-                    host_row['stale_age'] = stale_age
-                hosts.append(host_row)
+            host_row, tagged, summary = _fleet_local_slice(now, stale_ttl)
+            agents.extend(tagged)
+            summaries.append(summary)
+            hosts.append(host_row)
         if futures:
             for future in as_completed(futures):
-                peer = futures[future]
-                cache_key = ('peer', peer['name'], peer['url'])
-                try:
-                    payload = future.result()
-                    tagged, summary = tag_host(payload, peer['name'])
-                    _remember_fleet_host(cache_key, now, tagged, summary)
-                    agents.extend(tagged)
-                    summaries.append(summary)
-                    hosts.append({'name': peer['name'], 'ok': True, 'source': 'peer', 'url': peer['url'],
-                                  'version': str(payload.get('version') or '')})
-                except Exception as exc:
-                    cached = _cached_fleet_host(cache_key, now, stale_ttl)
-                    host_row = {
-                        'name': peer['name'], 'ok': False, 'source': 'peer', 'url': peer['url'],
-                        'error': f'{type(exc).__name__}',
-                    }
-                    if cached:
-                        tagged, summary, stale_age = cached
-                        agents.extend(tagged)
-                        summaries.append(summary)
-                        host_row['stale'] = True
-                        host_row['stale_age'] = stale_age
-                    hosts.append(host_row)
+                host_row, tagged, summary = future.result()
+                agents.extend(tagged)
+                summaries.append(summary)
+                hosts.append(host_row)
     agents.sort(key=agent_sort_key)
     hosts.sort(key=lambda row: (0 if row.get('ok') else 1, row.get('name') or ''))
     return {
@@ -3350,6 +3393,21 @@ def make_web_handler(fleet_only=False):
                 except Exception as exc:
                     sys.stderr.write(f'web /api/agents: {type(exc).__name__}: {exc}\n')
                     self._send(500, json.dumps({'ok': False, 'error': 'failed to load agents'}),
+                               'application/json; charset=utf-8')
+                return
+            if path == '/api/fleet/plan':
+                self._send(200, json.dumps(fleet_plan(include_local=not fleet_only), ensure_ascii=False),
+                           'application/json; charset=utf-8')
+                return
+            if path == '/api/fleet/host':
+                name = parse_qs(urlparse(self.path).query).get('name', [''])[0]
+                try:
+                    payload = fleet_host_slice(name, include_local=not fleet_only)
+                    code = 200 if payload.get('ok') else 404
+                    self._send(code, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/fleet/host: {type(exc).__name__}: {exc}\n')
+                    self._send(500, json.dumps({'ok': False, 'error': 'failed to load host'}),
                                'application/json; charset=utf-8')
                 return
             if path == '/api/fleet':
