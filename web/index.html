@@ -1607,37 +1607,6 @@
     body.is-loading .live-content { display: none; }
     body.is-loading .skel-page { display: block; }
     body:not(.is-loading) .skel-page { display: none; }
-    .inbox { margin: 16px 0 24px; }
-    .inbox h2 { font-size: 1rem; margin: 0 0 6px; }
-    .inbox-note, .inbox-source, .inbox-stream { font-size: .76rem; color: var(--muted); overflow-wrap: anywhere; }
-    .inbox-note { margin: 0 0 10px; }
-    .inbox-row { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 10px 12px; margin-top: 8px; min-width: 0; }
-    .inbox-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; }
-    .inbox-heading { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
-    .inbox-heading > div { flex: 1; min-width: 0; }
-    .inbox-stream { font-size: .98rem; font-weight: 600; color: var(--fg); }
-    .inbox-caution { margin: 4px 0; }
-    .inbox-kind { font-size: .76rem; color: var(--wait); }
-    .inbox-next { margin: 7px 0; font-size: .9rem; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .inbox-evidence { margin: 8px 0; padding-left: 9px; border-left: 2px solid var(--line); font-size: .8rem; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
-    .inbox button, .workstream-form button { font: inherit; font-size: .8rem; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; min-height: 44px; cursor: pointer; }
-    .inbox button { flex-shrink: 0; }
-    .inbox button:active { transform: scale(.97); }
-    .inbox button:disabled, .workstream-form button:disabled { opacity: .5; cursor: default; }
-    .inbox :focus-visible, .workstream-form :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .inbox-items, .inbox-rules { margin: 0; padding-left: 22px; }
-    .inbox-items > li { padding: 5px 0 5px 2px; border-bottom: 1px solid var(--line); }
-    .inbox-items > li::marker { color: var(--muted); font-size: .8rem; }
-    .inbox-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-    .inbox-item .inbox-next { margin: 0; min-width: 0; flex: 1; }
-    .inbox-item .inbox-kind { display: block; font-size: .7rem; }
-    .inbox-verification { margin-top: 4px; font-size: .76rem; color: var(--muted); overflow-wrap: anywhere; }
-    .inbox summary { min-height: 44px; padding: 12px 0; cursor: pointer; overflow-wrap: anywhere; }
-    .inbox-handled { margin-top: 12px; font-size: .8rem; color: var(--muted); }
-    .inbox-feedback { font-size: .8rem; color: var(--danger); }
-    .workstream-form { margin: 0 18px 10px; font-size: .78rem; color: var(--muted); }
-    .workstream-edit { display: flex; gap: 6px; margin-top: 5px; }
-    .workstream-edit input { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 7px; padding: 7px; width: 100%; min-width: 0; }
   </style>
 </head>
 <body class="is-loading">
@@ -1669,8 +1638,6 @@
     </header>
     <div class="update-hint" id="update-hint" hidden></div>
     <div class="live-content">
-      <section class="inbox" id="decision-inbox" aria-label="行動收件匣"></section>
-      <div class="inbox-feedback" id="inbox-feedback" role="status" aria-live="polite"></div>
       <main class="list" id="list"></main>
       <div class="empty-state" id="empty" hidden></div>
     </div>
@@ -1714,11 +1681,6 @@
         </div>
       </div>
       <div class="sheet-path" id="sheet-path" hidden></div>
-      <form class="workstream-form" id="workstream-form">
-        <label for="workstream-label">工作流標籤（此 session）</label>
-        <div class="workstream-edit"><input id="workstream-label" maxlength="80" autocomplete="off"><button type="submit" id="workstream-save">儲存標籤</button></div>
-        <span id="workstream-status" role="status"></span>
-      </form>
       <div class="sheet-progress" id="sheet-progress" hidden></div>
       <div class="sheet-preview" id="sheet-preview" tabindex="0"></div>
       <section class="sheet-ask" id="sheet-ask" aria-label="待回答的問題" hidden></section>
@@ -1869,22 +1831,19 @@
       }
     }
     function projectName(a) {
-      return inboxText(a.project || a.repo || a.window, 80) || '未命名專案';
+      return clipText(a.project || a.repo || a.window, 80) || '未命名專案';
     }
     function agentName(a) {
-      const project = projectName(a);
-      const hint = inboxText(a.workstream_label, 80).trim();
-      return [project, hint].filter(Boolean).join(' · ');
+      return projectName(a);
     }
-    const inboxBusy = new Set();
-    function inboxText(value, limit) {
+    function clipText(value, limit) {
       return typeof value === 'string' ? value.slice(0, limit) : '';
     }
     function taskHint(a) {
       // Literal excerpts only: never invent a topic from a branch, state or id.
       const generic = /^(?:(?:please|pls|can you|could you)\s+)?(?:continue|go on|carry on|resume|status(?: check| update)?|check (?:the )?(?:status|progress)|(?:any )?(?:progress|updates?)(?: check| update)?|how(?:'s| is) (?:it|the task|the progress)(?: going)?|result(?: \d+)?|done|finished|summary|your decisions?|decisions? (?:needed|required)|(?:請|请)?(?:繼續|继续|接著|接着|狀態(?:檢查|更新)?|状态(?:检查|更新)?|(?:目前)?進度(?:如何|怎樣|怎麼樣|檢查|更新)?|(?:目前)?进度(?:如何|怎样|怎么样|检查|更新)?|好了嗎|好了吗|完成了嗎|完成了吗)|要你決定|需要你決定|請你決定|結果|结果)[\s.!?？。:：]*$/i;
       function excerpt(value) {
-        const text = inboxText(value, 512);
+        const text = clipText(value, 512);
         let fenced = false;
         for (const raw of text.split('\n')) {
           if (/^\s*(?:```|~~~)/.test(raw)) { fenced = !fenced; continue; }
@@ -1903,138 +1862,12 @@
       }
       return excerpt(a.preview?.agent);
     }
-    // The user's own label wins; otherwise the title the agent gave this session.
+    // Prefer the title the agent gave this session.
     function sessionLabel(a) {
-      return inboxText(a.workstream_label, 80).trim() || inboxText(a.title, 80).trim();
-    }
-    function workstreamName(a) {
-      const identity = `${inboxText(agentHostName(a), 60)} ${inboxText(a.pane, 24)} · pid ${inboxText(String(a.pid || ''), 24)}`;
-      return [agentName(a), a.workstream_label ? '' : taskHint(a) || inboxText(a.branch || a.session, 60), identity].filter(Boolean).join(' · ');
+      return clipText(a.title, 80).trim();
     }
     function sessionTitle(a) {
-      return [agentName(a), a.workstream_label ? '' : taskHint(a)].filter(Boolean).join(' · ');
-    }
-    function inboxOffline(a) {
-      const host = latestHosts.find(h => h.name === agentHostName(a));
-      return !!host && (!host.ok || host.stale || host.pending);
-    }
-    function handoffItems(a) {
-      const h = a.handoff;
-      if (!a.tracked || a.state !== 'IDLE' || !a.needs_review || !h || h.source !== 'completed response'
-          || !Number.isSafeInteger(h.revision) || h.revision <= 0 || h.revision !== a.revision || !Array.isArray(h.items)) return [];
-      const seen = new Set();
-      return h.items.slice(0, 12).filter(item => {
-        if (!item || typeof item !== 'object' || !['decision', 'operation'].includes(item.kind)
-            || typeof item.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(item.id) || seen.has(item.id)
-            || !inboxText(item.next_step, 240).trim() || typeof item.handled !== 'boolean') return false;
-        seen.add(item.id);
-        return true;
-      });
-    }
-    function inboxHeader(a) {
-      const context = sessionLabel(a) || taskHint(a) || inboxText(a.branch || a.session, 60);
-      const identity = `${inboxText(agentHostName(a), 60)} ${inboxText(a.pane, 24)} · pid ${inboxText(String(a.pid || ''), 24)}`;
-      return `<div class="inbox-heading"><div><div class="inbox-stream">${escapeHtml(projectName(a))}</div>` +
-        (context ? `<div class="session-context">${escapeHtml(context)}</div>` : '') +
-        `<div class="inbox-source">${escapeHtml(identity)}</div>` +
-        `</div><button type="button" data-inbox-open aria-label="開啟 ${escapeHtml(sessionTitle(a))} 的 agent／原文">開啟原文</button></div>`;
-    }
-    function inboxRow(a, kind) {
-      const key = agentKey(a);
-      const offline = inboxOffline(a);
-      const next = kind === 'wait' ? inboxText(a.reason, 240) || 'Agent 正在等待你的回覆' : '查看最新完成結果';
-      const evidence = inboxText(a.preview?.agent, 360);
-      const resultSource = !a.handoff ? '此 peer 未提供行動線索；請開啟全文檢查後續事項' :
-        a.handoff.source !== 'completed response' ? '完成回覆來源尚未可用；請開啟原文確認後續事項' :
-        `${a.handoff.truncated ? '來源不完整；' : ''}未判定決策；可開啟全文檢查後續事項`;
-      const source = kind === 'wait' ? '原生等待訊號，請開啟確認問題' : resultSource;
-      return `<article class="inbox-row" data-inbox-key="${escapeHtml(key)}" data-inbox-kind="${kind}">` +
-        `<div class="inbox-top"><span class="inbox-kind">${kind === 'wait' ? '確認等待回覆' : '結果／狀態報告'}</span>${offline ? '<span class="inbox-source">主機離線／資料可能過時</span>' : ''}</div>` +
-        inboxHeader(a) +
-        `<div class="inbox-next">${escapeHtml(next)}</div>` +
-        `<div class="inbox-source">${escapeHtml(source)}</div>` +
-        (evidence && evidence !== next ? `<details class="inbox-verification"><summary>查看來源摘錄</summary><blockquote class="inbox-evidence">${escapeHtml(evidence)}</blockquote></details>` : '') + '</article>';
-    }
-    function inboxGroup(a, items, unreadResult = false) {
-      const offline = inboxOffline(a);
-      const busy = inboxBusy.has(agentKey(a));
-      // Decisions lead; retain extraction order within each kind and stable numbers when handled.
-      const ordered = [...items].sort((a, b) => Number(a.kind === 'operation') - Number(b.kind === 'operation'));
-      function itemRow(item, index) {
-        const next = inboxText(item.next_step, 240);
-        const action = item.handled ? 'restore' : 'handle';
-        return `<li value="${index + 1}" data-inbox-kind="${item.kind}"><div class="inbox-item">` +
-          `<div class="inbox-next"><span class="inbox-kind">${item.kind === 'decision' ? '候選決策' : '候選使用者操作'}</span>${escapeHtml(next)}</div>` +
-          `<button type="button" data-inbox-item="${escapeHtml(item.id)}" data-inbox-revision="${a.handoff.revision}" data-inbox-action="${action}"${offline || busy ? ' disabled' : ''} aria-label="${item.handled ? '恢復待處理' : '標為已處理'}：${escapeHtml(next)}">${busy ? '儲存中…' : item.handled ? '恢復' : '標記完成'}</button></div></li>`;
-      }
-      const active = ordered.map((item, i) => !item.handled ? itemRow(item, i) : '').join('');
-      const handled = ordered.map((item, i) => item.handled ? itemRow(item, i) : '').join('');
-      const verification = ordered.map((item, i) => {
-        const evidence = inboxText(item.evidence, 360);
-        return `<li value="${i + 1}">` +
-          (evidence && item.evidence !== item.next_step ? `<blockquote class="inbox-evidence">${escapeHtml(evidence)}</blockquote>` : '') +
-          `<span class="inbox-source">擷取規則：${escapeHtml(inboxText(item.rule, 80) || '明確用語')}</span></li>`;
-      }).join('');
-      return `<article class="inbox-row inbox-group" data-inbox-key="${escapeHtml(agentKey(a))}" data-inbox-group-revision="${a.handoff.revision}">` +
-        (unreadResult ? '<div class="inbox-kind" data-inbox-kind="result">未讀結果／狀態報告</div>' : '') +
-        inboxHeader(a) +
-        `<div class="inbox-source inbox-caution">候選，請核對原文${a.handoff.truncated ? ' · 來源不完整' : ''}${offline ? ' · 主機離線／資料可能過時' : ''}</div>` +
-        (active ? `<ol class="inbox-items">${active}</ol>` : '') +
-        (handled ? active || unreadResult
-          ? `<details class="inbox-handled"><summary>已處理候選 ${ordered.filter(item => item.handled).length}</summary><ol class="inbox-items">${handled}</ol></details>`
-          : `<div class="inbox-source">已處理候選 ${ordered.length}</div><ol class="inbox-items">${handled}</ol>` : '') +
-        `<details class="inbox-verification"><summary>核對來源與擷取規則</summary><div class="inbox-source">已完成回覆 · 版本 ${a.handoff.revision}</div><ol class="inbox-rules">${verification}</ol></details></article>`;
-    }
-    function renderInbox(shown) {
-      const rows = { wait: [], decision: [], operation: [], result: [] };
-      const handled = [];
-      const agents = [...shown].filter(a => a.tracked && category(a) !== 'shell').sort((a, b) =>
-        (Number(b.updated) || 0) - (Number(a.updated) || 0) || agentKey(a).localeCompare(agentKey(b), 'en'));
-      for (const a of agents) {
-        if (category(a) === 'wait') rows.wait.push(inboxRow(a, 'wait'));
-        const items = handoffItems(a);
-        if (items.length) {
-          const active = items.filter(item => !item.handled);
-          const unreadResult = !active.length && !a.later && isUnread(a);
-          const target = active.length ? rows[active.some(item => item.kind === 'decision') ? 'decision' : 'operation'] : unreadResult ? rows.result : handled;
-          target.push(inboxGroup(a, items, unreadResult));
-        }
-        if (category(a) !== 'wait' && !items.length && !a.later && isUnread(a)) rows.result.push(inboxRow(a, 'result'));
-      }
-      const active = Object.values(rows).flat();
-      document.getElementById('decision-inbox').innerHTML = '<h2>行動收件匣</h2><p class="inbox-note">閱讀、已處理、稍後分開記錄。候選來自明確用語，仍需核對原文。</p>' +
-        (active.join('') || '<p class="inbox-note">目前沒有待處理項目；所有 session 仍在下方。</p>') +
-        (handled.length ? `<details class="inbox-handled"><summary>已處理工作流 ${handled.length}</summary>${handled.join('')}</details>` : '');
-    }
-    async function updateInbox(agent, change) {
-      const key = agentKey(agent);
-      if (inboxBusy.has(key) || inboxOffline(agent)) return false;
-      if (change.action !== 'label' && (agent.revision !== change.revision || !handoffItems(agent).some(item => item.id === change.item_id))) return false;
-      inboxBusy.add(key);
-      document.getElementById('inbox-feedback').textContent = '';
-      if (latestPayload) render(latestPayload);
-      try {
-        const res = await fetch('/api/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, ...change }) });
-        const data = await res.json();
-        if (!res.ok || !data.ok) throw new Error(res.status === 409 ? '內容已更新或主機離線，請重新整理後再試。' : '無法儲存，請稍後再試。');
-        const current = latestAgents.find(a => agentKey(a) === key);
-        if (current) {
-          if (change.action === 'label') current.workstream_label = change.label;
-          else if (current.revision === change.revision && current.handoff?.revision === change.revision) {
-            const item = handoffItems(current).find(item => item.id === change.item_id);
-            if (item) item.handled = change.action === 'handle';
-          }
-        }
-        refresh();
-        return true;
-      } catch (e) {
-        document.getElementById('inbox-feedback').textContent = e.message;
-        return false;
-      } finally {
-        inboxBusy.delete(key);
-        if (latestPayload) render(latestPayload);
-      }
+      return [agentName(a), taskHint(a)].filter(Boolean).join(' · ');
     }
     function hostTone(name) {
       const text = String(name || '');
@@ -2890,17 +2723,6 @@
       path.hidden = !sheetPathOpen || !path.textContent;
       document.getElementById('sheet-reason').textContent = reason || '';
       const current = latestAgents.find(row => agentKey(row) === agentKey(agent)) || agent;
-      const label = document.getElementById('workstream-label');
-      const key = agentKey(current);
-      if (label.dataset.key !== key || (document.activeElement !== label && label.value === label.dataset.saved)) {
-        label.dataset.key = key;
-        label.value = inboxText(current.workstream_label, 80);
-        document.getElementById('workstream-status').textContent = '';
-      }
-      label.dataset.saved = inboxText(current.workstream_label, 80);
-      label.placeholder = workstreamName({ ...current, workstream_label: '' });
-      document.getElementById('workstream-save').disabled = inboxOffline(current) || inboxBusy.has(key);
-      document.getElementById('workstream-form').hidden = !current.tracked;
       updateSheetLater(current);
     }
     function setRefreshLabel(newer) {
@@ -3219,7 +3041,6 @@
       err.hidden = true;
       const shown = visibleAgents();
       renderSummary(visibleSummaryCounts(shown));
-      renderInbox(shown);
       if (!latestAgents.length) {
         list.innerHTML = '';
         empty.hidden = false;
@@ -3321,26 +3142,6 @@
       if (!agent || !agent.tracked) return;
       if (event.target.closest('[data-later]')) return onLater(agent);
       openSheet(agent);
-    });
-    document.getElementById('decision-inbox').addEventListener('click', (event) => {
-      const row = event.target.closest('[data-inbox-key]');
-      if (!row) return;
-      const agent = latestAgents.find(a => agentKey(a) === row.dataset.inboxKey && a.tracked);
-      if (!agent) return;
-      if (event.target.closest('[data-inbox-open]')) return openSheet(agent);
-      const button = event.target.closest('[data-inbox-item]');
-      if (!button || button.disabled) return;
-      if (!['handle', 'restore'].includes(button.dataset.inboxAction)) return;
-      return updateInbox(agent, { action: button.dataset.inboxAction, revision: Number(button.dataset.inboxRevision), item_id: button.dataset.inboxItem });
-    });
-    document.getElementById('workstream-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
-      if (!agent || !sheetOpen) return;
-      const key = agentKey(agent);
-      const label = document.getElementById('workstream-label').value.slice(0, 80).trim();
-      const ok = await updateInbox(agent, { action: 'label', label });
-      if (selectedKey === key && sheetOpen) document.getElementById('workstream-status').textContent = ok ? '已儲存' : '無法儲存；請確認主機與最新內容';
     });
     document.getElementById('list').addEventListener('toggle', (event) => {
       if (event.target.id === 'group-later') laterExpanded = event.target.open;
