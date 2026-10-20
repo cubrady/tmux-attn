@@ -463,8 +463,23 @@
     }
     .card-later[aria-disabled="true"], .sheet-later[aria-disabled="true"] { cursor: default; opacity: 0.85; }
     .card-later:focus-visible, .sheet-later:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .review-state { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 500; color: var(--muted); }
-    .review-state.unread { color: var(--review); font-weight: 600; }
+    .review-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.68rem;
+      font-weight: 500;
+      color: color-mix(in srgb, var(--muted) 85%, var(--fg));
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+    .review-state.unread {
+      padding: 2px 8px;
+      border-radius: 999px;
+      color: var(--review);
+      font-weight: 600;
+      background: color-mix(in srgb, var(--review) 14%, var(--card));
+    }
     .review-state.unread::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
     .sr-only {
       position: absolute;
@@ -536,37 +551,52 @@
     .title {
       display: flex;
       flex: 1;
-      align-items: center;
-      gap: 7px;
-      flex-wrap: wrap;
-      font-weight: 600;
-      font-size: 0.98rem;
-      letter-spacing: -0.02em;
+      align-items: flex-start;
+      gap: 10px;
       min-width: 0;
     }
-    .emoji { font-size: 1.05rem; line-height: 1; }
+    .emoji {
+      font-size: 0.9rem;
+      line-height: 1.4;
+      flex: 0 0 auto;
+      margin-top: 5px;
+    }
     .project { min-width: 0; overflow-wrap: anywhere; }
-    .session-heading { flex: 1; min-width: 0; }
-    .session-heading .project { display: block; }
+    .session-heading {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding-top: 3px;
+    }
+    .session-heading .project {
+      display: block;
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      text-wrap: balance;
+    }
     .session-context {
       display: block;
-      margin-top: 3px;
-      color: var(--muted);
-      font-size: .78rem;
+      color: color-mix(in srgb, var(--fg) 62%, var(--muted));
+      font-size: .8rem;
       font-weight: 400;
-      letter-spacing: normal;
-      line-height: 1.4;
+      letter-spacing: -0.01em;
+      line-height: 1.35;
       overflow-wrap: anywhere;
+      text-wrap: pretty;
     }
     .cli {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 28px;
-      height: 28px;
-      border-radius: 6px;
-      border: 1px solid var(--line);
-      background: var(--bg);
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      border: 1px solid color-mix(in srgb, var(--line) 75%, var(--fg));
+      background: color-mix(in srgb, var(--bg) 55%, var(--card));
       flex: 0 0 auto;
     }
     .cli img { width: 16px; height: 16px; display: block; }
@@ -594,7 +624,7 @@
       font-variant-numeric: tabular-nums;
       color: var(--muted);
       white-space: nowrap;
-      padding-top: 3px;
+      line-height: 28px;
     }
     .sub {
       margin-top: 5px;
@@ -602,26 +632,51 @@
       font-size: 0.78rem;
     }
     .env {
-      margin-top: 4px;
+      margin-top: 7px;
       display: flex;
       flex-wrap: wrap;
-      gap: 6px 10px;
-      align-items: baseline;
+      align-items: center;
+      column-gap: 0;
+      row-gap: 4px;
       font-family: var(--mono);
-      font-size: 0.72rem;
-      font-weight: 500;
-      color: var(--muted);
+      font-size: 0.7rem;
+      font-weight: 400;
+      font-variant-numeric: tabular-nums;
+      color: color-mix(in srgb, var(--muted) 88%, var(--fg));
       min-width: 0;
+      line-height: 1.4;
     }
-    .env .repo { color: color-mix(in srgb, var(--fg) 72%, var(--muted)); }
+    .env > span { display: inline; max-width: 100%; overflow-wrap: anywhere; }
+    .env > span + span::before {
+      content: "·";
+      margin: 0 0.45em;
+      opacity: 0.45;
+      font-weight: 400;
+    }
+    .env .repo {
+      color: color-mix(in srgb, var(--fg) 70%, var(--muted));
+      font-weight: 500;
+    }
     .env .model { color: var(--muted); white-space: nowrap; }
-    .env .model::before { content: "· "; }
-    .env .branch { color: var(--muted); overflow-wrap: anywhere; }
+    .env .branch { color: var(--muted); }
     .env .dirty {
       color: var(--wait);
       font-size: 0.62rem;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
+      font-weight: 600;
+    }
+    .env .dirty::before {
+      content: none;
+    }
+    .env > span + span.dirty::before {
+      content: "·";
+      margin: 0 0.45em;
+      opacity: 0.45;
+      color: var(--muted);
+      font-weight: 400;
+      letter-spacing: 0;
+      text-transform: none;
     }
     .sheet-env {
       display: inline-flex;
@@ -943,19 +998,30 @@
       margin: 0;
       font-size: 1.05rem;
       font-weight: 600;
-      letter-spacing: -0.02em;
+      letter-spacing: -0.025em;
       overflow: hidden;
       overflow-wrap: anywhere;
       display: -webkit-box;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
+      text-wrap: balance;
     }
+    .sheet-context {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 400;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      text-wrap: pretty;
+    }
+    .sheet-context[hidden] { display: none; }
     .sheet-meta {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 2px 8px;
-      margin-top: 1px;
+      margin-top: 3px;
     }
     .icon-btn.refresh.fresh {
       width: auto;
@@ -1248,8 +1314,18 @@
       .icon-btn:active { transform: scale(0.97); }
     }
     .icon-btn:disabled { opacity: 0.4; cursor: default; }
-    .row1-side { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
-    .row1-side .age { padding-top: 0; }
+    .row1-side {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+      padding-top: 2px;
+    }
+    .row1-side .session-flags {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
     .card-kill {
       position: relative;
       z-index: 1;
@@ -1289,11 +1365,22 @@
     @keyframes kill-arm { from { transform: scale(0.88); } to { transform: scale(1); } }
     .card.kill-armed .age { display: none; }
     .card.later-armed .age { display: none; }
-    .sent-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; font-weight: 600; color: var(--running); }
+    .sent-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--running) 12%, var(--card));
+      font-size: 0.66rem;
+      font-weight: 600;
+      color: var(--running);
+    }
     .sent-tag::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
     .kill-note { margin-top: 6px; font-size: 0.78rem; color: var(--danger); }
     .sheet-root.kb-open .sheet { max-height: 100%; border-radius: 12px 12px 0 0; padding-bottom: 8px; }
     .sheet-root.kb-open .sheet-handle,
+    .sheet-root.kb-open .sheet-context,
     .sheet-root.kb-open .sheet-meta,
     .sheet-root.kb-open .sheet-path { display: none; }
     @media (min-width: 720px) and (min-height: 560px) {
@@ -1472,9 +1559,9 @@
       font-family: var(--mono);
       font-size: 0.7rem;
       color: var(--muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
     }
     .reader-body {
       flex: 1 1 auto;
@@ -1658,13 +1745,14 @@
 
   <div class="sheet-root" id="sheet-root" hidden>
     <button type="button" class="sheet-scrim" id="sheet-scrim" aria-label="關閉"></button>
-    <div class="sheet" id="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet" id="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title" aria-describedby="sheet-context">
       <div class="sheet-drag" id="sheet-drag">
         <div class="sheet-handle" aria-hidden="true"></div>
         <div class="sheet-top">
           <span class="sheet-cli" id="sheet-cli"></span>
           <div class="sheet-heading">
             <h2 class="sheet-title" id="sheet-title">回覆</h2>
+            <div class="sheet-context" id="sheet-context" hidden></div>
             <div class="sheet-meta">
               <span class="sheet-reason" id="sheet-reason"></span>
               <span class="sheet-env" id="sheet-env" hidden></span>
@@ -1687,7 +1775,7 @@
       <form class="sheet-compose" id="sheet-form">
         <div class="composer">
           <div class="attachments" id="sheet-attachments" aria-label="已加入的附件" hidden></div>
-          <textarea id="sheet-text" placeholder="輸入訊息" enterkeyhint="send"></textarea>
+          <textarea id="sheet-text" placeholder="輸入訊息" enterkeyhint="enter"></textarea>
           <div class="composer-bar">
             <button type="button" class="composer-btn attach" id="sheet-attach" aria-label="加入圖片或檔案" title="加入圖片、文字檔或 Office 檔案">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1695,7 +1783,7 @@
               </svg>
             </button>
             <input type="file" id="sheet-file" accept="image/*,.txt,.md,.csv,.tsv,.json,.log,.xml,.yaml,.yml,.ini,.cfg,.toml,.doc,.docx,.xls,.xlsx,.ppt,.pptx" multiple hidden>
-            <button type="submit" class="composer-btn send" id="sheet-send" aria-label="送出" title="送出">
+            <button type="submit" class="composer-btn send" id="sheet-send" aria-label="送出" title="送出（⌘↵ / Ctrl+Enter）">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M22 2L11 13"/>
                 <path d="M22 2L15 22l-4-9-9-4 20-7z"/>
@@ -1868,6 +1956,27 @@
     }
     function sessionTitle(a) {
       return [agentName(a), taskHint(a)].filter(Boolean).join(' · ');
+    }
+    // Same identity the card shows: project name, then the agent session title when present.
+    function cardIdentity(a) {
+      return { name: projectName(a), context: sessionLabel(a) };
+    }
+    function identityLine(a, sep = ' · ') {
+      const { name, context } = cardIdentity(a);
+      return [name, context].filter(Boolean).join(sep);
+    }
+    // Branch/dirty live on the message detail (and sheet), not the card glance row.
+    function gitStateBits(a) {
+      const bits = [];
+      const branch = clipBranch(a.branch || '');
+      if (branch) bits.push(branch);
+      if (a.dirty) bits.push('dirty');
+      return bits;
+    }
+    function readerSubLine(a, chars) {
+      const bits = [identityLine(a), ...gitStateBits(a)];
+      if (chars !== undefined) bits.push(`${Number(chars) || 0} 字`);
+      return bits.filter(Boolean).join(' · ');
     }
     function hostTone(name) {
       const text = String(name || '');
@@ -2195,11 +2304,8 @@
       const project = a.project || '';
       const repo = a.repo || '';
       const showRepo = repo && repo !== project;
-      const branch = clipBranch(a.branch || '');
       const parts = [];
       if (showRepo) parts.push(`<span class="repo">${escapeHtml(repo)}</span>`);
-      if (branch) parts.push(`<span class="branch">${escapeHtml(branch)}</span>`);
-      if (a.dirty) parts.push('<span class="dirty">dirty</span>');
       if (a.model_label) parts.push(`<span class="model">${escapeHtml(a.model_label)}</span>`);
       return parts.length ? `<div class="env">${parts.join('')}</div>` : '';
     }
@@ -2224,7 +2330,7 @@
       return { cat, reviewed, emoji, reason };
     }
     function cardHtml(a, opts = {}) {
-      const { cat, reviewed, emoji, reason } = attentionDisplay(a);
+      const { cat, reviewed, reason } = attentionDisplay(a);
       const errorClass = a.severity === 'error' ? ' error' : '';
       const newestClass = opts.newest ? ' newest' : '';
       const reviewClass = cat === 'review' ? ' unread' : '';
@@ -2240,16 +2346,20 @@
       const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
       const killNote = killState.key === key && killState.note
         ? `<div class="kill-note">${escapeHtml(killState.note)}</div>` : '';
+      const flags = [reviewState, sentTag].filter(Boolean).join('');
+      // Section headings + left rail already show wait/review/idle/running; only ⏳ adds new info.
+      const statusMark = cat === 'running' && a.background_wait
+        ? `<span class="emoji" aria-hidden="true">⏳</span>` : '';
       return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}${killClass}${laterClass}" data-key="${escapeHtml(key)}">
         ${a.tracked ? `<button type="button" class="card-open" aria-label="開啟 ${escapeHtml(name)}"></button>` : ''}
         <div class="row1">
           <div class="title">
-            <span class="emoji" aria-hidden="true">${emoji}</span>
             ${cliBadge(a.cli || a.agent)}
+            ${statusMark}
             <div class="session-heading"><span class="project">${escapeHtml(projectName(a))}</span>${label ? `<span class="session-context">${escapeHtml(label)}</span>` : ''}</div>
-            ${reviewState}${sentTag}
           </div>
           <div class="row1-side">
+            ${flags ? `<div class="session-flags">${flags}</div>` : ''}
             <div class="age">${escapeHtml(a.age)}</div>
             ${a.later || canMoveLater(a) ? laterButtonHtml(a) : ''}
             ${a.tracked ? killButtonHtml(key, name) : ''}
@@ -2633,8 +2743,7 @@
         copy.disabled = false;
         body.setAttribute('aria-busy', 'false');
         body.innerHTML = readerBodyHtml(readerText, data);
-        document.getElementById('reader-sub').textContent =
-          `${agent.project || agent.window || '未命名專案'} · ${Number(data.chars) || 0} 字`;
+        document.getElementById('reader-sub').textContent = readerSubLine(agent, data.chars);
       } catch (e) {
         failed(e && e.message);
       }
@@ -2643,7 +2752,7 @@
       readerOpen = true;
       readerHash = window.location.hash;
       document.getElementById('reader-title').textContent = route.role === 'user' ? '你的訊息' : 'Agent 回覆';
-      document.getElementById('reader-sub').textContent = agent.project || agent.window || '未命名專案';
+      document.getElementById('reader-sub').textContent = readerSubLine(agent);
       document.getElementById('reader-status').textContent = '';
       document.getElementById('reader-root').hidden = false;
       // Share the form itself so drafts, attachments and upload handlers stay intact across views.
@@ -2711,8 +2820,14 @@
     }
     function fillSheetMeta(agent) {
       const { emoji, reason } = attentionDisplay(agent);
-      document.getElementById('sheet-title').textContent =
-        `${emoji} ${agent.project || agent.window || '未命名專案'}`.trim();
+      const { name, context } = cardIdentity(agent);
+      document.getElementById('sheet-title').textContent = `${emoji} ${name}`.trim();
+      const ctx = document.getElementById('sheet-context');
+      ctx.textContent = context;
+      ctx.hidden = !context;
+      const panel = document.getElementById('sheet-panel');
+      if (context) panel.setAttribute('aria-describedby', 'sheet-context');
+      else panel.removeAttribute('aria-describedby');
       const env = document.getElementById('sheet-env');
       const envHtml = sheetEnvHtml(agent);
       env.hidden = !envHtml;
@@ -3267,6 +3382,15 @@
     document.getElementById('reader-back').addEventListener('click', closeReader);
     document.getElementById('reader-copy').addEventListener('click', copyReaderText);
     document.getElementById('sheet-text').addEventListener('input', saveCurrentReplyDraft);
+    document.getElementById('sheet-text').addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.isComposing || !(event.metaKey || event.ctrlKey)) return;
+      const form = document.getElementById('sheet-form');
+      const send = document.getElementById('sheet-send');
+      if (!form || !send || send.disabled) return;
+      event.preventDefault();
+      if (typeof form.requestSubmit === 'function') form.requestSubmit(send);
+      else if (typeof send.click === 'function') send.click();
+    });
     window.addEventListener('pagehide', saveCurrentReplyDraft);
     document.getElementById('reader-body').addEventListener('click', (event) => {
       if (!event.target.closest('[data-retry]')) return;

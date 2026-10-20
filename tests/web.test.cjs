@@ -21,7 +21,7 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
       return child;
     },
     addEventListener(type, listener) { this.listeners[type] = listener; },
-    setAttribute() {}, focus() {},
+    setAttribute() {}, removeAttribute() {}, focus() {},
   }]));
   elements.get('sheet-panel').appendChild(elements.get('sheet-form'));
   const document = {
@@ -532,7 +532,7 @@ test('successful acknowledgement moves result into idle, survives stale fleet an
   assert.match(ui.elements.get('summary').innerHTML, /💤 1/);
   assert.match(ui.elements.get('summary').innerHTML, /data-group="review" disabled/);
   assert.match(ui.elements.get('list').innerHTML, /class="card idle selected"/);
-  assert.match(ui.elements.get('list').innerHTML, /aria-hidden="true">💤<\/span>/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /class="emoji"/);
   assert.match(ui.elements.get('list').innerHTML, /class="review-state">已看<\/span>/);
   assert.match(ui.elements.get('list').innerHTML, /已完成，已查看（背景工作仍在運行）/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /尚未查看|👀<\/span>/);
@@ -1838,8 +1838,7 @@ test('a card parked on background work is still a running card, marked with its 
   assert.match(parked, /class="reason"[^>]*>等待背景工作（1 shell）/);
   for (const overrides of [{ reason: '正在工作' }, { background_wait: false }, {}]) {
     const working = cardHtmlFor({ state: 'RUNNING', pending: false, ...overrides });
-    assert.match(working, /<span class="emoji"[^>]*>🏃<\/span>/);
-    assert.doesNotMatch(working, /⏳/);
+    assert.doesNotMatch(working, /class="emoji"/, 'ordinary running cards keep status in the rail/section only');
   }
 });
 
@@ -2872,11 +2871,72 @@ test('session names wrap long English and CJK text independently', () => {
   assert.equal((promptCard.replace(/aria-label="[^"]*"/g, '').match(/我貼了 latest prompt/g) || []).length, 1);
   assert.match(ui.context.sessionTitle({ ...a, title: '' }), /我貼了 latest prompt/);
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
-  assert.match(html, /\.title \{[^}]*flex: 1;[^}]*flex-wrap: wrap;[^}]*min-width: 0;/);
+  assert.match(html, /\.title \{[^}]*flex: 1;[^}]*min-width: 0;/);
   assert.match(html, /\.session-heading \{[^}]*flex: 1;[^}]*min-width: 0;/);
   assert.match(html, /\.project \{[^}]*overflow-wrap: anywhere;/);
-  assert.match(html, /\.session-context \{[^}]*color: var\(--muted\);[^}]*font-weight: 400;[^}]*overflow-wrap: anywhere;/);
+  assert.match(html, /\.session-context \{[^}]*font-weight: 400;[^}]*overflow-wrap: anywhere;/);
+  assert.match(html, /\.row1-side \.session-flags \{/);
+  assert.match(html, /\.env > span \+ span::before/);
   assert.doesNotMatch(html, /decision-inbox|行動收件匣|workstream-form|工作流標籤|\.inbox\b/);
+});
+
+
+test('composer submits with Cmd+Enter or Ctrl+Enter', () => {
+  const ui = dashboard();
+  const form = ui.elements.get('sheet-form');
+  let submits = 0;
+  form.requestSubmit = () => { submits += 1; };
+  const a = { host: 'alpha', state: 'WAIT', tracked: true, pending: true, pane: '%1', pid: '9', project: 'sample' };
+  ui.render({ hosts: [{ name: 'alpha', ok: true }], agents: [a] });
+  ui.open(a);
+  const input = ui.elements.get('sheet-text');
+  input.value = 'hello from keyboard';
+  let prevented = 0;
+  const fire = (mods) => input.listeners.keydown({
+    key: 'Enter', isComposing: false, metaKey: false, ctrlKey: false, ...mods,
+    preventDefault() { prevented += 1; },
+  });
+  fire({});
+  assert.equal(submits, 0);
+  assert.equal(prevented, 0);
+  fire({ metaKey: true });
+  assert.equal(prevented, 1);
+  assert.equal(submits, 1);
+  fire({ ctrlKey: true });
+  assert.equal(submits, 2);
+  fire({ metaKey: true, isComposing: true });
+  assert.equal(submits, 2);
+});
+
+test('sheet and reader show the same card title identity', () => {
+  const ui = dashboard();
+  const a = {
+    host: 'alpha', state: 'IDLE', tracked: true, pending: false, needs_review: true, reviewed: true,
+    pane: '%1', pid: '9', project: 'sample', title: 'Sample 專案列表與內頁模組', window: 'w1',
+    branch: 'main', dirty: true, repo: 'sample-agent-project', model_label: 'sonnet 5.5',
+  };
+  ui.render({ hosts: [{ name: 'alpha', ok: true }], agents: [a] });
+  ui.open(a);
+  assert.match(ui.elements.get('sheet-title').textContent, /sample/);
+  assert.equal(ui.elements.get('sheet-context').textContent, 'Sample 專案列表與內頁模組');
+  assert.equal(ui.elements.get('sheet-context').hidden, false);
+  assert.equal(ui.context.identityLine(a), 'sample · Sample 專案列表與內頁模組');
+  assert.match(ui.elements.get('sheet-env').innerHTML, /class="branch">main</);
+  assert.match(ui.elements.get('sheet-env').innerHTML, /class="dirty">dirty</);
+  const cards = ui.elements.get('list').innerHTML;
+  assert.doesNotMatch(cards, /class="branch"|class="dirty"/);
+  assert.match(cards, /class="repo">sample-agent-project</);
+  ui.context.showReader(a, { role: 'agent', host: 'alpha', pane: '%1', pid: '9', index: 0 });
+  assert.equal(ui.elements.get('reader-title').textContent, 'Agent 回覆');
+  assert.equal(ui.elements.get('reader-sub').textContent, 'sample · Sample 專案列表與內頁模組 · main · dirty');
+});
+
+test('reader sub appends branch, dirty and character count', () => {
+  const ui = dashboard();
+  const a = { project: 'tmux', branch: 'feature/long-name-that-should-clip-somewhere-past-limit', dirty: true };
+  assert.equal(ui.context.readerSubLine(a), `tmux · ${ui.context.clipBranch(a.branch)} · dirty`);
+  assert.equal(ui.context.readerSubLine(a, 14), `tmux · ${ui.context.clipBranch(a.branch)} · dirty · 14 字`);
+  assert.equal(ui.context.readerSubLine({ project: 'tmux' }, 3), 'tmux · 3 字');
 });
 
 test('session titles bound and escape task hints and titles while keeping project', () => {
