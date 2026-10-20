@@ -137,11 +137,11 @@ test('review cards show the agent icon without restoring host chips or sheet tar
   const current = { ...agent('work-machine', 'IDLE', true, true), cli: 'codex', session: 'build-session' };
   ui.render({ agents: [current] });
   const card = ui.elements.get('list').innerHTML;
-  assert.match(card, /class="cli codex"[^>]*>.*?src="\/icons\/codex\.svg"/);
+  assert.match(card, /class="cli sm codex"[^>]*>.*?src="\/icons\/codex\.svg"/);
   assert.doesNotMatch(card, /class="host tone-/);
-  assert.match(card, /class="project">未命名專案<\/span>/);
-  assert.match(card, /class="review-state unread">未看<\/span>/);
-  assert.doesNotMatch(card, /class="project">%1<\/span>/);
+  assert.match(card, /class="card-title">未命名專案<\/span>/);
+  assert.doesNotMatch(card, /未看|已看/);
+  assert.doesNotMatch(card, /class="card-title">%1<\/span>/);
   ui.open(current);
   assert.equal(ui.elements.has('sheet-target'), false);
   assert.equal(ui.elements.get('sheet-title').textContent, '👀 未命名專案');
@@ -154,7 +154,7 @@ test('cards map every supported coding agent to its icon and skip non-agent pane
   const expected = { claude: 'claude', codex: 'codex', pi: 'pi', agent: 'agent', cursor: 'agent' };
   for (const [cli, icon] of Object.entries(expected)) {
     ui.render({ agents: [{ ...agent('', 'RUNNING'), cli }] });
-    assert.match(ui.elements.get('list').innerHTML, new RegExp(`class="cli ${icon}"[^>]*>.*?src="/icons/${icon}\\.svg"`), cli);
+    assert.match(ui.elements.get('list').innerHTML, new RegExp(`class="cli sm ${icon}"[^>]*>.*?src="/icons/${icon}\\.svg"`), cli);
   }
   for (const cli of ['shell', 'zsh', '', 'constructor', '__proto__', 'toString', 'hasOwnProperty']) {
     ui.render({ agents: [{ ...agent('', 'RUNNING', false), cli }] });
@@ -183,11 +183,11 @@ test('unread results stay in review and viewed results move to idle, newest firs
     review('seen-new', 3, 3, 40), review('unread-new', 4, 0, 30)] });
   const list = ui.elements.get('list').innerHTML;
   assert.ok(list.indexOf('id="group-review"') < list.indexOf('id="group-idle"'));
-  const projects = [...list.matchAll(/<span class="project">([^<]+)<\/span>/g)].map(([, value]) => value);
+  const projects = [...list.matchAll(/<span class="card-title">([^<]+)<\/span>/g)].map(([, value]) => value);
   assert.deepEqual(projects, ['unread-new', 'unread-old', 'seen-new', 'seen-old']);
   assert.match(list, /class="card review unread newest"/);
   assert.match(list, /class="card idle"/);
-  assert.match(list, /class="review-state unread">未看/);
+  assert.doesNotMatch(list, /未看|已看/);
   assert.match(ui.elements.get('summary').innerHTML, /👀 2/);
   assert.match(ui.elements.get('summary').innerHTML, /class="l">待看<\/div>/);
   assert.doesNotMatch(ui.elements.get('summary').innerHTML, />未看|>已看|>結果|class="secondary"/);
@@ -533,7 +533,7 @@ test('successful acknowledgement moves result into idle, survives stale fleet an
   assert.match(ui.elements.get('summary').innerHTML, /data-group="review" disabled/);
   assert.match(ui.elements.get('list').innerHTML, /class="card idle selected"/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /class="emoji"/);
-  assert.match(ui.elements.get('list').innerHTML, /class="review-state">已看<\/span>/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /未看|已看/);
   assert.match(ui.elements.get('list').innerHTML, /已完成，已查看（背景工作仍在運行）/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /尚未查看|👀<\/span>/);
   assert.equal(current.reason, '已完成，尚未查看（背景工作仍在運行）');
@@ -2823,15 +2823,16 @@ test('Atlas sessions use literal task context and ignore generic prompts', () =>
   assert.doesNotMatch(ui.context.sessionTitle(rows[0]) + ui.context.sessionTitle(rows[1]) + ui.context.sessionTitle(rows[2]),
     /status check|continue|進度如何|check progress/);
   const cards = ui.elements.get('list').innerHTML;
-  assert.equal((cards.match(/class="session-heading"><span class="project">Atlas<\/span><\/div>/g) || []).length, 5);
-  assert.doesNotMatch(cards, /class="session-context"/, 'prompt context stays in the preview rather than repeating in the title');
+  assert.equal((cards.match(/class="card-title">Atlas<\/span>/g) || []).length, 5);
+  assert.doesNotMatch(cards, /class="card-title">[^<]*(?:status check|continue|進度如何|check progress)/,
+    'prompt context stays in the preview rather than becoming the card title');
   assert.match(cards, /class="preview-line agent"[^>]*>[\s\S]*?對,CI 已經恢復/);
   assert.match(cards, /class="preview-line user"[^>]*>[\s\S]*?繼續/);
-  assert.match(cards, /aria-label="開啟 Atlas · P1 要不要照上面做？"/);
+  assert.match(cards, /aria-label="開啟 Atlas"/);
   assert.ok(ui.context.sessionTitle({ ...rows[1], preview: { users: ['x'.repeat(10000)] } }).length < 100);
 });
 
-test('session hierarchy omits absent context and keeps fallback names', () => {
+test('card title falls back to the project and does not repeat it in meta', () => {
   const ui = dashboard();
   for (const [fields, name] of [
     [{}, '未命名專案'],
@@ -2842,19 +2843,33 @@ test('session hierarchy omits absent context and keeps fallback names', () => {
     const a = handoffAgent('', [], { pane: '%3', preview: { users: [], agent: '' }, ...fields });
     ui.render({ agents: [a] });
     const cards = ui.elements.get('list').innerHTML;
-    assert.ok(cards.includes(`<div class="session-heading"><span class="project">${name}</span></div>`));
-    assert.doesNotMatch(cards, /class="session-context"/);
+    assert.ok(cards.includes(`<span class="card-title">${name}</span>`));
+    assert.doesNotMatch(cards, new RegExp(`<div class="env">[^<]*<span class="project">${name}`));
   }
 });
 
-test('card shows the agent session title when present', () => {
+test('card shows the agent session title as L1 and project in meta', () => {
   const ui = dashboard();
   const a = handoffAgent('sample', [], { pane: '%3', title: 'Sample 專案列表與內頁模組', preview: { users: [], agent: '' } });
   ui.render({ agents: [a] });
-  assert.ok(ui.elements.get('list').innerHTML.includes('<span class="session-context">Sample 專案列表與內頁模組</span>'));
+  const html = ui.elements.get('list').innerHTML;
+  assert.ok(html.includes('<span class="card-title">Sample 專案列表與內頁模組</span>'));
+  assert.ok(html.includes('<span class="project">sample</span>'));
 });
 
-test('session names wrap long English and CJK text independently', () => {
+test('card meta hides redundant repos and shows distinct repos with a safe small CLI icon', () => {
+  const hidden = cardHtmlFor({ project: 'Atlas', repo: 'Atlas-monorepo', cli: 'CoDeX' });
+  assert.match(hidden, /<span class="card-title">Atlas<\/span>/);
+  assert.doesNotMatch(hidden, /Atlas-monorepo/);
+  assert.match(hidden, /class="cli sm codex" title="codex"><img src="\/icons\/codex\.svg" alt="codex"/);
+
+  const shown = cardHtmlFor({ project: 'Atlas', repo: 'company/atlas-service', title: 'Deploy API' });
+  assert.match(shown, /<span class="card-title">Deploy API<\/span>/);
+  assert.match(shown, /<span class="project">Atlas<\/span><span class="repo" title="company\/atlas-service">company\/atlas-service<\/span>/);
+  assert.doesNotMatch(shown, /branch|dirty/);
+});
+
+test('card title and meta fit long English and CJK text', () => {
   const ui = dashboard();
   const project = 'sample專案'.repeat(12);
   const title = 'tmux工作流'.repeat(11);
@@ -2862,21 +2877,26 @@ test('session names wrap long English and CJK text independently', () => {
   const a = handoffAgent(project, [], { title, preview: { users: [prompt], agent: '' } });
   ui.render({ agents: [a] });
   const cards = ui.elements.get('list').innerHTML;
-  assert.ok(cards.includes(`<span class="project">${project}</span><span class="session-context">${title}</span>`));
+  assert.ok(cards.includes(`<span class="card-title">${title}</span><div class="card-meta"><div class="env">`));
+  assert.ok(cards.includes(`<span class="project">${project}</span>`));
   assert.equal((cards.replace(/aria-label="[^"]*"/g, '').match(/我貼了 latest prompt/g) || []).length, 1);
-  assert.ok(cards.includes(`aria-label="開啟 ${project} · ${prompt}"`));
+  assert.ok(cards.includes(`aria-label="開啟 ${title}"`));
   ui.render({ agents: [{ ...a, title: '' }] });
   const promptCard = ui.elements.get('list').innerHTML;
-  assert.doesNotMatch(promptCard, /class="session-context"/);
+  assert.ok(promptCard.includes(`<span class="card-title">${project}</span>`));
   assert.equal((promptCard.replace(/aria-label="[^"]*"/g, '').match(/我貼了 latest prompt/g) || []).length, 1);
   assert.match(ui.context.sessionTitle({ ...a, title: '' }), /我貼了 latest prompt/);
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   assert.match(html, /\.title \{[^}]*flex: 1;[^}]*min-width: 0;/);
   assert.match(html, /\.session-heading \{[^}]*flex: 1;[^}]*min-width: 0;/);
   assert.match(html, /\.project \{[^}]*overflow-wrap: anywhere;/);
-  assert.match(html, /\.session-context \{[^}]*font-weight: 400;[^}]*overflow-wrap: anywhere;/);
+  assert.match(html, /\.card-title \{[^}]*-webkit-line-clamp: 2;[^}]*overflow-wrap: anywhere;/);
+  assert.match(html, /\.card\.review\.unread \.card-title,[\s\S]*?\.card\.running \.card-title \{[^}]*color: var\(--fg\);[^}]*font-weight: 600;/);
+  assert.match(html, /\.card-title \{[^}]*font-weight: 500;/);
   assert.match(html, /\.row1-side \.session-flags \{/);
   assert.match(html, /\.env > span \+ span::before/);
+  assert.match(html, /\.env > \.cli::before, \.env > \.cli \+ span::before \{ content: none; \}/, 'a separator pseudo inside the 14px icon box squeezes the img');
+  assert.match(html, /\.env \.model \{[^}]*flex: 0 0 auto;/, 'model must not be truncated before project/repo');
   assert.doesNotMatch(html, /decision-inbox|行動收件匣|workstream-form|工作流標籤|\.inbox\b/);
 });
 
@@ -2925,7 +2945,7 @@ test('sheet and reader show the same card title identity', () => {
   assert.match(ui.elements.get('sheet-env').innerHTML, /class="dirty">dirty</);
   const cards = ui.elements.get('list').innerHTML;
   assert.doesNotMatch(cards, /class="branch"|class="dirty"/);
-  assert.match(cards, /class="repo">sample-agent-project</);
+  assert.doesNotMatch(cards, /sample-agent-project/);
   ui.context.showReader(a, { role: 'agent', host: 'alpha', pane: '%1', pid: '9', index: 0 });
   assert.equal(ui.elements.get('reader-title').textContent, 'Agent 回覆');
   assert.equal(ui.elements.get('reader-sub').textContent, 'sample · Sample 專案列表與內頁模組 · main · dirty');
@@ -2945,10 +2965,10 @@ test('session titles bound and escape task hints and titles while keeping projec
   const a = handoffAgent('Atlas', [], { preview: { users: [hostile] } });
   assert.ok(ui.context.sessionTitle(a).length <= a.project.length + 59);
   ui.render({ agents: [a] });
-  assert.match(ui.elements.get('list').innerHTML, /class="project">Atlas<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="card-title">Atlas<\/span>/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /<script>/);
   ui.render({ agents: [{ ...a, title: '<manual>' }] });
-  assert.match(ui.elements.get('list').innerHTML, /class="project">Atlas<\/span><span class="session-context">&lt;manual&gt;<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="card-title">&lt;manual&gt;<\/span>/);
   ui.render({ agents: [{ ...a, project: '<project>"&', title: '<manual>' }] });
-  assert.match(ui.elements.get('list').innerHTML, /class="project">&lt;project&gt;&quot;&amp;<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="card-title">&lt;manual&gt;<\/span>[\s\S]*?<span class="project">&lt;project&gt;&quot;&amp;<\/span>/);
 });
