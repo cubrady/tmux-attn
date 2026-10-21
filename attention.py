@@ -1953,8 +1953,13 @@ def event_command(agent, event):
         print('{}')
 
 
+def tmux_index(value):
+    """tmux's window/pane position as an int (base-index may be 0 or 1); None when unknown."""
+    return int(value) if str(value).isdecimal() else None
+
+
 def live_panes(sock=None):
-    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}\t#{pane_current_command}\t#{@tmux_attn_view_revision}\t#{pane_title}'
+    fmt = '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_current_path}\t#{?@tmux_attn_sidebar,1,0}\t#{window_id}\t#{pane_current_command}\t#{@tmux_attn_view_revision}\t#{window_index}\t#{pane_index}\t#{pane_title}'
     result = {}
     for line in tmux('list-panes', '-a', '-F', fmt, check=False, sock=sock).splitlines():
         parts = line.split('\t')
@@ -1963,7 +1968,9 @@ def live_panes(sock=None):
                 pane=parts[0], pid=parts[1], session=parts[2], window=clean(parts[3]),
                 path=parts[4], window_id=parts[6], command=clean(parts[7] if len(parts) > 7 else ''),
                 view_revision=parts[8] if len(parts) > 8 else '',
-                pane_title=clean(parts[9]) if len(parts) > 9 else '',
+                window_index=tmux_index(parts[9] if len(parts) > 9 else ''),
+                pane_index=tmux_index(parts[10] if len(parts) > 10 else ''),
+                pane_title=clean('\t'.join(parts[11:])),
             )
     return result
 
@@ -3063,6 +3070,8 @@ def agents_payload(con, sock=None, live=None, now=None):
             'session': row['session'],
             'window': row['window'],
             'window_id': row.get('window_id', ''),
+            'window_index': row.get('window_index'),
+            'pane_index': row.get('pane_index'),
             'agent': row['agent'],
             'cli': cli_label(row['agent']),
             'model': model,
@@ -3106,6 +3115,8 @@ def agents_payload(con, sock=None, live=None, now=None):
             'session': meta['session'],
             'window': meta['window'],
             'window_id': meta.get('window_id', ''),
+            'window_index': meta.get('window_index'),
+            'pane_index': meta.get('pane_index'),
             'agent': '',
             'cli': cli,
             'model': '',

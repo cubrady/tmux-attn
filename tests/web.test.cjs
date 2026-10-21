@@ -2869,6 +2869,20 @@ test('card meta hides redundant repos and shows distinct repos with a safe small
   assert.doesNotMatch(shown, /branch|dirty/);
 });
 
+test('card meta shows the tmux session:window.pane position', () => {
+  const at = cardHtmlFor({ project: 'Atlas', title: 'Deploy API', session: 'work', window_index: 3, pane_index: 1 });
+  assert.match(at, /<span class="loc" title="tmux work:3\.1">work:3\.1<\/span><\/div>/);
+  const zero = cardHtmlFor({ project: 'Atlas', session: 'work', window_index: 0, pane_index: 0 });
+  assert.match(zero, /<span class="loc" title="tmux work:0\.0">work:0\.0<\/span>/, 'index 0 is a real position');
+  const long = cardHtmlFor({ project: 'Atlas', session: 'a-very-long-session-name', window_index: 12, pane_index: 2 });
+  assert.match(long, /class="loc" title="tmux a-very-long-session-name:12\.2">a-very-long-s…:12\.2</);
+  const hostile = cardHtmlFor({ project: 'Atlas', session: '<b>"x"', window_index: 1, pane_index: 0 });
+  assert.doesNotMatch(hostile, /<b>/);
+  for (const stale of [{}, { window_index: null, pane_index: null }, { window_index: '2', pane_index: '1' }]) {
+    assert.doesNotMatch(cardHtmlFor({ project: 'Atlas', session: 'work', ...stale }), /class="loc"/, 'older peers send no position');
+  }
+});
+
 test('card title and meta fit long English and CJK text', () => {
   const ui = dashboard();
   const project = 'sample專案'.repeat(12);
