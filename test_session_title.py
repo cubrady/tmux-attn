@@ -35,7 +35,7 @@ class PaneTitleTest(unittest.TestCase):
 
 class LivePanesTitleTest(unittest.TestCase):
     def test_live_panes_reads_pane_title(self):
-        line = '\t'.join(['%1', '10', 's', 'w', '/p', '0', '@1', 'codex', '', '✳ 標題'])
+        line = '\t'.join(['%1', '10', 's', 'w', '/p', '0', '@1', 'codex', '', '2', '1', '✳ 標題'])
         a_tmux = a.tmux
         a.tmux = lambda *args, **kw: line
         try:
@@ -43,6 +43,7 @@ class LivePanesTitleTest(unittest.TestCase):
         finally:
             a.tmux = a_tmux
         self.assertEqual(live[('%1', '10')]['pane_title'], '✳ 標題')
+        self.assertEqual((live[('%1', '10')]['window_index'], live[('%1', '10')]['pane_index']), (2, 1))
 
 
 if __name__ == '__main__':

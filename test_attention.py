@@ -215,6 +215,30 @@ class StoreTests(unittest.TestCase):
             payload = a.agents_payload(self.con, 'socket', now=time.time() + 3)
         self.assertEqual(payload['agents'][0]['project'], 'sonice-roven-ai')
 
+    def test_live_panes_reports_tmux_window_and_pane_index(self):
+        def line(pane, index, title):
+            return '\t'.join([pane, '1', 'work', 'zsh', '/proj/demo', '0', '@7', 'claude', '', index, title])
+        out = '\n'.join([line('%1', '3\t1', 'a title'), line('%2', 'x\t', '')])
+        with patch.object(a, 'tmux', return_value=out):
+            live = a.live_panes('sock')
+        self.assertEqual((live[('%1', '1')]['window_index'], live[('%1', '1')]['pane_index']), (3, 1))
+        self.assertEqual(live[('%1', '1')]['pane_title'], 'a title')
+        self.assertEqual((live[('%2', '1')]['window_index'], live[('%2', '1')]['pane_index']), (None, None))
+
+    def test_web_payload_carries_tmux_position_for_tracked_and_untracked_panes(self):
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Finished', True)
+        live = {
+            ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1',
+                            'window_index': 4, 'pane_index': 2, 'path': '/proj/demo'},
+            ('%2', '456'): {'pane': '%2', 'pid': '456', 'session': 'work', 'window': 'two', 'window_id': '@2',
+                            'window_index': 0, 'pane_index': 0, 'path': '/proj/other', 'command': 'zsh'},
+        }
+        with patch.object(a, 'live_panes', return_value=live):
+            payload = a.agents_payload(self.con, 'socket', now=time.time() + 3)
+        by_pane = {row['pane']: row for row in payload['agents']}
+        self.assertEqual((by_pane['%1']['window_index'], by_pane['%1']['pane_index']), (4, 2))
+        self.assertEqual((by_pane['%2']['window_index'], by_pane['%2']['pane_index']), (0, 0))
+
     def test_child_codex_hooks_cannot_change_root_state_or_transcript(self):
         root = Path(self.tmp.name)/'root.jsonl'
         child = Path(self.tmp.name)/'child.jsonl'

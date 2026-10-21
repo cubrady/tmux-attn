@@ -656,6 +656,7 @@
     .env > .cli { margin-right: 0.5em; }
     .env > .cli::before, .env > .cli + span::before { content: none; }
     .env .model { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
+    .env .loc { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
     .env .branch { color: var(--muted); }
     .env .dirty {
       color: var(--wait);
@@ -2298,6 +2299,14 @@
       if (text.length <= limit) return text;
       return text.slice(0, Math.max(0, limit - 1)) + '…';
     }
+    // Where the pane sits in tmux, as the target tmux itself takes: session:window.pane (indexes as the status bar shows them).
+    function paneLocation(a) {
+      if (!Number.isInteger(a.window_index) || !Number.isInteger(a.pane_index)) return null;
+      const session = clipText(a.session, 80);
+      const short = session.length > 14 ? session.slice(0, 13) + '…' : session;
+      const target = `${session}:${a.window_index}.${a.pane_index}`;
+      return { text: `${short}${session ? ':' : ''}${a.window_index}.${a.pane_index}`, title: `tmux ${target}` };
+    }
     function envLineHtml(a) {
       const project = projectName(a);
       const repo = a.repo || '';
@@ -2307,6 +2316,8 @@
       if (sessionLabel(a) && project) parts.push(`<span class="project">${escapeHtml(project)}</span>`);
       if (showRepo) parts.push(`<span class="repo" title="${escapeHtml(repo)}">${escapeHtml(repo)}</span>`);
       if (a.model_label) parts.push(`<span class="model">${escapeHtml(a.model_label)}</span>`);
+      const loc = paneLocation(a);
+      if (loc) parts.push(`<span class="loc" title="${escapeHtml(loc.title)}">${escapeHtml(loc.text)}</span>`);
       return parts.length ? `<div class="env">${parts.join('')}</div>` : '';
     }
     let sheetPathOpen = false;

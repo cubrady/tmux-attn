@@ -53,6 +53,8 @@ Session 分組、主機篩選與計數照常使用。
 Session 卡片名稱顯示「專案」與 agent 自訂標題（若有）；開啟時的 aria 名稱可附帶任務提示：
 從最近三則使用者訊息中取有內容的短原文，略過 status check、continue、進度詢問等泛用訊息，
 再以回覆原文補足，最多 56 字元，不推測語意主題。沒有可用內容時不捏造任務名稱。
+卡片資訊列最右顯示該 pane 在 tmux 裡的位置 `session:window.pane`（例如 `work:2.1`），
+window 編號與 tmux 底列一致，也就是 `tmux select-pane -t` 吃的 target；游標停在上面會看到完整 session 名稱。
 
 更新既有安裝時可執行 `tmux-attn install-view-hooks` 補上一般切換的確認 hooks；
 它會備份並保留既有 tmux 設定。Web 約每 10 秒同步 tmux 的已看狀態。
