@@ -482,7 +482,11 @@
       cursor: pointer;
     }
     .card.shell { cursor: default; }
-    /* The whole card is one button; the trash sits above it so the two never nest. */
+    /* The whole card is one button; the trash sits above it so the two never nest.
+       The button does not take pointer events: otherwise it covers the window-number
+       tooltip (and the host and repo titles). Clicks pass through to the card and
+       still bubble to the list. Preview links stay inert so an agent-written URL
+       cannot navigate the dashboard. The button stays in tab order. */
     .card-open {
       position: absolute;
       inset: 0;
@@ -493,8 +497,10 @@
       border-radius: inherit;
       background: transparent;
       cursor: pointer;
+      pointer-events: none;
       -webkit-tap-highlight-color: transparent;
     }
+    .card .preview a { pointer-events: none; }
     .card-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
     @media (prefers-reduced-motion: no-preference) {
       .card { transition: border-color 160ms var(--ease), background 160ms var(--ease), transform 140ms var(--ease); }
@@ -684,7 +690,15 @@
     .sheet-host { margin-bottom: 4px; }
     .sheet-host[hidden] { display: none; }
     .env .model { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
-    .env .loc { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
+    .env .loc {
+      flex: 0 0 auto;
+      padding: 0 5px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--line) 45%, transparent);
+      white-space: nowrap;
+    }
     .env .branch { color: var(--muted); }
     .env .dirty {
       color: var(--wait);
@@ -2340,13 +2354,16 @@
       if (text.length <= limit) return text;
       return text.slice(0, Math.max(0, limit - 1)) + '…';
     }
-    // Where the pane sits in tmux, as the target tmux itself takes: session:window.pane (indexes as the status bar shows them).
+    // The card shows the tmux window index, the same number as the status bar.
+    // A split pane (index > 0) keeps its .pane so two cards in one window stay distinct.
+    // The select-pane target stays on the tooltip, and again in the reply sheet.
     function paneLocation(a) {
-      if (!Number.isInteger(a.window_index) || !Number.isInteger(a.pane_index)) return null;
+      if (!Number.isInteger(a.window_index)) return null;
       const session = clipText(a.session, 80);
-      const short = session.length > 14 ? session.slice(0, 13) + '…' : session;
-      const target = `${session}:${a.window_index}.${a.pane_index}`;
-      return { text: `${short}${session ? ':' : ''}${a.window_index}.${a.pane_index}`, title: `tmux ${target}` };
+      const hasPane = Number.isInteger(a.pane_index);
+      const target = `${session}${session ? ':' : ''}${a.window_index}${hasPane ? `.${a.pane_index}` : ''}`;
+      const text = hasPane && a.pane_index > 0 ? `${a.window_index}.${a.pane_index}` : String(a.window_index);
+      return { text, target, title: `tmux ${target}` };
     }
     function envLineHtml(a) {
       const project = projectName(a);
@@ -2367,6 +2384,8 @@
     // One compact row; the path is behind a toggle because the card already says which project this is.
     function sheetEnvHtml(a) {
       const bits = [];
+      const loc = paneLocation(a);
+      if (loc) bits.push(`<span class="loc" title="${escapeHtml(loc.title)}">${escapeHtml(loc.target)}</span>`);
       if (a.branch) bits.push(`<span class="branch">${escapeHtml(a.branch)}</span>`);
       if (a.dirty) bits.push('<span class="dirty">dirty</span>');
       if (a.model) bits.push(`<span class="model">${escapeHtml(a.model)}</span>`);
