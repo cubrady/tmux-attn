@@ -2869,6 +2869,53 @@ test('card meta hides redundant repos and shows distinct repos with a safe small
   assert.doesNotMatch(shown, /branch|dirty/);
 });
 
+test('two or more hosts label each card and the reply sheet, including while filtered', () => {
+  const ui = dashboard();
+  const long = 'a-very-long-host-name';
+  const hostile = '<b>"x"';
+  const hosts = [
+    { name: 'workstation', ok: true },
+    { name: 'client-2', ok: true },
+  ];
+  const brian = { ...agent('workstation', 'WAIT'), cli: 'codex', project: 'sampleapp', title: 'Fix login', pane: '%1', pid: '1' };
+  const cicd = { ...agent('client-2', 'RUNNING'), cli: 'claude', project: 'sampleapp', title: 'Fix login', pane: '%2', pid: '2' };
+  const weird = { ...agent(hostile, 'IDLE', true, true), project: 'other', pane: '%3', pid: '3' };
+  const wide = { ...agent(long, 'IDLE', true, true), project: 'wide', pane: '%4', pid: '4' };
+  ui.render({ hosts, agents: [brian, cicd, weird, wide] });
+  const list = ui.elements.get('list').innerHTML;
+  const tone = ui.context.hostTone('workstation');
+  assert.match(list, new RegExp(`<div class="env"><span class="host-chip tone-${tone}" title="workstation">workstation</span><span class="cli sm codex"`));
+  assert.match(ui.elements.get('hosts').innerHTML, new RegExp(`host-pill tone-${tone}`));
+  assert.match(list, /title="client-2">client-2<\/span>/);
+  assert.match(list, /aria-label="開啟 Fix login，workstation"/);
+  assert.match(list, /title="&lt;b&gt;&quot;x&quot;">&lt;b&gt;&quot;x&quot;</);
+  assert.doesNotMatch(list, /<b>/);
+  const clipped = long.slice(0, 15) + '…';
+  assert.match(list, new RegExp(`title="${long}">${clipped}</span>`));
+  ui.open(brian);
+  const sheetHost = ui.elements.get('sheet-host');
+  assert.equal(sheetHost.hidden, false);
+  assert.match(sheetHost.innerHTML, new RegExp(`class="host-chip tone-${tone}" title="workstation">workstation`));
+  ui.elements.get('hosts').listeners.click({
+    target: { closest: () => ({ dataset: { host: 'workstation' } }) },
+  });
+  const filtered = ui.elements.get('list').innerHTML;
+  assert.match(filtered, /title="workstation">workstation/);
+  assert.doesNotMatch(filtered, /client-2/);
+});
+
+test('a single host leaves cards and the reply sheet unlabeled', () => {
+  const ui = dashboard();
+  const current = { ...agent('only', 'WAIT'), cli: 'codex', project: 'sampleapp', title: 'Fix login' };
+  ui.render({ hosts: [{ name: 'only', ok: true }], agents: [current] });
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /host-chip/);
+  assert.match(ui.elements.get('list').innerHTML, /aria-label="開啟 Fix login"/);
+  ui.open(current);
+  const sheetHost = ui.elements.get('sheet-host');
+  assert.equal(sheetHost.hidden, true);
+  assert.equal(sheetHost.innerHTML, '');
+});
+
 test('card meta shows the tmux session:window.pane position', () => {
   const at = cardHtmlFor({ project: 'Atlas', title: 'Deploy API', session: 'work', window_index: 3, pane_index: 1 });
   assert.match(at, /<span class="loc" title="tmux work:3\.1">work:3\.1<\/span><\/div>/);
