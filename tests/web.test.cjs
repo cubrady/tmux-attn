@@ -2918,17 +2918,32 @@ test('a single host leaves cards and the reply sheet unlabeled', () => {
 
 test('card meta shows the tmux window index', () => {
   const at = cardHtmlFor({ project: 'Atlas', title: 'Deploy API', session: 'work', window_index: 3, pane_index: 1 });
-  assert.match(at, /<span class="loc" title="tmux work:3\.1">3<\/span><\/div>/);
+  assert.match(at, /<span class="loc" title="tmux work:3\.1">3\.1<\/span><\/div>/, 'a split pane keeps its pane index');
   const zero = cardHtmlFor({ project: 'Atlas', session: 'work', window_index: 0, pane_index: 0 });
-  assert.match(zero, /<span class="loc" title="tmux work:0\.0">0<\/span>/, 'index 0 is a real position');
+  assert.match(zero, /<span class="loc" title="tmux work:0\.0">0<\/span>/, 'index 0 is a real position and the first pane stays a window number');
   const long = cardHtmlFor({ project: 'Atlas', session: 'a-very-long-session-name', window_index: 12, pane_index: 2 });
-  assert.match(long, /class="loc" title="tmux a-very-long-session-name:12\.2">12</);
+  assert.match(long, /class="loc" title="tmux a-very-long-session-name:12\.2">12\.2</);
   const hostile = cardHtmlFor({ project: 'Atlas', session: '<b>"x"', window_index: 1, pane_index: 0 });
   assert.match(hostile, /class="loc" title="tmux &lt;b&gt;&quot;x&quot;:1\.0">1</);
   assert.doesNotMatch(hostile, /<b>/);
+  const noPane = cardHtmlFor({ project: 'Atlas', session: 'work', window_index: 4 });
+  assert.match(noPane, /class="loc" title="tmux work:4">4</, 'a missing pane index is left off the target');
+  const noSession = cardHtmlFor({ project: 'Atlas', window_index: 4, pane_index: 0 });
+  assert.match(noSession, /class="loc" title="tmux 4\.0">4</, 'an empty session has no colon');
   for (const stale of [{}, { window_index: null, pane_index: null }, { window_index: '2', pane_index: '1' }]) {
     assert.doesNotMatch(cardHtmlFor({ project: 'Atlas', session: 'work', ...stale }), /class="loc"/, 'older peers send no position');
   }
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /\.card-open \{[^}]*pointer-events: none/,
+    'the card-wide open button must not eat the window-number tooltip');
+  assert.match(html, /\.card \.preview a \{[^}]*pointer-events: none/,
+    'preview links stay inert once the open button lets pointer events through');
+  const ui = dashboard();
+  const split = { ...agent('lab', 'WAIT'), project: 'Atlas', session: 'work', window_index: 3, pane_index: 1, branch: 'main' };
+  ui.render({ agents: [split] });
+  ui.open(split);
+  assert.match(ui.elements.get('sheet-env').innerHTML, /class="loc" title="tmux work:3\.1">work:3\.1</,
+    'the reply sheet shows the select-pane target without hover');
 });
 
 test('card title and meta fit long English and CJK text', () => {
