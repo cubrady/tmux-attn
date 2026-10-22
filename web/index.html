@@ -2340,13 +2340,14 @@
       if (text.length <= limit) return text;
       return text.slice(0, Math.max(0, limit - 1)) + '…';
     }
-    // Where the pane sits in tmux, as the target tmux itself takes: session:window.pane (indexes as the status bar shows them).
+    // The card shows the tmux window index, the same number as the status bar.
+    // Session name and pane index stay on the tooltip as the select-pane target.
     function paneLocation(a) {
-      if (!Number.isInteger(a.window_index) || !Number.isInteger(a.pane_index)) return null;
+      if (!Number.isInteger(a.window_index)) return null;
       const session = clipText(a.session, 80);
-      const short = session.length > 14 ? session.slice(0, 13) + '…' : session;
-      const target = `${session}:${a.window_index}.${a.pane_index}`;
-      return { text: `${short}${session ? ':' : ''}${a.window_index}.${a.pane_index}`, title: `tmux ${target}` };
+      const pane = Number.isInteger(a.pane_index) ? `.${a.pane_index}` : '';
+      const target = `${session}${session ? ':' : ''}${a.window_index}${pane}`;
+      return { text: String(a.window_index), title: `tmux ${target}` };
     }
     function envLineHtml(a) {
       const project = projectName(a);

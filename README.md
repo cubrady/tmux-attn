@@ -53,8 +53,8 @@ Session 分組、主機篩選與計數照常使用。
 Session 卡片名稱顯示「專案」與 agent 自訂標題（若有）；開啟時的 aria 名稱可附帶任務提示：
 從最近三則使用者訊息中取有內容的短原文，略過 status check、continue、進度詢問等泛用訊息，
 再以回覆原文補足，最多 56 字元，不推測語意主題。沒有可用內容時不捏造任務名稱。
-卡片資訊列最右顯示該 pane 在 tmux 裡的位置 `session:window.pane`（例如 `work:2.1`），
-window 編號與 tmux 底列一致，也就是 `tmux select-pane -t` 吃的 target；游標停在上面會看到完整 session 名稱。
+卡片資訊列最右只顯示 tmux window 編號，與底列一致（例如 `7`）。
+游標停在上面會看到完整 target `session:window.pane`，也就是 `tmux select-pane -t` 用的地址。
 兩台以上時，資訊列最前面用與頁首相同顏色的機器膠囊標出 session 所在主機，回覆面板標題區也顯示同一顆；
 名稱超過 16 字會截斷，游標可看全名。只有一台機器時不顯示。篩選仍只用頁首膠囊。
 
