@@ -310,14 +310,14 @@
       --host-bd: var(--line);
       font-weight: 500;
     }
-    .host-pill.tone-0 { --host-fg: #0f766e; --host-bg: #ccfbf1; --host-bd: #5eead4; }
-    .host-pill.tone-1 { --host-fg: #b45309; --host-bg: #ffedd5; --host-bd: #fdba74; }
-    .host-pill.tone-2 { --host-fg: #1d4ed8; --host-bg: #dbeafe; --host-bd: #93c5fd; }
-    .host-pill.tone-3 { --host-fg: #be123c; --host-bg: #ffe4e6; --host-bd: #fda4af; }
-    .host-pill.tone-4 { --host-fg: #3f6212; --host-bg: #ecfccb; --host-bd: #bef264; }
-    .host-pill.tone-5 { --host-fg: #0e7490; --host-bg: #cffafe; --host-bd: #67e8f9; }
-    .host-pill.tone-6 { --host-fg: #a16207; --host-bg: #fef9c3; --host-bd: #fde047; }
-    .host-pill.tone-7 { --host-fg: #9a3412; --host-bg: #ffedd5; --host-bd: #fb923c; }
+    .host-pill.tone-0, .host-chip.tone-0 { --host-fg: #0f766e; --host-bg: #ccfbf1; --host-bd: #5eead4; }
+    .host-pill.tone-1, .host-chip.tone-1 { --host-fg: #b45309; --host-bg: #ffedd5; --host-bd: #fdba74; }
+    .host-pill.tone-2, .host-chip.tone-2 { --host-fg: #1d4ed8; --host-bg: #dbeafe; --host-bd: #93c5fd; }
+    .host-pill.tone-3, .host-chip.tone-3 { --host-fg: #be123c; --host-bg: #ffe4e6; --host-bd: #fda4af; }
+    .host-pill.tone-4, .host-chip.tone-4 { --host-fg: #3f6212; --host-bg: #ecfccb; --host-bd: #bef264; }
+    .host-pill.tone-5, .host-chip.tone-5 { --host-fg: #0e7490; --host-bg: #cffafe; --host-bd: #67e8f9; }
+    .host-pill.tone-6, .host-chip.tone-6 { --host-fg: #a16207; --host-bg: #fef9c3; --host-bd: #fde047; }
+    .host-pill.tone-7, .host-chip.tone-7 { --host-fg: #9a3412; --host-bg: #ffedd5; --host-bd: #fb923c; }
     .host-pill.bad {
       opacity: 0.72;
       text-decoration: line-through;
@@ -375,14 +375,14 @@
       margin-left: 0.15em;
     }
     @media (prefers-color-scheme: dark) {
-      .host-pill.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
-      .host-pill.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
-      .host-pill.tone-2 { --host-fg: #93c5fd; --host-bg: #172554; --host-bd: #1d4ed8; }
-      .host-pill.tone-3 { --host-fg: #fda4af; --host-bg: #4c0519; --host-bd: #be123c; }
-      .host-pill.tone-4 { --host-fg: #bef264; --host-bg: #1a2e05; --host-bd: #4d7c0f; }
-      .host-pill.tone-5 { --host-fg: #67e8f9; --host-bg: #083344; --host-bd: #0e7490; }
-      .host-pill.tone-6 { --host-fg: #fde047; --host-bg: #422006; --host-bd: #a16207; }
-      .host-pill.tone-7 { --host-fg: #fb923c; --host-bg: #431407; --host-bd: #c2410c; }
+      .host-pill.tone-0, .host-chip.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
+      .host-pill.tone-1, .host-chip.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
+      .host-pill.tone-2, .host-chip.tone-2 { --host-fg: #93c5fd; --host-bg: #172554; --host-bd: #1d4ed8; }
+      .host-pill.tone-3, .host-chip.tone-3 { --host-fg: #fda4af; --host-bg: #4c0519; --host-bd: #be123c; }
+      .host-pill.tone-4, .host-chip.tone-4 { --host-fg: #bef264; --host-bg: #1a2e05; --host-bd: #4d7c0f; }
+      .host-pill.tone-5, .host-chip.tone-5 { --host-fg: #67e8f9; --host-bg: #083344; --host-bd: #0e7490; }
+      .host-pill.tone-6, .host-chip.tone-6 { --host-fg: #fde047; --host-bg: #422006; --host-bd: #a16207; }
+      .host-pill.tone-7, .host-chip.tone-7 { --host-fg: #fb923c; --host-bg: #431407; --host-bd: #c2410c; }
     }
     main.list {
       display: flex;
@@ -655,6 +655,34 @@
     /* The agent icon leads the row like a bullet; a "·" pseudo inside its 14px flex box would squeeze the img. */
     .env > .cli { margin-right: 0.5em; }
     .env > .cli::before, .env > .cli + span::before { content: none; }
+    /* Machine identity leads the row so a nowrap clip cannot hide it. A label, not a filter. */
+    .host-chip {
+      display: inline-flex;
+      align-items: center;
+      flex: 0 0 auto;
+      max-width: none;
+      overflow: visible;
+      text-overflow: clip;
+      padding: 0 6px;
+      border-radius: 6px;
+      border: 1px solid var(--host-bd, var(--line));
+      color: var(--host-fg, var(--muted));
+      background: var(--host-bg, var(--bg-elevated));
+      font-weight: 600;
+      line-height: 1.45;
+      white-space: nowrap;
+    }
+    .env > .host-chip {
+      display: inline-flex;
+      flex: 0 0 auto;
+      max-width: none;
+      overflow: visible;
+      text-overflow: clip;
+      margin-right: 0.45em;
+    }
+    .env > .host-chip + span::before { content: none; }
+    .sheet-host { margin-bottom: 4px; }
+    .sheet-host[hidden] { display: none; }
     .env .model { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
     .env .loc { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
     .env .branch { color: var(--muted); }
@@ -1750,6 +1778,7 @@
         <div class="sheet-top">
           <span class="sheet-cli" id="sheet-cli"></span>
           <div class="sheet-heading">
+            <div class="sheet-host" id="sheet-host" hidden></div>
             <h2 class="sheet-title" id="sheet-title">回覆</h2>
             <div class="sheet-context" id="sheet-context" hidden></div>
             <div class="sheet-meta">
@@ -1985,6 +2014,18 @@
     }
     function agentHostName(a) {
       return a.host || latestHosts.find(h => h.source === 'local')?.name || 'local';
+    }
+    // One machine needs no label. Two or more: every card names its machine, even while a filter is on.
+    function showHostChips() {
+      return latestHosts.length > 1;
+    }
+    const HOST_CHIP_LIMIT = 16;
+    function hostChipHtml(agent) {
+      if (!showHostChips()) return '';
+      const name = agentHostName(agent);
+      if (!name) return '';
+      const label = name.length > HOST_CHIP_LIMIT ? name.slice(0, HOST_CHIP_LIMIT - 1) + '…' : name;
+      return `<span class="host-chip tone-${hostTone(name)}" title="${escapeHtml(name)}">${escapeHtml(label)}</span>`;
     }
     function visibleAgents() {
       if (!hostFilters.size) return latestAgents;
@@ -2312,6 +2353,8 @@
       const repo = a.repo || '';
       const showRepo = repo && repo !== project && !repo.startsWith(project);
       const parts = [];
+      const hostChip = hostChipHtml(a);
+      if (hostChip) parts.push(hostChip);
       if (a.cli || a.agent) parts.push(cliBadge(a.cli || a.agent, true));
       if (sessionLabel(a) && project) parts.push(`<span class="project">${escapeHtml(project)}</span>`);
       if (showRepo) parts.push(`<span class="repo" title="${escapeHtml(repo)}">${escapeHtml(repo)}</span>`);
@@ -2351,6 +2394,8 @@
       const sentTag = sentRecently(key) && cat !== 'running' ? '<span class="sent-tag">已送出</span>' : '';
       const label = sessionLabel(a);
       const name = label || projectName(a);
+      const machine = showHostChips() ? agentHostName(a) : '';
+      const openLabel = machine ? `開啟 ${name}，${machine}` : `開啟 ${name}`;
       const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
       const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
       const killNote = killState.key === key && killState.note
@@ -2360,7 +2405,7 @@
       const statusMark = cat === 'running' && a.background_wait
         ? `<span class="emoji" aria-hidden="true">⏳</span>` : '';
       return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}${killClass}${laterClass}" data-key="${escapeHtml(key)}">
-        ${a.tracked ? `<button type="button" class="card-open" aria-label="開啟 ${escapeHtml(name)}"></button>` : ''}
+        ${a.tracked ? `<button type="button" class="card-open" aria-label="${escapeHtml(openLabel)}"></button>` : ''}
         <div class="row1">
           <div class="title">
             ${statusMark}
@@ -2829,6 +2874,10 @@
       const { emoji, reason } = attentionDisplay(agent);
       const { name, context } = cardIdentity(agent);
       document.getElementById('sheet-title').textContent = `${emoji} ${name}`.trim();
+      const hostEl = document.getElementById('sheet-host');
+      const hostChip = hostChipHtml(agent);
+      hostEl.innerHTML = hostChip;
+      hostEl.hidden = !hostChip;
       const ctx = document.getElementById('sheet-context');
       ctx.textContent = context;
       ctx.hidden = !context;
