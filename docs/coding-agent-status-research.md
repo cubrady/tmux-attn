@@ -7,7 +7,7 @@
 | DB `state` | UI | 意義 |
 | --- | --- | --- |
 | `WAIT` | 🙋 | 需要人核准或作答 |
-| `RUNNING` | 🏃 / ⏳ | 工作中；⏳ = 明確在等背景 subagent |
+| `RUNNING` | 🏃 / ⏳ | 工作中；⏳ = 明確在等背景 subagent，或本輪 shell 經畫面、task 與程序交叉確認仍在執行 |
 | `IDLE` + `needs_review` | 👀 | 回合結束，建議回看 |
 | `IDLE` | 💤 | 已登記 / 等待下一題 / 乾淨結束 |
 
@@ -68,3 +68,31 @@
 2. Hooks 為主、observer 為輔；observer 不覆蓋剛寫入的 hook WAIT。
 3. Codex child/subagent transcript hooks 不覆寫父 pane。
 4. Soft `?` 維持 👀，硬 WAIT 只來自 permission / elicitation / ui_prompt / ask tools。
+
+## Claude 背景 shells（2026-10-22）
+
+`Stop` 表示主回合停下；單獨的 `background_tasks` 或歷史訊息中的
+`4 shells still running` 不足以把狀態改成 ⏳。Observer 現在要求三項證據：
+
+1. 目前輸入提示下方的原生狀態列顯示 `N shell(s)`。
+2. 該 pane 的唯一原生 Claude 程序，確實有直接子 shell，且 wrapper 中的
+   command 與 transcript 的 Bash 背景任務相符。
+3. 在可辨識的本輪使用者輸入之後，有背景 task ID 尚未收到完成、失敗或取消通知。
+
+滿足時保留 `RUNNING`，使用既有的 `background_wait`／⏳；一般前景 spinner
+仍顯示 🏃，原生 WAIT 與核准／回答畫面優先。新使用者輸入會切斷舊回合的任務關聯；
+任務終止、程序消失或目前狀態列不再顯示 shells，完成畫面便回到 IDLE／待回看。
+MCP 常駐程序、其他 session 的任務與舊回合的輪詢不計入。
+
+Transcript 每次最多讀取尾端 2 MiB；持續觀測時以檔案身分、大小和修改時間快取，
+增量讀取保留 task ID 與未完整寫入的最後一行，最多快取 32 份 transcript。
+冷啟動或資料缺口使本輪身分無法確認時，維持原本完成畫面的判定，不猜測。
+若 hook 綁定的 transcript 尚不存在，只允許使用該原生 shell wrapper 明確攜帶的
+唯一 companion session ID 找到同目錄檔案，禁止選取同專案「最新」檔案代替。
+
+只讀取同 session、同 task ID 的 `.output` 最後 8 KiB。輸出含錯誤時顯示檢查提示；
+任務啟動與最後輸出都超過一小時時，提示「可能卡住，請檢查進度」。兩者都不宣告
+任務失敗、不發出核准請求，也不終止程序。閾值是排查提示，並非執行期限。
+
+回歸測試見 `test_claude_background.py`：本輪模擬、舊回合與常駐程序、完成／失敗通知、
+恢復後的 session 身分、增量與截斷 transcript、輸出警示，以及 WAIT／前景優先順序。
