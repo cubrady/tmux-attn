@@ -2,6 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 import fcntl
+from collections import Counter, OrderedDict
 from contextlib import closing
 import json
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 import signal
+import shlex
 import subprocess
 import time
 
@@ -141,6 +143,205 @@ def native_claude_pids(pane_pid, table):
     return roots
 
 
+TAIL_BYTES = 2 * 1024 * 1024
+STALE_SECONDS = 3600
+_cache = OrderedDict()
+
+
+def shell_footer(screen):
+    """Only a live footer below the final prompt, never a done/scrollback line."""
+    lines = screen.rstrip().splitlines()
+    prompts = [i for i, line in enumerate(lines) if re.match(r'^\s*❯(?:\s|$)', line)]
+    if not prompts:
+        return 0
+    index = prompts[-1]
+    if len(lines) - index > 8 or 'Message @' in lines[index]:
+        return 0
+    after = lines[index + 1:]
+    if not any(re.fullmatch(r'[─━-]{4,}', line.strip()) for line in after):
+        return 0
+    for line in after:
+        if line.strip().startswith('⏵'):
+            match = re.search(r'(?:^|·)\s*([1-9]\d*) shells?\s*(?:·|$)', line.strip())
+            if match:
+                return int(match[1])
+    return 0
+
+
+def shell_command(args):
+    """Extract Claude's snapshot/eval wrapper without executing its contents."""
+    executable = args.split(None, 1)[0] if args else ''
+    if Path(executable).name not in ('sh', 'bash', 'zsh', 'dash'):
+        return ''
+    if ' && eval ' not in args or ' -c ' not in args:
+        return ''
+    try:
+        return shlex.split(args.split(' && eval ', 1)[1].replace('\\012', '\n'))[0].strip()
+    except (ValueError, IndexError):
+        return ''
+
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    return '\n'.join(b['text'] for b in content if isinstance(b, dict)
+                     and b.get('type') == 'text' and isinstance(b.get('text'), str)) if isinstance(content, list) else ''
+
+
+def _stamp(value):
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def read_tasks(path):
+    """Bounded, cached task ledger; None means unavailable, not zero tasks."""
+    if not path:
+        return None
+    path = Path(path)
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        if key in _cache:
+            _cache.move_to_end(key)
+            return _cache[key]
+        previous = next((value for old, value in reversed(_cache.items())
+                         if old[0] == str(path) and old[1] == stat.st_ino
+                         and old[2] < stat.st_size
+                         and value['offset'] <= stat.st_size
+                         and stat.st_size - value['offset'] <= TAIL_BYTES), None)
+        with path.open('rb') as stream:
+            if previous:
+                stream.seek(previous['offset'])
+            elif stat.st_size > TAIL_BYTES:
+                stream.seek(stat.st_size - TAIL_BYTES)
+                stream.readline(TAIL_BYTES)
+            raw = stream.read(TAIL_BYTES)
+            # Preserve partial appended records for the next scan.
+            complete = raw.rfind(b'\n') + 1
+            offset = stream.tell() - len(raw) + complete
+            raw = raw[:complete]
+    except OSError:
+        return None
+    calls = dict(previous['calls']) if previous else {}
+    tasks = {task['id']: task for task in previous['tasks']} if previous else {}
+    known_turn = bool(previous and previous['known_turn'])
+    for line in raw.splitlines():
+        # Claude also writes enormous API request blobs; those are not task events.
+        if b'"message"' not in line or not any(marker in line for marker in
+                (b'"tool_use"', b'"tool_result"', b'"type":"user"', b'"type": "user"')):
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get('isSidechain'):
+            continue
+        message = row.get('message')
+        if not isinstance(message, dict):
+            continue
+        content = message.get('content', [])
+        text = _text(content)
+        if row.get('type') == 'user' and '<task-notification>' in text:
+            task_id = re.search(r'<task-id>([^<]+)</task-id>', text)
+            status = re.search(r'<status>(completed|failed|killed)</status>', text)
+            if task_id and status:
+                tasks.pop(task_id[1], None)
+            continue
+        results = [b for b in content if isinstance(b, dict) and b.get('type') == 'tool_result'] if isinstance(content, list) else []
+        if row.get('type') == 'user' and not results and not row.get('isMeta') and text.strip():
+            calls, tasks, known_turn = {}, {}, True
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            inputs = block.get('input')
+            if block.get('type') == 'tool_use' and block.get('name') == 'Bash' and isinstance(inputs, dict):
+                command = inputs.get('command')
+                if isinstance(command, str) and block.get('id'):
+                    calls[block['id']] = {'command': command.strip(), 'started': _stamp(row.get('timestamp'))}
+        for result in results:
+            call = calls.pop(result.get('tool_use_id'), None)
+            text = _text(result.get('content'))
+            match = re.search(r'Command running in background with ID: ([\w-]+)', text)
+            if call and match:
+                output = re.search(r'Output is being written to: (.+?\.output)(?:\.|\s|$)', text)
+                tasks[match[1]] = dict(call, id=match[1], output=output[1] if output else '')
+            # TaskOutput's structured result is also a terminal-state source.
+        result = row.get('toolUseResult')
+        if isinstance(result, dict):
+            task = result.get('task')
+            if isinstance(task, dict) and task.get('status') in ('completed', 'failed', 'killed'):
+                tasks.pop(task.get('task_id') or task.get('id'), None)
+    answer = {'known_turn': known_turn, 'tasks': list(tasks.values()), 'calls': calls, 'offset': offset}
+    for old in list(_cache):
+        if old[0] == str(path):
+            del _cache[old]
+    _cache[key] = answer
+    while len(_cache) > 32:
+        _cache.popitem(last=False)
+    return answer
+
+
+def _output_info(task, transcript):
+    """Only inspect this session's task output, with a fixed read bound."""
+    output = Path(task.get('output') or '')
+    if (output.name != task['id'] + '.output' or output.parent.name != 'tasks'
+            or output.parent.parent.name != Path(transcript).stem):
+        return None
+    try:
+        stat = output.stat()
+        with output.open('rb') as stream:
+            stream.seek(max(0, stat.st_size - 8192))
+            tail = stream.read(8192).decode(errors='replace')
+        error = bool(re.search(r'Traceback \(most recent call last\)|\bError:|exit code [1-9]\d*', tail))
+        return stat.st_mtime, error
+    except OSError:
+        return None
+
+
+def parked_shells(screen, root, table, transcript, now):
+    """A current footer + native shell + task identity outweigh a Stop event."""
+    count = shell_footer(screen)
+    if not count:
+        return None
+    commands = Counter(shell_command(args) for parent, args in table.values()
+                       if parent == root and shell_command(args))
+    if not commands:
+        return None
+    ledger = read_tasks(transcript)
+    if ledger is None and transcript:
+        # Resumed sessions can emit a hook path before that file exists. The
+        # native shell wrapper names its owning transcript; never guess "latest".
+        session_ids = set()
+        for parent, args in table.values():
+            if parent == root and shell_command(args):
+                session_ids.update(re.findall(r"CODEX_COMPANION_SESSION_ID='([0-9a-f-]{36})'", args))
+        if len(session_ids) == 1:
+            transcript = str(Path(transcript).with_name(next(iter(session_ids)) + '.jsonl'))
+            ledger = read_tasks(transcript)
+    tasks = []
+    for task in ledger['tasks'] if ledger else []:
+        if commands[task['command']]:
+            tasks.append(task)
+            commands[task['command']] -= 1
+    # Missing/truncated identity evidence is unknown, not permission to count old
+    # polling shells or MCP services as the current turn's work.
+    if not ledger or not ledger['known_turn'] or not tasks:
+        return None
+    count = min(count, len(tasks))
+    reason = f'Background work: waiting on {count} shell' + ('s' if count != 1 else '')
+    for task in tasks:
+        info = _output_info(task, transcript)
+        if info and info[1]:
+            reason += '; task output contains an error; check progress'
+            break
+        if task['started'] and now - max(task['started'], info[0] if info else 0) >= STALE_SECONDS:
+            reason += '; possibly stalled (no recent task output); check progress'
+            break
+    return 'RUNNING', reason, False
+
+
 def claude_screen(screen):
     lines = screen.rstrip().splitlines()
     tail = '\n'.join(lines[-35:])
@@ -169,10 +370,17 @@ def claude_screen(screen):
 def observe_claude(con, sock, live, table):
     for (pane,pid) in live:
         current = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
-        if not current or current['agent'] != 'claude' or len(native_claude_pids(pid,table)) != 1:
+        roots = native_claude_pids(pid,table)
+        if not current or current['agent'] != 'claude' or len(roots) != 1:
             continue
         screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
         state = claude_screen(screen)
+        if state and state[0] == 'IDLE' and current['state'] == 'WAIT':
+            # A finished line underneath a permission/question overlay is stale.
+            # Native tools or a foreground spinner can still clear a stale WAIT.
+            continue
+        if state and state[0] == 'IDLE' and current['state'] != 'WAIT':
+            state = parked_shells(screen, roots[0], table, current['transcript_path'], time.time()) or state
         # Let a freshly emitted native permission/stop event settle before a
         # screen update can replace it. Delayed old notifications still recover.
         running_wait_changed = (state and state[0] == current['state'] == 'RUNNING'
