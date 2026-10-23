@@ -3,6 +3,7 @@ __pycache__/
 .ruff_cache/
 *.py[cod]
 .DS_Store
+.playwright-mcp/
 dist/
 *.sqlite3
 *.sqlite3-shm
