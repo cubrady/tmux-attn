@@ -374,6 +374,46 @@
       opacity: 0.88;
       margin-left: 0.15em;
     }
+    .agent-filters {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .agent-filter-label { color: var(--muted); font-size: 0.72rem; margin-right: 2px; }
+    .agent-filter {
+      appearance: none;
+      min-height: 36px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      color: var(--muted);
+      font: 500 0.75rem var(--font);
+      cursor: pointer;
+    }
+    .agent-filter[aria-pressed="true"] {
+      color: var(--fg);
+      background: var(--card);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .agent-filter .count { margin-left: 5px; font-family: var(--mono); font-variant-numeric: tabular-nums; opacity: 0.75; }
+    .agent-filter:active { background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+    .agent-filter:focus-visible, .other-agent-wait:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .other-agent-wait {
+      display: block;
+      margin-top: 8px;
+      padding: 4px 0;
+      border: 0;
+      background: transparent;
+      color: var(--wait);
+      font: 500 0.75rem var(--font);
+      text-align: left;
+      cursor: pointer;
+    }
+    .agent-filters[hidden], .other-agent-wait[hidden] { display: none; }
     @media (prefers-color-scheme: dark) {
       .host-pill.tone-0, .host-chip.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
       .host-pill.tone-1, .host-chip.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
@@ -1778,6 +1818,8 @@
         <div class="meta" id="meta"></div>
         <div class="summary" id="summary" aria-live="polite"></div>
         <div class="hosts" id="hosts"></div>
+        <div class="agent-filters" id="agent-filters" role="group" aria-label="依 coding agent 篩選" hidden></div>
+        <div aria-live="polite"><button type="button" class="other-agent-wait" id="other-agent-wait" hidden></button></div>
       </div>
       <div class="skel-page" id="skel-header" aria-hidden="true">
         <div class="skel skel-meta"></div>
@@ -1904,6 +1946,10 @@
     let latestHosts = [];
     let latestPayload = null;
     let hostFilters = new Set(); // empty = show all hosts
+    const refreshPendingHosts = new Set();
+    const AGENT_FILTER_STORE = 'tmux-attn:agent-filter';
+    const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor' };
+    let agentFilter = readAgentFilter();
     let activeGroup = '';
     let laterExpanded = false;
     const laterBusy = new Set();
@@ -2071,9 +2117,60 @@
       const label = name.length > HOST_CHIP_LIMIT ? name.slice(0, HOST_CHIP_LIMIT - 1) + '…' : name;
       return `<span class="host-chip tone-${hostTone(name)}" title="${escapeHtml(name)}">${escapeHtml(label)}</span>`;
     }
-    function visibleAgents() {
+    function hostVisibleAgents() {
       if (!hostFilters.size) return latestAgents;
       return latestAgents.filter(a => hostFilters.has(agentHostName(a)));
+    }
+    function agentKind(agent) {
+      const name = String(agent.agent || agent.cli || '').toLowerCase();
+      if (name === 'agent') return 'cursor';
+      return Object.hasOwn(AGENT_LABELS, name) ? name : '';
+    }
+    function readAgentFilter() {
+      try {
+        const saved = sessionStorage.getItem(AGENT_FILTER_STORE);
+        return Object.hasOwn(AGENT_LABELS, saved) ? saved : '';
+      } catch (_) { return ''; }
+    }
+    function setAgentFilter(name) {
+      agentFilter = Object.hasOwn(AGENT_LABELS, name) ? name : '';
+      try {
+        if (agentFilter) sessionStorage.setItem(AGENT_FILTER_STORE, agentFilter);
+        else sessionStorage.removeItem(AGENT_FILTER_STORE);
+      } catch (_) { /* Filtering still works when storage is unavailable. */ }
+    }
+    function visibleAgents() {
+      const agents = hostVisibleAgents();
+      return agentFilter ? agents.filter(a => category(a) !== 'shell' && agentKind(a) === agentFilter) : agents;
+    }
+    function renderAgentFilters() {
+      const agents = hostVisibleAgents().filter(a => category(a) !== 'shell');
+      const counts = new Map();
+      for (const agent of agents) {
+        const name = agentKind(agent);
+        if (name) counts.set(name, (counts.get(name) || 0) + 1);
+      }
+      // Cold loads arrive one host at a time. Do not discard a restored choice
+      // before the selected hosts have finished loading.
+      const pending = latestHosts.some(h => h.pending && (!hostFilters.size || hostFilters.has(h.name))) ||
+        [...refreshPendingHosts].some(name => !hostFilters.size || hostFilters.has(name));
+      if (agentFilter && !counts.has(agentFilter) && !pending) setAgentFilter('');
+      const row = document.getElementById('agent-filters');
+      row.hidden = !counts.size;
+      const button = (name, label, count) => `<button type="button" class="agent-filter" data-agent-filter="${name}" aria-pressed="${agentFilter === name}">${label}<span class="count">${count}</span></button>`;
+      const markup = '<span class="agent-filter-label" aria-hidden="true">Agent</span>' + button('', '全部', agents.length) +
+        Object.entries(AGENT_LABELS).filter(([name]) => counts.has(name)).map(([name, label]) => button(name, label, counts.get(name))).join('');
+      if (row.innerHTML !== markup) {
+        const focused = document.activeElement?.closest?.('[data-agent-filter]')?.dataset.agentFilter;
+        row.innerHTML = markup;
+        if (focused !== undefined) {
+          (row.querySelector(`[data-agent-filter="${focused}"]`) || row.querySelector('[data-agent-filter=""]'))?.focus();
+        }
+      }
+      const others = agentFilter ? agents.filter(a => agentKind(a) !== agentFilter && category(a) === 'wait').length : 0;
+      const notice = document.getElementById('other-agent-wait');
+      notice.hidden = !others;
+      notice.textContent = others ? `其他 agent 有 ${others} 個等你 · 查看全部 →` : '';
     }
     function hostSessionCounts(agents) {
       // Count tracked agent sessions only — bare shell panes are not sessions.
@@ -3226,10 +3323,12 @@
       for (const name of [...hostFilters]) {
         if (!known.has(name)) hostFilters.delete(name);
       }
+      renderAgentFilters();
       const filtered = hostFilters.size > 0;
       const sessionCounts = hostSessionCounts(latestAgents);
       const okHosts = hosts.filter(h => h.ok).length;
-      const filterNote = filtered ? `，篩選 ${[...hostFilters].join('、')}` : '';
+      const filterNote = (filtered ? `，篩選 ${[...hostFilters].join('、')}` : '') +
+        (agentFilter ? `，Agent ${AGENT_LABELS[agentFilter]}` : '');
       document.getElementById('meta').textContent =
         `追蹤 ${s.tracked || 0}，其他 ${s.untracked || 0}` +
         (hosts.length ? `，主機 ${okHosts}/${hosts.length}` : '') +
@@ -3269,7 +3368,7 @@
       if (!latestAgents.length) {
         list.innerHTML = '';
         empty.hidden = false;
-        empty.textContent = hosts.some(h => !h.ok)
+        empty.textContent = agentFilter ? `尚無 ${AGENT_LABELS[agentFilter]} session，主機載入中。` : hosts.some(h => !h.ok)
           ? '尚無資料。檢查 peers 是否在線，或本機 tmux／hooks。'
           : '沒有 live pane。確認工作機上的 tmux 有在跑。';
         if (sheetOpen) closeSheet();
@@ -3278,7 +3377,7 @@
       if (!shown.length) {
         list.innerHTML = '';
         empty.hidden = false;
-        empty.textContent = `沒有所選主機的 pane。點「全部」或其它主機。`;
+        empty.textContent = agentFilter ? `尚無 ${AGENT_LABELS[agentFilter]} session，其他主機載入中。` : '沒有所選主機的 pane。點「全部」或其它主機。';
         if (sheetOpen) closeSheet();
         return;
       }
@@ -3358,6 +3457,18 @@
         hostFilters.add(name);
       }
       if (latestPayload) render(latestPayload);
+    });
+    document.getElementById('agent-filters').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-agent-filter]');
+      if (!button) return;
+      setAgentFilter(button.dataset.agentFilter);
+      if (latestPayload) render(latestPayload);
+    });
+    document.getElementById('other-agent-wait').addEventListener('click', () => {
+      setAgentFilter('');
+      if (latestPayload) render(latestPayload);
+      document.querySelector('#agent-filters [data-agent-filter=""]')?.focus();
+      jumpToGroup('wait');
     });
     document.getElementById('list').addEventListener('click', (event) => {
       const card = event.target.closest('.card[data-key]');
@@ -3727,9 +3838,11 @@
       try {
         const plan = await fetchFleetPlan();
         if (epoch !== refreshEpoch) return;
-        if (cold) seedPendingHosts(plan);
         document.getElementById('error').hidden = true;
         const names = (plan.hosts || []).map(h => h.name).filter(Boolean);
+        refreshPendingHosts.clear();
+        for (const name of names) refreshPendingHosts.add(name);
+        if (cold) seedPendingHosts(plan);
         const nameSet = new Set(names);
         for (const existing of [...hostSliceByName.keys()]) {
           if (!nameSet.has(existing)) hostSliceByName.delete(existing);
@@ -3745,10 +3858,12 @@
             try {
               const slice = await fetchHostSlice(name);
               if (epoch !== refreshEpoch) return;
+              refreshPendingHosts.delete(name);
               applyHostSlice(slice, plan.version);
               sawHost = true;
             } catch (hostErr) {
               if (epoch !== refreshEpoch) return;
+              refreshPendingHosts.delete(name);
               const prev = hostSliceByName.get(name);
               const prevHost = prev && prev.hosts && prev.hosts[0];
               hostSliceByName.set(name, {
@@ -3791,7 +3906,10 @@
         }
         paintClock('offline');
       } finally {
-        if (epoch === refreshEpoch) refreshInFlight = false;
+        if (epoch === refreshEpoch) {
+          refreshPendingHosts.clear();
+          refreshInFlight = false;
+        }
       }
     }
     refresh();

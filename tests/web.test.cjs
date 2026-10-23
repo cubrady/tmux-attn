@@ -132,6 +132,219 @@ test('host labels and attributes escape HTML', () => {
   assert.doesNotMatch(pills, /<work>/);
 });
 
+function filterSession(cli, host = 'work', state = 'RUNNING', extra = {}) {
+  return { ...agent(host, state), cli, project: `${host}-${cli}`, pane: `%${host}-${cli}`, ...extra };
+}
+
+function pickAgent(ui, name) {
+  ui.elements.get('agent-filters').listeners.click({ target: {
+    closest: () => ({ dataset: { agentFilter: name } }),
+  } });
+}
+
+test('agent chips show only live tracked types, combine Cursor aliases and exclude unknown HTML', () => {
+  const ui = dashboard();
+  ui.render({ agents: [filterSession('codex'), filterSession('agent'), filterSession('cursor'),
+    filterSession('claude', 'work', 'SHELL'), filterSession('pi', 'work', 'RUNNING', { tracked: false }),
+    filterSession('<script>'), filterSession('__proto__')] });
+  const chips = ui.elements.get('agent-filters');
+  assert.equal(chips.hidden, false);
+  assert.deepEqual([...chips.innerHTML.matchAll(/data-agent-filter="([^"]*)"/g)].map(m => m[1]), ['', 'codex', 'cursor']);
+  assert.match(chips.innerHTML, /Cursor<span class="count">2/);
+  assert.doesNotMatch(chips.innerHTML, /<script>|__proto__|Claude|Pi/);
+  pickAgent(ui, 'cursor');
+  assert.match(ui.elements.get('list').innerHTML, /work-agent/);
+  assert.match(ui.elements.get('list').innerHTML, /work-cursor/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /work-codex/);
+  ui.render({ agents: [filterSession('zsh', 'work', 'SHELL')] });
+  assert.equal(chips.hidden, true);
+});
+
+test('agent selection switches directly and filters status, later counts and bare panes', () => {
+  const ui = dashboard();
+  ui.render({ agents: [filterSession('codex', 'work', 'WAIT'), filterSession('claude'),
+    filterSession('pi', 'work', 'IDLE', { later: true }), filterSession('zsh', 'work', 'SHELL')] });
+  pickAgent(ui, 'codex');
+  assert.match(ui.elements.get('list').innerHTML, /work-codex/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /work-claude|work-pi|work-zsh/);
+  assert.match(ui.elements.get('summary').innerHTML, /🙋 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /🏃 0/);
+  assert.doesNotMatch(ui.elements.get('summary').innerHTML, /summary-later/);
+  assert.match(ui.elements.get('agent-filters').innerHTML, /data-agent-filter="codex" aria-pressed="true"/);
+  pickAgent(ui, 'claude');
+  assert.match(ui.elements.get('list').innerHTML, /work-claude/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /work-codex/);
+  assert.match(ui.elements.get('summary').innerHTML, /🏃 1/);
+  assert.match(ui.elements.get('meta').textContent, /Agent Claude/);
+  pickAgent(ui, 'pi');
+  assert.match(ui.elements.get('summary').innerHTML, /稍後 1/);
+  pickAgent(ui, '');
+  assert.match(ui.elements.get('list').innerHTML, /work-zsh/);
+  assert.match(ui.elements.get('summary').innerHTML, /🙋 1/);
+  assert.match(ui.elements.get('summary').innerHTML, /🏃 1/);
+});
+
+test('agent chips and wait notice follow host selection, and wait navigation keeps that selection', () => {
+  const ui = dashboard();
+  const group = { scrollIntoView() { this.scrolled = true; } };
+  ui.document.getElementById = id => id === 'group-wait' ? group : ui.elements.get(id);
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [
+    filterSession('codex', 'alpha'), filterSession('claude', 'alpha', 'WAIT'),
+    filterSession('pi', 'beta', 'WAIT'), filterSession('codex', 'beta', 'WAIT'),
+  ] });
+  ui.elements.get('hosts').listeners.click({ target: { closest: () => ({ dataset: { host: 'alpha' } }) } });
+  assert.doesNotMatch(ui.elements.get('agent-filters').innerHTML, /data-agent-filter="pi"/);
+  assert.match(ui.elements.get('agent-filters').innerHTML, /Codex<span class="count">1/);
+  pickAgent(ui, 'codex');
+  const notice = ui.elements.get('other-agent-wait');
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /其他 agent 有 1 個等你/);
+  assert.match(ui.elements.get('hosts').innerHTML, /全部<span class="count">\(4\)/);
+  notice.listeners.click();
+  assert.equal(notice.hidden, true);
+  assert.equal(group.scrolled, true);
+  assert.match(ui.elements.get('list').innerHTML, /alpha-codex|alpha-claude/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /beta-/);
+  assert.match(ui.elements.get('summary').innerHTML, /🙋 1/);
+  assert.match(ui.elements.get('agent-filters').innerHTML, /data-agent-filter="" aria-pressed="true"/);
+});
+
+test('wait notice excludes running, review and bare-shell sessions', () => {
+  const ui = dashboard();
+  ui.render({ agents: [filterSession('codex'), filterSession('claude'),
+    filterSession('pi', 'work', 'IDLE', { pending: true }),
+    filterSession('cursor', 'work', 'WAIT', { tracked: false })] });
+  pickAgent(ui, 'codex');
+  assert.equal(ui.elements.get('other-agent-wait').hidden, true);
+});
+
+test('agent choice survives reload in the same tab and waits for all progressive host slices', () => {
+  const sessionStorage = draftStorage();
+  const first = dashboard({ globals: { sessionStorage } });
+  const sessions = [filterSession('codex'), filterSession('claude')];
+  first.render({ agents: sessions });
+  pickAgent(first, 'codex');
+  const reloaded = dashboard({ globals: { sessionStorage } });
+  reloaded.render({ hosts: [{ name: 'work', ok: true, pending: true }], agents: [] });
+  assert.match(reloaded.elements.get('meta').textContent, /Agent Codex/);
+  assert.match(reloaded.elements.get('empty').textContent, /Codex.*載入中/);
+  reloaded.render({ hosts: [{ name: 'fast', ok: true }, { name: 'work', ok: true, pending: true }],
+    agents: [filterSession('claude', 'fast')] });
+  assert.doesNotMatch(reloaded.elements.get('list').innerHTML, /fast-claude/);
+  assert.match(reloaded.elements.get('empty').textContent, /Codex.*載入中/);
+  reloaded.render({ hosts: [{ name: 'work', ok: true }], agents: sessions });
+  assert.match(reloaded.elements.get('list').innerHTML, /work-codex/);
+  assert.doesNotMatch(reloaded.elements.get('list').innerHTML, /work-claude/);
+  assert.match(reloaded.elements.get('agent-filters').innerHTML, /data-agent-filter="codex" aria-pressed="true"/);
+  const otherTab = dashboard();
+  otherTab.render({ agents: sessions });
+  assert.match(otherTab.elements.get('list').innerHTML, /work-claude/);
+  pickAgent(reloaded, '');
+  assert.equal(sessionStorage.getItem('tmux-attn:agent-filter'), null);
+});
+
+test('a vanished agent type falls back to All and removes the stale stored choice', () => {
+  const sessionStorage = draftStorage();
+  const ui = dashboard({ globals: { sessionStorage } });
+  ui.render({ agents: [filterSession('codex'), filterSession('claude')] });
+  pickAgent(ui, 'codex');
+  ui.render({ agents: [filterSession('claude')] });
+  assert.doesNotMatch(ui.elements.get('agent-filters').innerHTML, /Codex/);
+  assert.match(ui.elements.get('agent-filters').innerHTML, /data-agent-filter="" aria-pressed="true"/);
+  assert.match(ui.elements.get('list').innerHTML, /work-claude/);
+  assert.equal(sessionStorage.getItem('tmux-attn:agent-filter'), null);
+});
+
+test('selecting hosts without the chosen agent resets it even if another host is still pending', () => {
+  const ui = dashboard();
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true, pending: true }],
+    agents: [filterSession('codex', 'alpha'), filterSession('claude', 'alpha')] });
+  pickAgent(ui, 'codex');
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true, pending: true }],
+    agents: [filterSession('claude', 'alpha')] });
+  ui.elements.get('hosts').listeners.click({ target: { closest: () => ({ dataset: { host: 'alpha' } }) } });
+  assert.match(ui.elements.get('list').innerHTML, /alpha-claude/);
+  assert.doesNotMatch(ui.elements.get('meta').textContent, /Agent Codex/);
+});
+
+test('agent filtering still works when session storage is blocked and ignores invalid saved values', () => {
+  const sessionStorage = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); },
+    removeItem() { throw new Error('blocked'); } };
+  const ui = dashboard({ globals: { sessionStorage } });
+  ui.render({ agents: [filterSession('codex'), filterSession('claude')] });
+  pickAgent(ui, 'codex');
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /work-claude/);
+  pickAgent(ui, '');
+  assert.match(ui.elements.get('list').innerHTML, /work-claude/);
+  const invalid = dashboard({ globals: { sessionStorage: { getItem: () => '__proto__' } } });
+  invalid.render({ agents: [filterSession('codex'), filterSession('claude')] });
+  assert.match(invalid.elements.get('agent-filters').innerHTML, /data-agent-filter="" aria-pressed="true"/);
+});
+
+test('a warm progressive refresh keeps the agent choice until a newly added host settles', async () => {
+  let round = 0;
+  let releaseSlow;
+  const slow = new Promise(resolve => { releaseSlow = resolve; });
+  const hosts = [{ name: 'fast', ok: true }];
+  const ui = dashboard({ allowFleetFetch: true, fetchRequest: async url => {
+    if (url === '/api/fleet/plan') return response({ ok: true, hosts });
+    const fast = url.includes('name=fast');
+    if (round && !fast) await slow;
+    return response({ ok: true, hosts: [hosts[fast ? 0 : 1]], agents: round
+      ? (fast ? [] : [filterSession('codex', 'slow'), filterSession('claude', 'slow')])
+      : [filterSession(fast ? 'codex' : 'claude', fast ? 'fast' : 'slow')] });
+  } });
+  for (let i = 0; i < 8; i++) await settle();
+  pickAgent(ui, 'codex');
+  round = 1;
+  hosts.push({ name: 'slow', ok: true });
+  const refreshing = ui.context.refresh();
+  await settle();
+  assert.match(ui.elements.get('meta').textContent, /Agent Codex/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /slow-claude/);
+  ui.setNow(1000);
+  releaseSlow();
+  await refreshing;
+  assert.match(ui.elements.get('agent-filters').innerHTML, /data-agent-filter="codex" aria-pressed="true"/);
+  assert.match(ui.elements.get('list').innerHTML, /slow-codex/);
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /slow-claude/);
+});
+
+test('a missing restored choice clears after the final pending host fails', async () => {
+  const sessionStorage = draftStorage();
+  sessionStorage.setItem('tmux-attn:agent-filter', 'codex');
+  let releaseSlow;
+  const slow = new Promise(resolve => { releaseSlow = resolve; });
+  const ui = dashboard({ allowFleetFetch: true, globals: { sessionStorage }, fetchRequest: async url => {
+    if (url === '/api/fleet/plan') return response({ ok: true, hosts: [{ name: 'fast' }, { name: 'slow' }] });
+    if (url.includes('name=slow')) { await slow; throw new Error('offline'); }
+    return response({ ok: true, hosts: [{ name: 'fast', ok: true }], agents: [filterSession('claude', 'fast')] });
+  } });
+  await settle();
+  assert.doesNotMatch(ui.elements.get('list').innerHTML, /fast-claude/);
+  releaseSlow();
+  for (let i = 0; i < 8; i++) await settle();
+  assert.match(ui.elements.get('list').innerHTML, /fast-claude/);
+  assert.equal(sessionStorage.getItem('tmux-attn:agent-filter'), null);
+});
+
+test('agent chips and selection retain last-known-good sessions only until the stale TTL', () => {
+  const ui = dashboard();
+  const hosts = [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }];
+  ui.render({ hosts, agents: [filterSession('codex', 'alpha'), filterSession('claude', 'beta')] });
+  pickAgent(ui, 'codex');
+  const failure = { hosts: [{ name: 'alpha', ok: false }, hosts[1]], agents: [filterSession('claude', 'beta')] };
+  ui.setNow(1000);
+  ui.render(failure);
+  assert.match(ui.elements.get('list').innerHTML, /alpha-codex/);
+  assert.match(ui.elements.get('agent-filters').innerHTML, /data-agent-filter="codex" aria-pressed="true"/);
+  ui.setNow(600000);
+  ui.render(failure);
+  assert.doesNotMatch(ui.elements.get('agent-filters').innerHTML, /Codex/);
+  assert.match(ui.elements.get('agent-filters').innerHTML, /data-agent-filter="" aria-pressed="true"/);
+  assert.match(ui.elements.get('list').innerHTML, /beta-claude/);
+});
+
 test('review cards show the agent icon without restoring host chips or sheet target text', () => {
   const ui = dashboard(() => new Promise(() => {}));
   const current = { ...agent('work-machine', 'IDLE', true, true), cli: 'codex', session: 'build-session' };
