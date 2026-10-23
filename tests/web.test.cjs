@@ -158,6 +158,10 @@ test('agent chips show only live tracked types, combine Cursor aliases and exclu
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /work-codex/);
   ui.render({ agents: [filterSession('zsh', 'work', 'SHELL')] });
   assert.equal(chips.hidden, true);
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /\.agent-filter-label\s*\{[^}]*font-size:\s*0\.68rem/);
+  assert.match(html, /\.agent-filter\s*\{[^}]*font-size:\s*0\.68rem;[^}]*padding:\s*4px 8px;/s);
+  assert.doesNotMatch(html.match(/\.agent-filter\s*\{[^}]*\}/s)[0], /min-height/);
 });
 
 test('agent selection switches directly and filters status, later counts and bare panes', () => {

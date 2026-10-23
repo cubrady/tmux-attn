@@ -381,16 +381,18 @@
       gap: 6px;
       margin-top: 10px;
     }
-    .agent-filter-label { color: var(--muted); font-size: 0.72rem; margin-right: 2px; }
+    .agent-filter-label { color: var(--muted); font-size: 0.68rem; line-height: 1.2; margin-right: 2px; }
     .agent-filter {
       appearance: none;
-      min-height: 36px;
-      padding: 5px 10px;
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      font-weight: 600;
+      padding: 4px 8px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: var(--bg-elevated);
       color: var(--muted);
-      font: 500 0.75rem var(--font);
+      line-height: 1.2;
       cursor: pointer;
     }
     .agent-filter[aria-pressed="true"] {
