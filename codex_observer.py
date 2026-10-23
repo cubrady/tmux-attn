@@ -146,11 +146,18 @@ def native_claude_pids(pane_pid, table):
 TAIL_BYTES = 2 * 1024 * 1024
 STALE_SECONDS = 3600
 _cache = OrderedDict()
+CLAUDE_MODAL_RE = re.compile(
+    r'(?:Do you want to proceed\?|needs your approval|Enter to (?:select|confirm|continue|submit)'
+    r'|Session paused|Esc to cancel|Submit answers|❯\s*\d+\.\s*(?:Yes|Allow|No|Deny|Reject))',
+    re.I,
+)
 
 
 def shell_footer(screen):
     """Only a live footer below the final prompt, never a done/scrollback line."""
     lines = screen.rstrip().splitlines()
+    if CLAUDE_MODAL_RE.search('\n'.join(lines[-35:])):
+        return 0
     prompts = [i for i, line in enumerate(lines) if re.match(r'^\s*❯(?!\s+[⏺◯●◐◌◉])(?:\s|$)', line)]
     if not prompts:
         return 0
@@ -161,7 +168,7 @@ def shell_footer(screen):
     if not any(re.fullmatch(r'[─━-]{4,}', line.strip()) for line in after):
         return 0
     for line in after:
-        if line.strip().startswith('⏵'):
+        if line.strip().startswith('⏵') and 'esc to interrupt' not in line.lower():
             counts = [int(n) for n in re.findall(
                 r'(?:^|[·,])\s*([1-9]\d*)\s+(?:shells?|monitors?)(?=\s*(?:[·,]|$))', line.strip())]
             if counts:
@@ -348,7 +355,7 @@ def claude_screen(screen):
     lines = screen.rstrip().splitlines()
     tail = '\n'.join(lines[-35:])
     # Permission and question menus may be drawn over earlier activity output.
-    if re.search(r'(?:Do you want to proceed\?|needs your approval|Enter to (?:select|confirm|continue|submit)|Session paused|Esc to cancel|Submit answers|❯\s*\d+\.\s*(?:Yes|Allow|No|Deny|Reject))',tail,re.I):
+    if CLAUDE_MODAL_RE.search(tail):
         return None
     for index in range(len(lines)-1,max(-1,len(lines)-35),-1):
         line = lines[index].strip()
@@ -381,7 +388,7 @@ def observe_claude(con, sock, live, table):
             # A finished line underneath a permission/question overlay is stale.
             # Native tools or a foreground spinner can still clear a stale WAIT.
             continue
-        if state and state[0] == 'IDLE' and current['state'] != 'WAIT':
+        if (state is None or state[0] == 'IDLE') and current['state'] != 'WAIT':
             state = parked_shells(screen, roots[0], table, current['transcript_path'], time.time()) or state
         # Let a freshly emitted native permission/stop event settle before a
         # screen update can replace it. Delayed old notifications still recover.
