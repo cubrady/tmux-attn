@@ -209,7 +209,9 @@ class BackgroundShellTests(unittest.TestCase):
             a.record(con, 'sock', '%1', '123', 'claude', 'IDLE', 'Done', event_time=1792673280)
             scan(DONE + '\nDo you want to proceed?\n❯ 1. Yes', now=1792673290)
             self.assertEqual(con.execute('select state from panes').fetchone()[0], 'IDLE')
-            scan(now=1792673300)
+            scan(DONE.replace('✻ Crunched for 1m 11s · done 晚上8:47 · 1 shell still running',
+                              '✻ Waiting for 1 background agent to finish'), now=1792673300)
+            self.assertEqual(a.agent_emoji(dict(con.execute('select * from panes').fetchone())), '⏳')
             scan(DONE.replace('· 1 shell ·', '·'), now=1792673310)
             self.assertEqual(con.execute('select state from panes').fetchone()[0], 'IDLE')
 
