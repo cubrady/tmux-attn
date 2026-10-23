@@ -2884,7 +2884,8 @@ test('two or more hosts label each card and the reply sheet, including while fil
   ui.render({ hosts, agents: [brian, cicd, weird, wide] });
   const list = ui.elements.get('list').innerHTML;
   const tone = ui.context.hostTone('workstation');
-  assert.match(list, new RegExp(`<div class="env"><span class="host-chip tone-${tone}" title="workstation">workstation</span><span class="cli sm codex"`));
+  assert.match(list, new RegExp(`<div class="title-line"><span class="card-title">Fix login</span><span class="title-agent"><span class="cli sm codex"`));
+  assert.match(list, new RegExp(`<div class="env"><span class="project">sampleapp</span><span class="host-chip tone-${tone}" title="workstation">workstation</span></div>`));
   assert.match(ui.elements.get('hosts').innerHTML, new RegExp(`host-pill tone-${tone}`));
   assert.match(list, /title="client-2">client-2<\/span>/);
   assert.match(list, /aria-label="開啟 Fix login，workstation"/);
@@ -2918,7 +2919,7 @@ test('a single host leaves cards and the reply sheet unlabeled', () => {
 
 test('card meta shows the tmux window index', () => {
   const at = cardHtmlFor({ project: 'Atlas', title: 'Deploy API', session: 'work', window_index: 3, pane_index: 1 });
-  assert.match(at, /<span class="loc" title="tmux work:3\.1">3\.1<\/span><\/div>/, 'a split pane keeps its pane index');
+  assert.match(at, /<div class="env"><span class="loc" title="tmux work:3\.1">3\.1<\/span><span class="project">Atlas<\/span><\/div>/, 'a split pane keeps its pane index and leads project');
   const zero = cardHtmlFor({ project: 'Atlas', session: 'work', window_index: 0, pane_index: 0 });
   assert.match(zero, /<span class="loc" title="tmux work:0\.0">0<\/span>/, 'index 0 is a real position and the first pane stays a window number');
   const long = cardHtmlFor({ project: 'Atlas', session: 'a-very-long-session-name', window_index: 12, pane_index: 2 });
@@ -2954,7 +2955,8 @@ test('card title and meta fit long English and CJK text', () => {
   const a = handoffAgent(project, [], { title, preview: { users: [prompt], agent: '' } });
   ui.render({ agents: [a] });
   const cards = ui.elements.get('list').innerHTML;
-  assert.ok(cards.includes(`<span class="card-title">${title}</span><div class="card-meta"><div class="env">`));
+  assert.ok(cards.includes(`<div class="title-line"><span class="card-title">${title}</span>`));
+  assert.ok(cards.includes(`</div><div class="card-meta"><div class="env">`));
   assert.ok(cards.includes(`<span class="project">${project}</span>`));
   assert.equal((cards.replace(/aria-label="[^"]*"/g, '').match(/我貼了 latest prompt/g) || []).length, 1);
   assert.ok(cards.includes(`aria-label="開啟 ${title}"`));
@@ -2972,8 +2974,8 @@ test('card title and meta fit long English and CJK text', () => {
   assert.match(html, /\.card-title \{[^}]*font-weight: 500;/);
   assert.match(html, /\.row1-side \.session-flags \{/);
   assert.match(html, /\.env > span \+ span::before/);
-  assert.match(html, /\.env > \.cli::before, \.env > \.cli \+ span::before \{ content: none; \}/, 'a separator pseudo inside the 14px icon box squeezes the img');
-  assert.match(html, /\.env \.model \{[^}]*flex: 0 0 auto;/, 'model must not be truncated before project/repo');
+  assert.match(html, /\.env > \.loc \+ \.project::before \{[^}]*content: ":";/);
+  assert.match(html, /\.title-agent \.model \{[^}]*flex: 0 0 auto;/, 'model must not be truncated before title');
   assert.doesNotMatch(html, /decision-inbox|行動收件匣|workstream-form|工作流標籤|\.inbox\b/);
 });
 
