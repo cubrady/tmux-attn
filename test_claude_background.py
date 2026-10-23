@@ -64,8 +64,10 @@ class BackgroundShellTests(unittest.TestCase):
         self.assertEqual(o.shell_footer(DONE.replace('1 shell ·', '4 shells ·')), 4)
         self.assertEqual(o.shell_footer(DONE.replace('1 shell ·', '2 shells, 1 monitor ·')), 3)
         self.assertEqual(o.shell_footer(DONE.replace('1 shell ·', '1 monitor ·')), 1)
-        drawer = DONE + '\n\n  ⏺ main\n❯ ◯ general-purpose  Reading diff   1h 49m · ↓ 171.3k tokens'
-        self.assertEqual(self.state(drawer), ('RUNNING', 'Background work: waiting on 1 shell', False))
+        for spacing in (' ', '  ', '\t'):
+            with self.subTest(spacing=spacing):
+                drawer = DONE + '\n\n  ⏺ main\n❯' + spacing + '◯ general-purpose  Reading diff   1h 49m · ↓ 171.3k tokens'
+                self.assertEqual(self.state(drawer), ('RUNNING', 'Background work: waiting on 1 shell', False))
 
     def test_monitor_tool_tracks_active_watch_until_stream_end_or_expiry(self):
         self.user('watch the suite')
