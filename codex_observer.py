@@ -151,7 +151,7 @@ _cache = OrderedDict()
 def shell_footer(screen):
     """Only a live footer below the final prompt, never a done/scrollback line."""
     lines = screen.rstrip().splitlines()
-    prompts = [i for i, line in enumerate(lines) if re.match(r'^\s*❯(?:\s+(?![⏺◯●◐◌◉])|$)', line)]
+    prompts = [i for i, line in enumerate(lines) if re.match(r'^\s*❯(?!\s+[⏺◯●◐◌◉])(?:\s|$)', line)]
     if not prompts:
         return 0
     index = prompts[-1]
