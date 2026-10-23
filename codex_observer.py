@@ -151,7 +151,7 @@ _cache = OrderedDict()
 def shell_footer(screen):
     """Only a live footer below the final prompt, never a done/scrollback line."""
     lines = screen.rstrip().splitlines()
-    prompts = [i for i, line in enumerate(lines) if re.match(r'^\s*❯(?:\s|$)', line)]
+    prompts = [i for i, line in enumerate(lines) if re.match(r'^\s*❯(?:\s+(?![⏺◯●◐◌◉])|$)', line)]
     if not prompts:
         return 0
     index = prompts[-1]
@@ -162,9 +162,10 @@ def shell_footer(screen):
         return 0
     for line in after:
         if line.strip().startswith('⏵'):
-            match = re.search(r'(?:^|·)\s*([1-9]\d*) shells?\s*(?:·|$)', line.strip())
-            if match:
-                return int(match[1])
+            counts = [int(n) for n in re.findall(
+                r'(?:^|[·,])\s*([1-9]\d*)\s+(?:shells?|monitors?)(?=\s*(?:[·,]|$))', line.strip())]
+            if counts:
+                return sum(counts)
     return 0
 
 
@@ -245,7 +246,8 @@ def read_tasks(path):
         text = _text(content)
         if row.get('type') == 'user' and '<task-notification>' in text:
             task_id = re.search(r'<task-id>([^<]+)</task-id>', text)
-            status = re.search(r'<status>(completed|failed|killed)</status>', text)
+            status = (re.search(r'<status>(completed|failed|killed)</status>', text)
+                      or '[Monitor expired after ' in text)
             if task_id and status:
                 tasks.pop(task_id[1], None)
             continue
@@ -256,14 +258,14 @@ def read_tasks(path):
             if not isinstance(block, dict):
                 continue
             inputs = block.get('input')
-            if block.get('type') == 'tool_use' and block.get('name') == 'Bash' and isinstance(inputs, dict):
+            if block.get('type') == 'tool_use' and block.get('name') in ('Bash', 'Monitor') and isinstance(inputs, dict):
                 command = inputs.get('command')
                 if isinstance(command, str) and block.get('id'):
                     calls[block['id']] = {'command': command.strip(), 'started': _stamp(row.get('timestamp'))}
         for result in results:
             call = calls.pop(result.get('tool_use_id'), None)
             text = _text(result.get('content'))
-            match = re.search(r'Command running in background with ID: ([\w-]+)', text)
+            match = re.search(r'(?:Command running in background with ID: |Monitor started \(task )([\w-]+)', text)
             if call and match:
                 output = re.search(r'Output is being written to: (.+?\.output)(?:\.|\s|$)', text)
                 tasks[match[1]] = dict(call, id=match[1], output=output[1] if output else '')

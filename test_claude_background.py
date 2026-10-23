@@ -62,6 +62,27 @@ class BackgroundShellTests(unittest.TestCase):
             with self.subTest(screen=screen):
                 self.assertIsNone(self.state(screen))
         self.assertEqual(o.shell_footer(DONE.replace('1 shell ·', '4 shells ·')), 4)
+        self.assertEqual(o.shell_footer(DONE.replace('1 shell ·', '2 shells, 1 monitor ·')), 3)
+        self.assertEqual(o.shell_footer(DONE.replace('1 shell ·', '1 monitor ·')), 1)
+        drawer = DONE + '\n\n  ⏺ main\n❯ ◯ general-purpose  Reading diff   1h 49m · ↓ 171.3k tokens'
+        self.assertEqual(self.state(drawer), ('RUNNING', 'Background work: waiting on 1 shell', False))
+
+    def test_monitor_tool_tracks_active_watch_until_stream_end_or_expiry(self):
+        self.user('watch the suite')
+        self.rows.extend([
+            {'type': 'assistant', 'timestamp': '2026-10-22T12:48:10Z', 'message': {'content': [
+                {'type': 'tool_use', 'name': 'Monitor', 'id': 'call-mon', 'input': {'command': 'watch.sh'}}]}},
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'call-mon',
+                'content': 'Monitor started (task mon1, expires in 25m unless the source ends first).'}]}}])
+        self.write()
+        table = self.table | {801: (456, self.wrapper('watch.sh'))}
+        screen = DONE.replace('1 shell ·', '2 shells, 1 monitor ·')
+        self.assertEqual(self.state(screen, table), ('RUNNING', 'Background work: waiting on 1 shell', False))
+        # Intermediate monitor events do not retire a still-running watch.
+        self.user('<task-notification><task-id>mon1</task-id><event>tick</event></task-notification>')
+        self.assertEqual(self.state(screen, table), ('RUNNING', 'Background work: waiting on 1 shell', False))
+        self.user('<task-notification><task-id>mon1</task-id><event>[Monitor expired after 25m with 1 event delivered.]</event></task-notification>')
+        self.assertIsNone(self.state(screen, table))
 
     def test_shell_must_be_native_direct_child_with_matching_command(self):
         for table in ({123: (1, 'zsh'), 456: (123, 'claude'), 789: (456, 'npm exec mcp-server')},
