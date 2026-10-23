@@ -74,10 +74,10 @@
 `Stop` 表示主回合停下；單獨的 `background_tasks` 或歷史訊息中的
 `4 shells still running` 不足以把狀態改成 ⏳。Observer 現在要求三項證據：
 
-1. 目前輸入提示下方的原生狀態列顯示 `N shell(s)`。
+1. 目前輸入提示下方的原生狀態列顯示 `N shell(s)`／`M monitor(s)`（含展開底部 subagent 列表時的游標列）。
 2. 該 pane 的唯一原生 Claude 程序，確實有直接子 shell，且 wrapper 中的
-   command 與 transcript 的 Bash 背景任務相符。
-3. 在可辨識的本輪使用者輸入之後，有背景 task ID 尚未收到完成、失敗或取消通知。
+   command 與 transcript 的 `Bash`／`Monitor` 背景任務相符。
+3. 在可辨識的本輪使用者輸入之後，有背景 task ID 尚未收到完成、失敗、取消或 Monitor 逾時通知。
 
 滿足時保留 `RUNNING`，使用既有的 `background_wait`／⏳；一般前景 spinner
 仍顯示 🏃，原生 WAIT 與核准／回答畫面優先。新使用者輸入會切斷舊回合的任務關聯；
