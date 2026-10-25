@@ -407,15 +407,25 @@ def native_pi_pids(pane_pid, table):
         if more.issubset(descendants):
             break
         descendants |= more
-    roots = []
+    candidates = set()
     for pid in descendants:
         args = table.get(pid, (0, ''))[1]
         exe = Path((args.split(None, 1)[0] if args else '')).name
-        if exe in ('pi', 'pi-agent') or 'pi-coding-agent' in args:
+        if exe in ('pi', 'pi-bolt', 'pi-bin', 'pi-agent') or 'pi-coding-agent' in args:
             tokens = args.split()
-            if 'daemon' in tokens or '--managed-daemon' in tokens:
+            if any(flag in tokens for flag in ('daemon', '--managed-daemon', '-p', '--print', '--mode')):
                 continue
-            roots.append(pid)
+            candidates.add(pid)
+    roots = []
+    for pid in sorted(candidates):
+        parent = table[pid][0]
+        for _ in range(30):
+            if parent in candidates:
+                break
+            if parent not in descendants or parent not in table:
+                roots.append(pid)
+                break
+            parent = table[parent][0]
     return roots
 
 

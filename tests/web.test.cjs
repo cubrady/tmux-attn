@@ -3268,3 +3268,65 @@ test('session titles bound and escape task hints and titles while keeping projec
   ui.render({ agents: [{ ...a, project: '<project>"&', title: '<manual>' }] });
   assert.match(ui.elements.get('list').innerHTML, /class="card-title">&lt;manual&gt;<\/span>[\s\S]*?<span class="project">&lt;project&gt;&quot;&amp;<\/span>/);
 });
+
+test('cards and sheets render structured task lists, deduplicate gerund activeForm, and fold completed tasks', () => {
+  const ui = dashboard();
+  const s6Tasks = {
+    total: 5, completed: 3, in_progress: 1, pending: 1,
+    items: [
+      { id: 1, subject: 'Read Round 4 evidence & trace root causes', status: 'completed', active_form: '', blocked_by: [] },
+      { id: 2, subject: 'Implement Round 5 layer fixes', status: 'completed', active_form: '', blocked_by: [1] },
+      { id: 3, subject: 'Add unit tests & Frozen Prefix A/B tooling', status: 'completed', active_form: '', blocked_by: [2] },
+      {
+        id: 4,
+        subject: 'Execute Frozen Prefix A/B and Full-Chain Replay evaluations',
+        status: 'in_progress',
+        active_form: 'executing Frozen Prefix A/B (x3) and Full-Chain Replay (20x3) evaluations',
+        blocked_by: [3],
+      },
+      { id: 5, subject: 'Compile Round 5 evidence package & comprehensive report', status: 'pending', active_form: '', blocked_by: [4] },
+    ],
+  };
+  const s5Tasks = {
+    total: 5, completed: 1, in_progress: 1, pending: 3,
+    items: [
+      { id: 1, subject: 'Re-establish baseline across repos, IAM, and hosts', status: 'completed', active_form: '', blocked_by: [] },
+      {
+        id: 2,
+        subject: 'Prepare and verify candidate on isolated state copies',
+        status: 'in_progress',
+        active_form: 'preparing and verifying candidate on isolated state copies',
+        blocked_by: [1],
+      },
+      { id: 3, subject: 'Perform production data inventory and reconciliation plan', status: 'pending', active_form: '', blocked_by: [1] },
+      { id: 4, subject: 'Implement and rehearse initial service-only cutover and admission barrier', status: 'pending', active_form: '', blocked_by: [2, 3] },
+      { id: 5, subject: 'Execute credential rotation cutover or document remaining gate evidence', status: 'pending', active_form: '', blocked_by: [4] },
+    ],
+  };
+  const a6 = { ...agent('local', 'RUNNING'), pane: '%6', pid: '600', project: 'sample', cli: 'pi', tasks: s6Tasks };
+  const a5 = { ...agent('local', 'RUNNING'), pane: '%5', pid: '500', project: 'insightgpt', cli: 'pi', tasks: s5Tasks };
+  ui.render({ agents: [a6, a5] });
+  const cardsHtml = ui.elements.get('list').innerHTML;
+  // Session 6 card: shows 3/5, #4 subject, +1 待辦, and keeps distinct active_form with (x3)/(20x3)
+  assert.match(cardsHtml, /aria-label="任務進度 3\/5"/);
+  assert.match(cardsHtml, /#4<\/span><span class="card-task-subject">Execute Frozen Prefix A\/B and Full-Chain Replay evaluations<\/span>/);
+  assert.match(cardsHtml, /\+1 待辦/);
+  assert.match(cardsHtml, /card-task-active">executing Frozen Prefix A\/B \(x3\) and Full-Chain Replay \(20x3\) evaluations<\/div>/);
+  // Session 5 card: shows 1/5, #2 subject, +3 待辦, and deduplicates redundant gerund active_form
+  assert.match(cardsHtml, /aria-label="任務進度 1\/5"/);
+  assert.match(cardsHtml, /\+3 待辦/);
+  assert.doesNotMatch(cardsHtml, /preparing and verifying candidate on isolated state copies/);
+
+  // Open sheet for Session 5 and verify dependency badges (resolved #1 vs blocked #2, #3) and fold toggle
+  ui.open(a5);
+  const sheetTasks = ui.elements.get('sheet-tasks');
+  assert.equal(sheetTasks.hidden, false);
+  assert.match(sheetTasks.innerHTML, /task-dep resolved" title="前置 #1 已完成">⛓ #1<\/span>/);
+  assert.match(sheetTasks.innerHTML, /task-dep blocked" title="等待前置 #2">⛓ #2<\/span><span class="task-dep blocked" title="等待前置 #3">⛓ #3<\/span>/);
+  assert.match(sheetTasks.innerHTML, /收合已完成 \(1\)/);
+
+  // Toggle fold for completed tasks
+  sheetTasks.listeners.click({ target: { closest: sel => sel === '[data-tasks-done-toggle]' ? {} : null } });
+  assert.match(sheetTasks.innerHTML, /展開已完成 \(1\)/);
+  assert.doesNotMatch(sheetTasks.innerHTML, /Re-establish baseline across repos/);
+});

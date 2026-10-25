@@ -318,6 +318,25 @@ def latest_cursor_transcript(cwd):
     return str(files[0])
 
 
+def pi_project_dir(cwd):
+    if not cwd:
+        return None
+    slug = str(Path(cwd)).lstrip('/').replace('/', '-')
+    base = Path(os.environ.get('PI_CODING_AGENT_DIR') or (Path.home() / '.pi' / 'agent'))
+    return base / 'sessions' / f'--{slug}--'
+
+
+def latest_pi_transcript(cwd):
+    directory = pi_project_dir(cwd)
+    if not directory or not directory.is_dir():
+        return ''
+    files = [p for p in directory.glob('*.jsonl') if p.is_file()]
+    if not files:
+        return ''
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(files[0])
+
+
 TRANSCRIPT_TAIL_BYTES = 262144
 
 
@@ -460,6 +479,34 @@ def parse_cursor_transcript(path):
     return _parse_with_tail_fallback(path, _parse_cursor_lines)
 
 
+def _parse_pi_lines(lines):
+    users, agent = [], ''
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get('type') != 'message':
+            continue
+        message = row.get('message') if isinstance(row.get('message'), dict) else {}
+        role = message.get('role')
+        if role == 'user':
+            text = content_to_text(message.get('content')).strip()
+            if text and not user_text_is_noise(text):
+                users.append(text)
+                agent = ''
+        elif role == 'assistant':
+            text = content_to_text(message.get('content')).strip()
+            if text:
+                agent = text
+    return users, agent
+
+
+def parse_pi_transcript(path):
+    """Pi coding-agent session jsonl (v3): {type:'message', message:{role, content:[...]}}."""
+    return _parse_with_tail_fallback(path, _parse_pi_lines)
+
+
 def read_transcript(path, agent=''):
     """Raw (user messages, latest agent message) from a transcript. ([], '') if unreadable."""
     path = Path(path) if path else None
@@ -471,6 +518,8 @@ def read_transcript(path, agent=''):
             return parse_codex_transcript(path)
         if agent == 'cursor' or 'agent-transcripts' in parts:
             return parse_cursor_transcript(path)
+        if agent == 'pi' or '.pi' in parts:
+            return parse_pi_transcript(path)
         return parse_claude_style_transcript(path)
     except OSError:
         return [], ''
@@ -495,6 +544,9 @@ def _scan_model(lines, agent):
         if agent == 'codex':
             if '"turn_context"' not in line:
                 continue
+        elif agent == 'pi':
+            if not any(tag in line for tag in ('"model_change"', '"thinking_level_change"', '"assistant"')):
+                continue
         elif '"assistant"' not in line:
             continue
         try:
@@ -505,6 +557,18 @@ def _scan_model(lines, agent):
             payload = row.get('payload') if isinstance(row.get('payload'), dict) else {}
             if row.get('type') == 'turn_context' and payload.get('model'):
                 model, effort = str(payload['model']), str(payload.get('effort') or '')
+        elif agent == 'pi':
+            kind = row.get('type')
+            if kind == 'model_change' and row.get('modelId'):
+                model = str(row['modelId'])
+            elif kind == 'thinking_level_change' and row.get('thinkingLevel'):
+                effort = str(row['thinkingLevel'])
+            elif kind == 'message':
+                message = row.get('message') if isinstance(row.get('message'), dict) else {}
+                if message.get('role') == 'assistant':
+                    found = str(message.get('model') or '')
+                    if found and not found.startswith('<'):
+                        model = found
         elif row.get('type') == 'assistant':
             message = row.get('message') if isinstance(row.get('message'), dict) else {}
             found = str(message.get('model') or '')
@@ -516,7 +580,7 @@ def _scan_model(lines, agent):
 def transcript_model(path, agent=''):
     """(model id, reasoning effort) last seen in a transcript; ('', '') when unknown.
 
-    Only Claude and Codex transcripts record the model. The tail scan can miss it during a
+    Claude, Codex, and Pi transcripts record the model. The tail scan can miss it during a
     long turn, so the last value seen for a file is kept rather than blanking the badge.
     """
     key = str(path or '')
@@ -524,9 +588,10 @@ def transcript_model(path, agent=''):
         stat_result = Path(key).stat()
     except OSError:
         return '', ''
+    parts = {p.lower() for p in Path(key).parts}
     rollout = 'rollout' in Path(key).name or agent == 'codex'
-    kind = 'codex' if rollout else agent
-    if kind not in ('codex', 'claude'):
+    kind = 'codex' if rollout else ('pi' if agent == 'pi' or '.pi' in parts else agent)
+    if kind not in ('codex', 'claude', 'pi'):
         return '', ''
     signature = (stat_result.st_mtime_ns, stat_result.st_size)
     cached = _MODEL_CACHE.get(key)
@@ -534,14 +599,18 @@ def transcript_model(path, agent=''):
         return cached[1], cached[2]
     try:
         model, effort = _scan_model(_iter_transcript_tail_lines(key), kind)
-        if not model and not cached and stat_result.st_size > TRANSCRIPT_TAIL_BYTES:
-            # Codex writes turn_context once per turn, so a long turn can push it past the tail.
+        if (not model or (kind == 'pi' and not effort)) and not cached and stat_result.st_size > TRANSCRIPT_TAIL_BYTES:
+            # Codex writes turn_context once per turn and Pi writes model_change / thinking_level_change
+            # at session start, so a long turn can push them past the tail.
             with open(key, errors='replace') as source:
-                model, effort = _scan_model(source, kind)
+                full_model, full_effort = _scan_model(source, kind)
+                model = model or full_model
+                effort = effort or full_effort
     except OSError:
         return (cached[1], cached[2]) if cached else ('', '')
-    if not model and cached:
-        model, effort = cached[1], cached[2]
+    if cached:
+        model = model or cached[1]
+        effort = effort or cached[2]
     if len(_MODEL_CACHE) >= _MODEL_CACHE_LIMIT:
         _MODEL_CACHE.clear()
     _MODEL_CACHE[key] = (signature, model, effort)
@@ -551,6 +620,259 @@ def transcript_model(path, agent=''):
 def pane_model(con, row):
     """(model id, effort) for a tracked pane's transcript."""
     return transcript_model(resolve_transcript_path(con, row, row), row.get('agent') or '')
+
+
+TASK_MAX_ITEMS = 32
+TASK_SCAN_MAX_BYTES = 8 * 1024 * 1024
+TASK_CHUNK_BYTES = 524288
+TASK_OVERLAP_BYTES = 65536
+_TASK_CACHE = {}
+_TASK_CACHE_LIMIT = 256
+_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]')
+_SCREEN_TASK_HEADER_RE = re.compile(
+    r'^[●•]\s*(?:任务清单|任務清單|Tasks|Todo(?:\s+list)?)\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)\s*$',
+    re.I,
+)
+_SCREEN_TASK_LINE_RE = re.compile(
+    r'^[├└│─\s]*[├└]─\s*([✓✔●◐◑◓◒○])\s*(?:#(\d+)\s+)?(.+?)\s*$'
+)
+_SCREEN_TASK_DEP_RE = re.compile(r'\s+⛓\s*#?(\d+(?:\s*,\s*#?\d+)*)\s*$')
+
+
+def _normalize_task_items(raw_items):
+    if not isinstance(raw_items, list):
+        return []
+    items, seen_ids = [], set()
+    for idx, raw in enumerate(raw_items):
+        if len(items) >= TASK_MAX_ITEMS:
+            break
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get('status') or '').strip().lower()
+        if status not in ('completed', 'in_progress', 'pending'):
+            continue
+        subject = clean(raw.get('subject') or raw.get('content') or raw.get('title') or '', 240).strip()
+        if not subject:
+            continue
+        raw_id = raw.get('id')
+        if isinstance(raw_id, int) and not isinstance(raw_id, bool) and 0 < raw_id <= 9999:
+            task_id = raw_id
+        elif isinstance(raw_id, str) and raw_id.lstrip('#').isdigit() and 0 < int(raw_id.lstrip('#')) <= 9999:
+            task_id = int(raw_id.lstrip('#'))
+        else:
+            task_id = idx + 1
+        while task_id in seen_ids:
+            task_id += 1
+        seen_ids.add(task_id)
+        active_form = clean(raw.get('activeForm') or raw.get('active_form') or '', 240).strip()
+        raw_deps = raw.get('blockedBy') if 'blockedBy' in raw else raw.get('blocked_by')
+        blocked_by = []
+        if isinstance(raw_deps, list):
+            for dep in raw_deps[:16]:
+                if isinstance(dep, int) and not isinstance(dep, bool) and 0 < dep <= 9999:
+                    if dep not in blocked_by:
+                        blocked_by.append(dep)
+                elif isinstance(dep, str) and dep.lstrip('#').isdigit():
+                    val = int(dep.lstrip('#'))
+                    if 0 < val <= 9999 and val not in blocked_by:
+                        blocked_by.append(val)
+        items.append({
+            'id': task_id,
+            'subject': subject,
+            'status': status,
+            'active_form': active_form,
+            'blocked_by': blocked_by,
+        })
+    return items
+
+
+def _build_tasks_summary(raw_items):
+    items = _normalize_task_items(raw_items)
+    if not items:
+        return None
+    completed = sum(1 for item in items if item['status'] == 'completed')
+    in_progress = sum(1 for item in items if item['status'] == 'in_progress')
+    pending = sum(1 for item in items if item['status'] == 'pending')
+    return {
+        'total': len(items),
+        'completed': completed,
+        'in_progress': in_progress,
+        'pending': pending,
+        'items': items,
+    }
+
+
+def _extract_task_list_from_line(line):
+    if '"todo"' not in line and '"TodoWrite"' not in line:
+        return False, None
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return False, None
+    if not isinstance(row, dict):
+        return False, None
+    message = row.get('message') if isinstance(row.get('message'), dict) else {}
+    if row.get('type') == 'message' and message.get('role') == 'toolResult' and message.get('toolName') == 'todo':
+        details = message.get('details')
+        if isinstance(details, dict) and isinstance(details.get('tasks'), list):
+            return True, _build_tasks_summary(details['tasks'])
+    content = message.get('content')
+    if isinstance(content, list):
+        for part in reversed(content):
+            if isinstance(part, dict) and part.get('type') == 'tool_use' and part.get('name') == 'TodoWrite':
+                inp = part.get('input')
+                if isinstance(inp, dict) and isinstance(inp.get('todos'), list):
+                    return True, _build_tasks_summary(inp['todos'])
+    return False, None
+
+
+def _scan_transcript_tasks_reverse(path, min_offset=0):
+    """Scan backwards from EOF to min_offset for the latest todo snapshot."""
+    path = Path(path)
+    try:
+        with path.open('rb') as f:
+            size = f.seek(0, 2)
+            floor = max(0, min_offset, size - TASK_SCAN_MAX_BYTES)
+            pos = size
+            carry = b''
+            while pos > floor:
+                read_start = max(floor, pos - TASK_CHUNK_BYTES)
+                f.seek(read_start)
+                chunk = f.read(pos - read_start) + carry
+                if read_start > 0:
+                    nl = chunk.find(b'\n')
+                    if nl == -1:
+                        carry = chunk
+                        pos = read_start
+                        continue
+                    carry = chunk[:nl]
+                    body = chunk[nl + 1:]
+                else:
+                    carry = b''
+                    body = chunk
+                for raw_line in reversed(body.splitlines()):
+                    if b'"todo"' not in raw_line and b'"TodoWrite"' not in raw_line:
+                        continue
+                    found, summary = _extract_task_list_from_line(raw_line.decode('utf-8', errors='replace'))
+                    if found:
+                        return True, summary
+                pos = read_start
+    except OSError:
+        return False, None
+    return False, None
+
+
+def transcript_tasks(path, agent=''):
+    """Latest structured task list from a Pi or Claude transcript; None when absent."""
+    key = str(path or '')
+    if not key:
+        return None
+    try:
+        stat_result = Path(key).stat()
+    except OSError:
+        return None
+    parts = {p.lower() for p in Path(key).parts}
+    kind = 'pi' if agent == 'pi' or '.pi' in parts else agent
+    if kind not in ('pi', 'claude', ''):
+        return None
+    signature = (stat_result.st_mtime_ns, stat_result.st_size)
+    cached = _TASK_CACHE.get(key)
+    if cached and cached[0] == signature:
+        return cached[1]
+    if cached and stat_result.st_size > cached[0][1]:
+        min_offset = max(0, cached[0][1] - TASK_OVERLAP_BYTES)
+        found, result = _scan_transcript_tasks_reverse(key, min_offset=min_offset)
+        if not found:
+            result = cached[1]
+    else:
+        _, result = _scan_transcript_tasks_reverse(key, min_offset=0)
+    if len(_TASK_CACHE) >= _TASK_CACHE_LIMIT:
+        _TASK_CACHE.clear()
+    _TASK_CACHE[key] = (signature, result)
+    return result
+
+
+def _split_trailing_active_form(text):
+    """Split 'Subject (active form (x3))' into ('Subject', 'active form (x3)')."""
+    text = text.strip()
+    if not text.endswith(')'):
+        return text, ''
+    depth = 0
+    for i in range(len(text) - 1, -1, -1):
+        ch = text[i]
+        if ch == ')':
+            depth += 1
+        elif ch == '(':
+            depth -= 1
+            if depth == 0:
+                if i > 0 and text[i - 1].isspace():
+                    subject = text[:i].rstrip()
+                    active = text[i + 1:-1].strip()
+                    if subject and active:
+                        return subject, active
+                break
+    return text, ''
+
+
+def parse_screen_tasks(screen):
+    """Parse a TUI task list block (e.g. '● 任务清单 (0/2)') from terminal screen text."""
+    if not screen:
+        return None
+    cleaned = _ANSI_ESCAPE_RE.sub('', str(screen))
+    lines = cleaned.splitlines()
+    blocks = []
+    i = 0
+    while i < len(lines):
+        header = _SCREEN_TASK_HEADER_RE.match(lines[i].strip())
+        if not header:
+            i += 1
+            continue
+        i += 1
+        raw_items = []
+        while i < len(lines):
+            match = _SCREEN_TASK_LINE_RE.match(lines[i])
+            if not match:
+                break
+            glyph, num_str, body = match.group(1), match.group(2), match.group(3)
+            status = (
+                'completed' if glyph in ('✓', '✔', '●')
+                else 'in_progress' if glyph in ('◐', '◑', '◓', '◒')
+                else 'pending'
+            )
+            deps = []
+            dep_match = _SCREEN_TASK_DEP_RE.search(body)
+            if dep_match:
+                deps = [int(x.lstrip('#').strip()) for x in dep_match.group(1).split(',') if x.lstrip('#').strip().isdigit()]
+                body = body[:dep_match.start()].rstrip()
+            subject, active_form = _split_trailing_active_form(body) if status == 'in_progress' else (body.strip(), '')
+            raw_items.append({
+                'id': int(num_str) if num_str else len(raw_items) + 1,
+                'subject': subject,
+                'status': status,
+                'active_form': active_form,
+                'blocked_by': deps,
+            })
+            i += 1
+        if raw_items:
+            blocks.append(raw_items)
+    if not blocks:
+        return None
+    return _build_tasks_summary(blocks[-1])
+
+
+def pane_tasks(con, row):
+    """Structured task list for a tracked pane; None when absent."""
+    return transcript_tasks(resolve_transcript_path(con, row, row), row.get('agent') or '')
+
+
+def sanitized_tasks(agent):
+    """Validate optional task list summaries on local or peer /api/agents payloads."""
+    if not isinstance(agent, dict) or not agent.get('tracked'):
+        return None
+    value = agent.get('tasks')
+    if not isinstance(value, dict):
+        return None
+    return _build_tasks_summary(value.get('items'))
 
 
 def model_label(model):
@@ -613,11 +935,16 @@ def resolve_transcript_path(con, row, meta):
     mapping = con.execute(
         'SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
         (row['socket'], row['pane'], row['pid']),
-    ).fetchone()
+    ).fetchone() if con is not None else None
     if mapping and mapping['rollout_path'] and Path(mapping['rollout_path']).is_file():
         return mapping['rollout_path']
     cwd = (meta or {}).get('path') or ''
     agent = row.get('agent') or ''
+    if agent == 'pi':
+        found = latest_pi_transcript(cwd)
+        if found:
+            return found
+        return path if path and Path(path).is_file() else ''
     if agent == 'cursor':
         found = latest_cursor_transcript(cwd)
         if found:
@@ -730,8 +1057,13 @@ def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS, snapshot
     cached_mtime = float(row['preview_mtime'] if 'preview_mtime' in row.keys() else 0) or 0
     path = resolve_transcript_path(con, row, meta)
     # A hook's current result is authoritative; a lagging transcript must not replace it.
-    if path and not (row['state'] == 'IDLE' and row['needs_review']
-                     and preview_revision == row['revision'] and agent_text):
+    hook_authoritative = (row['state'] == 'IDLE' and row['needs_review']
+                          and preview_revision == row['revision'] and bool(agent_text))
+    if path and hook_authoritative and not users:
+        parsed = conversation_preview(path, row.get('agent') or '', limit=PREVIEW_CHARS_FULL)
+        if parsed['users']:
+            users = parsed['users']
+    elif path and not hook_authoritative:
         try:
             mtime = Path(path).stat().st_mtime
         except OSError:
@@ -1978,15 +2310,19 @@ def live_panes(sock=None):
 SESSION_TITLE_CHARS = 80
 # Agents write their session title into the tmux pane title: Claude Code as "<glyph> title",
 # Codex as "title | project". Anything else here is a shell prompt or a default placeholder.
-GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'cursor', 'cursor agent', 'agent', 'pi', 'zsh', 'bash', 'fish', 'sh', 'tmux'}
+GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'cursor', 'cursor agent', 'agent', 'pi', 'pi-bolt', 'pi-bin', 'pi-agent', 'π', 'zsh', 'bash', 'fish', 'sh', 'tmux'}
 
 
 def pane_session_title(raw, path='', command=''):
     title = clean(raw).strip()
     title = re.sub(r'^[^\w]+\s+', '', title)  # status glyph or spinner frame
+    title = re.sub(r'^(?:pi(?:-bolt)?|π)\s+-\s+', '', title, flags=re.I).strip()
     project = Path(path).name if path else ''
-    if project and title.endswith(f' | {project}'):
-        title = title[:-len(project) - 3].strip()
+    if project:
+        for sep in (' | ', ' - '):
+            if title.endswith(f'{sep}{project}'):
+                title = title[:-len(project) - len(sep)].strip()
+                break
     lowered = title.lower()
     if (not title or lowered in GENERIC_PANE_TITLES or lowered in {project.lower(), clean(command).lower()}
             or re.fullmatch(r'[\w.-]+@[\w.-]+', title)):
@@ -2333,7 +2669,7 @@ def command_cli(command):
         return 'codex'
     if key in ('agent', 'cursor'):
         return 'agent'
-    if key in ('pi',):
+    if key in ('pi', 'pi-bolt', 'pi-bin', 'pi-agent'):
         return 'pi'
     # Claude Code sometimes surfaces as a version-looking binary name.
     if key.replace('.', '').isdigit() and key.count('.') >= 2:
@@ -2476,6 +2812,10 @@ def tag_host(payload, host):
         item.pop('workstream_label', None)
         if safe is not None:
             item['handoff'] = safe
+        safe_tasks = sanitized_tasks(item)
+        item.pop('tasks', None)
+        if safe_tasks is not None:
+            item['tasks'] = safe_tasks
         agents.append(item)
     # Reclassify older peers too; their summary may still count viewed results as review.
     return agents, attention_summary(agents)
@@ -2725,6 +3065,10 @@ def web_inbox_fleet(fleet):
         agent.pop('handoff', None)
         if safe is not None:
             agent['handoff'] = safe
+        safe_tasks = sanitized_tasks(agent)
+        agent.pop('tasks', None)
+        if safe_tasks is not None:
+            agent['tasks'] = safe_tasks
     with closing(web_later_db()) as con, con:
         for host, pane, pid, label in con.execute('SELECT host,pane,pid,label FROM workstreams').fetchall():
             key = host, pane, pid
@@ -2959,7 +3303,13 @@ def _bounded_handoff_lines(path):
 
 
 def _handoff_parser(agent):
-    return _parse_codex_lines if agent == 'codex' else _parse_cursor_lines if agent == 'cursor' else _parse_claude_lines
+    if agent == 'codex':
+        return _parse_codex_lines
+    if agent == 'cursor':
+        return _parse_cursor_lines
+    if agent == 'pi':
+        return _parse_pi_lines
+    return _parse_claude_lines
 
 
 def _bounded_handoff_transcript(path, agent, row=None):
@@ -3063,8 +3413,9 @@ def agents_payload(con, sock=None, live=None, now=None):
         handoff = pane_handoff(con, dict(cached)) if cached and cached['revision'] == row['revision'] else {
             'revision': row['revision'], 'source': 'unavailable', 'items': [], 'truncated': False}
         model, effort = pane_model(con, row)
+        tasks = pane_tasks(con, row)
         env = git_workdir_info(row.get('path', ''))
-        agents.append({
+        agent_row = {
             'pane': row['pane'],
             'pid': row['pid'],
             'session': row['session'],
@@ -3102,7 +3453,10 @@ def agents_payload(con, sock=None, live=None, now=None):
             'handoff': handoff,
             'updated': row['updated'],
             'age': age(row['updated']),
-        })
+        }
+        if tasks is not None:
+            agent_row['tasks'] = tasks
+        agents.append(agent_row)
     for key, meta in live.items():
         if key in tracked_keys:
             continue
