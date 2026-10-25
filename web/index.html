@@ -820,6 +820,199 @@
       text-wrap: pretty;
     }
     .card.error .reason { color: var(--danger); font-weight: 500; }
+    .card-tasks {
+      margin-top: 8px;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+      background: color-mix(in srgb, var(--bg) 55%, var(--card));
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .card-task-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    .card-task-main {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .task-glyph {
+      font-family: var(--mono);
+      font-size: 0.76rem;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .task-glyph.completed { color: var(--running); }
+    .task-glyph.in_progress { color: var(--accent); }
+    .task-glyph.pending { color: var(--muted); }
+    .task-id {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 500;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+    .card-task-subject {
+      font-size: 0.81rem;
+      font-weight: 500;
+      color: var(--fg);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .card-task-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .task-more {
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .task-bar {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .task-seg {
+      width: 8px;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--line);
+    }
+    .task-seg.completed { background: var(--running); }
+    .task-seg.in_progress { background: var(--accent); }
+    .task-count {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .card-task-active {
+      padding-left: 1.15rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sheet-tasks {
+      flex: 0 0 auto;
+      margin: 0 0 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, var(--bg) 52%, var(--sheet-bg));
+      max-height: 11.5rem;
+      overflow-y: auto;
+    }
+    .sheet-tasks-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .sheet-tasks-heading {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.03em;
+    }
+    .sheet-tasks-toggle {
+      border: 0;
+      background: none;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font: 500 0.72rem var(--font);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .sheet-tasks-toggle:hover {
+      color: var(--fg);
+      background: color-mix(in srgb, var(--line) 45%, transparent);
+    }
+    .sheet-task-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .sheet-task {
+      display: grid;
+      grid-template-columns: 0.9rem auto minmax(0, 1fr) auto;
+      column-gap: 6px;
+      row-gap: 2px;
+      align-items: baseline;
+      font-size: 0.81rem;
+      line-height: 1.35;
+      padding: 3px 4px;
+      border-radius: 5px;
+    }
+    .sheet-task.in_progress {
+      background: color-mix(in srgb, var(--accent) 9%, transparent);
+    }
+    .sheet-task.completed .sheet-task-subject {
+      color: var(--muted);
+    }
+    .sheet-task.in_progress .sheet-task-subject {
+      color: var(--fg);
+      font-weight: 500;
+    }
+    .sheet-task.pending .sheet-task-subject {
+      color: color-mix(in srgb, var(--fg) 84%, var(--muted));
+    }
+    .sheet-task-deps {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .task-dep {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      line-height: 1.2;
+      padding: 1px 5px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: color-mix(in srgb, var(--line) 32%, transparent);
+      white-space: nowrap;
+    }
+    .task-dep.resolved {
+      opacity: 0.65;
+      color: var(--running);
+      border-color: color-mix(in srgb, var(--running) 30%, var(--line));
+    }
+    .task-dep.blocked {
+      color: color-mix(in srgb, var(--wait) 78%, var(--muted));
+      border-color: color-mix(in srgb, var(--wait) 32%, var(--line));
+    }
+    .sheet-task-active {
+      grid-column: 3 / -1;
+      font-size: 0.74rem;
+      color: var(--muted);
+    }
     .preview {
       margin-top: 10px;
       padding-top: 9px;
@@ -1886,6 +2079,7 @@
       </div>
       <div class="sheet-path" id="sheet-path" hidden></div>
       <div class="sheet-progress" id="sheet-progress" hidden></div>
+      <section class="sheet-tasks" id="sheet-tasks" aria-label="任務清單" hidden></section>
       <div class="sheet-preview" id="sheet-preview" tabindex="0"></div>
       <section class="sheet-ask" id="sheet-ask" aria-label="待回答的問題" hidden></section>
       <form class="sheet-compose" id="sheet-form">
@@ -2473,6 +2667,112 @@
       if (!lastUser && !agentLine) return '';
       return `<div class="preview">${agentLine ? previewLineHtml('agent', agentLine) : ''}${lastUser ? previewLineHtml('user', lastUser) : ''}</div>`;
     }
+    const TASK_STOPWORDS = new Set(['and', 'or', 'the', 'a', 'an', 'to', 'on', 'in', 'of', 'for', 'with', 'across', 'by', 'from', 'into', 'at', 'as', 'is', 'are', 'be']);
+    function taskWordTokens(text) {
+      return (String(text || '').toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]+/g) || [])
+        .filter(tok => !TASK_STOPWORDS.has(tok));
+    }
+    function distinctActiveForm(subject, activeForm) {
+      const sub = String(subject || '').trim();
+      const act = String(activeForm || '').trim();
+      if (!act) return '';
+      if (!sub) return act;
+      if (act.toLowerCase() === sub.toLowerCase()) return '';
+      const subTokens = taskWordTokens(sub);
+      const actTokens = taskWordTokens(act);
+      if (!actTokens.length) return '';
+      const covered = actTokens.every(w => subTokens.some(s => {
+        if (s === w) return true;
+        const stemLen = Math.min(s.length, w.length);
+        if (stemLen < 4) return false;
+        const prefix = Math.max(4, Math.min(s.length, w.length) - 3);
+        return w.slice(0, prefix) === s.slice(0, prefix);
+      }));
+      return covered ? '' : act;
+    }
+    function normalizeTasks(tasks) {
+      const items = Array.isArray(tasks?.items) ? tasks.items.filter(item =>
+        item && typeof item === 'object' && typeof item.subject === 'string' && item.subject.trim()
+        && ['completed', 'in_progress', 'pending'].includes(item.status)
+      ) : [];
+      if (!items.length) return null;
+      const completed = items.filter(t => t.status === 'completed').length;
+      const inProgress = items.filter(t => t.status === 'in_progress').length;
+      const pending = items.filter(t => t.status === 'pending').length;
+      return { total: items.length, completed, in_progress: inProgress, pending, items };
+    }
+    function taskGlyph(status) {
+      return status === 'completed' ? '✓' : status === 'in_progress' ? '◐' : '○';
+    }
+    function taskBarHtml(items) {
+      return `<span class="task-bar" aria-hidden="true">${items.map(t => `<span class="task-seg ${escapeHtml(t.status)}"></span>`).join('')}</span>`;
+    }
+    function cardTasksHtml(rawTasks) {
+      const tasks = normalizeTasks(rawTasks);
+      if (!tasks) return '';
+      const { items, total, completed, in_progress: inProgress, pending } = tasks;
+      const focus = items.find(t => t.status === 'in_progress')
+        || items.find(t => t.status === 'pending')
+        || items[items.length - 1];
+      const remaining = Math.max(0, inProgress + pending - 1);
+      const moreChip = remaining > 0 ? `<span class="task-more">+${remaining} 待辦</span>` : '';
+      const activeText = focus.status === 'in_progress' ? distinctActiveForm(focus.subject, focus.active_form) : '';
+      return `<div class="card-tasks" aria-label="任務進度 ${completed}/${total}">` +
+        `<div class="card-task-head">` +
+          `<div class="card-task-main">` +
+            `<span class="task-glyph ${escapeHtml(focus.status)}" aria-hidden="true">${taskGlyph(focus.status)}</span>` +
+            `<span class="task-id">#${escapeHtml(String(focus.id))}</span>` +
+            `<span class="card-task-subject">${escapeHtml(focus.subject)}</span>` +
+          `</div>` +
+          `<div class="card-task-right">${moreChip}${taskBarHtml(items)}<span class="task-count">${completed}/${total}</span></div>` +
+        `</div>` +
+        (activeText ? `<div class="card-task-active">${escapeHtml(activeText)}</div>` : '') +
+      `</div>`;
+    }
+    let sheetTasksDoneOpen = true;
+    function sheetTasksHtml(rawTasks) {
+      const tasks = normalizeTasks(rawTasks);
+      if (!tasks) return '';
+      const { items, total, completed } = tasks;
+      const completedIds = new Set(items.filter(t => t.status === 'completed').map(t => Number(t.id)));
+      const canFoldDone = completed > 0 && completed < total;
+      const showDone = !canFoldDone || sheetTasksDoneOpen;
+      const visibleItems = showDone ? items : items.filter(t => t.status !== 'completed');
+      const toggle = canFoldDone
+        ? `<button type="button" class="sheet-tasks-toggle" data-tasks-done-toggle aria-expanded="${sheetTasksDoneOpen}">${
+            sheetTasksDoneOpen ? `收合已完成 (${completed})` : `展開已完成 (${completed})`}</button>`
+        : '';
+      const rows = visibleItems.map(t => {
+        const deps = Array.isArray(t.blocked_by) ? t.blocked_by : [];
+        const depBadges = deps.length
+          ? `<span class="sheet-task-deps">${deps.map(dep => {
+              const resolved = completedIds.has(Number(dep));
+              return `<span class="task-dep ${resolved ? 'resolved' : 'blocked'}" title="${
+                resolved ? `前置 #${dep} 已完成` : `等待前置 #${dep}`}">⛓ #${escapeHtml(String(dep))}</span>`;
+            }).join('')}</span>`
+          : '<span></span>';
+        const activeText = t.status === 'in_progress' ? distinctActiveForm(t.subject, t.active_form) : '';
+        return `<li class="sheet-task ${escapeHtml(t.status)}" data-task-id="${escapeHtml(String(t.id))}">` +
+          `<span class="task-glyph ${escapeHtml(t.status)}" aria-hidden="true">${taskGlyph(t.status)}</span>` +
+          `<span class="task-id">#${escapeHtml(String(t.id))}</span>` +
+          `<span class="sheet-task-subject">${escapeHtml(t.subject)}</span>` +
+          depBadges +
+          (activeText ? `<div class="sheet-task-active">${escapeHtml(activeText)}</div>` : '') +
+        `</li>`;
+      }).join('');
+      return `<div class="sheet-tasks-bar">` +
+          `<span class="sheet-tasks-heading"><span>任務清單</span>${taskBarHtml(items)}<span class="task-count">${completed}/${total}</span></span>` +
+          toggle +
+        `</div>` +
+        `<ol class="sheet-task-list">${rows}</ol>`;
+    }
+    function renderSheetTasks(agent) {
+      const box = document.getElementById('sheet-tasks');
+      if (!box) return;
+      const html = sheetTasksHtml(agent?.tasks);
+      box.hidden = !html;
+      box.innerHTML = html;
+    }
     function markClippedPreviews() {
       document.querySelectorAll('.card .preview-line .text.md, .sheet-preview .preview-line.user .text.md').forEach(el => {
         el.classList.toggle('clipped', el.scrollHeight > el.clientHeight + 1);
@@ -2573,6 +2873,7 @@
         </div>
         ${killNote}
         ${GENERIC_REASONS.has(reason) ? '' : `<div class="reason">${escapeHtml(reason)}</div>`}
+        ${cardTasksHtml(a.tasks)}
         ${cardPreviewHtml(a.preview)}
       </article>`;
     }
@@ -3047,6 +3348,7 @@
       path.hidden = !sheetPathOpen || !path.textContent;
       document.getElementById('sheet-reason').textContent = reason || '';
       const current = latestAgents.find(row => agentKey(row) === agentKey(agent)) || agent;
+      renderSheetTasks(current);
       updateSheetLater(current);
     }
     function setRefreshLabel(newer) {
@@ -3226,6 +3528,7 @@
       setRefreshLabel(false);
       sheetPathOpen = false;
       sheetEarlierOpen = false;
+      sheetTasksDoneOpen = (normalizeTasks(agent?.tasks)?.total || 0) <= 6;
       sheetQuestions = [];
       renderSheetQuestions();
       fillSheet(agent, { refreshPreview: true });
@@ -3249,6 +3552,7 @@
         closeSheet();
         return;
       }
+      renderSheetTasks(agent);
       // Polling updates the list, but does not replace content the user is reading.
       const newer = sheetPreviewFull && (sheetPreviewRevision
         ? (agent.revision || 0) > sheetPreviewRevision
@@ -3546,6 +3850,13 @@
       window.visualViewport.addEventListener('resize', applyViewport);
       window.visualViewport.addEventListener('scroll', applyViewport);
     }
+    document.getElementById('sheet-tasks').addEventListener('click', (event) => {
+      const toggle = event.target?.closest?.('[data-tasks-done-toggle]');
+      if (!toggle) return;
+      sheetTasksDoneOpen = !sheetTasksDoneOpen;
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      if (agent) renderSheetTasks(agent);
+    });
     document.getElementById('sheet-preview').addEventListener('click', (event) => {
       const fold = event.target.closest('[data-earlier]');
       if (fold) {

@@ -20,9 +20,19 @@ export default function (pi: ExtensionAPI) {
       /* best-effort heartbeat for observer */
     }
   };
-  const report = (event: string, data: object = {}) => {
+  let lastPrompt = "";
+  const sessionPath = (ctx: any): string => {
+    try {
+      return ctx?.sessionManager?.getSessionFile?.() || "";
+    } catch {
+      return "";
+    }
+  };
+  const report = (event: string, data: object = {}, ctx?: any) => {
     if (!process.env.TMUX || !process.env.TMUX_PANE) return;
     beat();
+    const transcript_path = sessionPath(ctx);
+    const payload = transcript_path ? { transcript_path, ...data } : data;
     // Absolute paths are filled by install.py. No provider calls or extra dependencies.
     const child = spawn("__PYTHON__", ["__ATTENTION__", "event", "pi", event], {
       stdio: ["pipe", "ignore", "ignore"],
@@ -31,23 +41,34 @@ export default function (pi: ExtensionAPI) {
       child.on("error", () => resolve());
       child.on("close", () => resolve());
       child.stdin.on("error", () => {});
-      child.stdin.end(JSON.stringify(data));
+      child.stdin.end(JSON.stringify(payload));
     });
   };
-  pi.on("session_start", () => report("session_start"));
-  pi.on("agent_start", () => { lastText = ""; return report("agent_start"); });
-  pi.on("tool_execution_start", () => report("tool_execution_start"));
+  pi.on("session_start", (_event, ctx) => report("session_start", {}, ctx));
+  pi.on("before_agent_start", (event) => {
+    if (event.messageType === "user" && typeof event.prompt === "string" && event.prompt.trim()) {
+      lastPrompt = event.prompt.trim();
+    }
+    return undefined;
+  });
+  pi.on("agent_start", (_event, ctx) => {
+    lastText = "";
+    const prompt = lastPrompt;
+    lastPrompt = "";
+    return report("agent_start", prompt ? { prompt } : {}, ctx);
+  });
+  pi.on("tool_execution_start", (_event, ctx) => report("tool_execution_start", {}, ctx));
   pi.on("message_end", (event) => {
     if (event.message.role === "assistant") {
       lastText = event.message.content.filter((block) => block.type === "text")
         .map((block) => block.text).join("\n");
     }
   });
-  pi.on("ui_prompt_start", (event) => report("ui_prompt_start", {
+  pi.on("ui_prompt_start", (event, ctx) => report("ui_prompt_start", {
     title: event.title,
     kind: event.kind,
-  }));
-  pi.on("ui_prompt_end", (_event, ctx) => report(ctx.isIdle() ? "idle_no_review" : "ui_prompt_end"));
-  pi.on("agent_settled", () => report("agent_settled", {last_assistant_message: lastText}));
-  pi.on("session_shutdown", () => report("session_shutdown"));
+  }, ctx));
+  pi.on("ui_prompt_end", (_event, ctx) => report(ctx.isIdle() ? "idle_no_review" : "ui_prompt_end", {}, ctx));
+  pi.on("agent_settled", (_event, ctx) => report("agent_settled", {last_assistant_message: lastText}, ctx));
+  pi.on("session_shutdown", (_event, ctx) => report("session_shutdown", {}, ctx));
 }

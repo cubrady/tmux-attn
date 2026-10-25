@@ -427,8 +427,16 @@ class PiObserverTests(unittest.TestCase):
   self.assertIsNone(pi_screen('pi> ready'))
 
  def test_native_pi_pids_finds_cli(self):
-  table={1:(0,'zsh'),2:(1,'pi --offline'),3:(1,'node /x/pi-coding-agent/dist/cli.js'),4:(1,'pi-agent daemon')}
-  self.assertEqual(sorted(native_pi_pids(1, table)), [2, 3])
+  table={
+   1:(0,'zsh'),
+   2:(1,'pi --offline'),
+   3:(1,'node /x/pi-coding-agent/dist/cli.js'),
+   4:(1,'pi-agent daemon'),
+   5:(1,'pi-bolt --model nocory/gemini-4-argon --thinking high'),
+   6:(5,'pi-bolt --model nocory/gemini-4-argon --thinking high'),
+   7:(6,'pi-bolt -p "headless subagent" --mode json'),
+  }
+  self.assertEqual(sorted(native_pi_pids(1, table)), [2, 3, 5])
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

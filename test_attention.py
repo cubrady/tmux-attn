@@ -520,6 +520,87 @@ class StoreTests(unittest.TestCase):
         untracked = a.agents_payload(self.con, 'socket', shell, now=time.time()+3)['agents'][0]
         self.assertEqual((untracked['model'], untracked['model_label'], untracked['effort']), ('', '', ''))
 
+    def test_pi_transcript_model_tasks_and_no_claude_fallback(self):
+        cwd = '/Volumes/vms/proj/nocory/qiu-awareness-coach-ai'
+        self.live = {
+            ('%6', '69499'): {
+                'pane': '%6', 'pid': '69499', 'session': '0', 'window': 'pi-bin',
+                'window_id': '@6', 'window_index': 6, 'pane_index': 0,
+                'path': cwd, 'command': 'pi-bin', 'pane_title': 'Pi-Bolt - qiu-awareness-coach-ai',
+            },
+        }
+        pi_dir = Path(self.tmp.name) / 'sessions' / '--Volumes-vms-proj-nocory-qiu-awareness-coach-ai--'
+        pi_dir.mkdir(parents=True)
+        pi_session = pi_dir / 'session.jsonl'
+        lines = [
+            {'type': 'session', 'version': 3, 'id': 's1', 'cwd': cwd},
+            {'type': 'model_change', 'provider': 'nocory', 'modelId': 'gemini-4-argon'},
+            {'type': 'thinking_level_change', 'thinkingLevel': 'high'},
+            {'type': 'message', 'message': {'role': 'user', 'content': [{'type': 'text', 'text': 'Run Round 5 evaluation'}]}},
+            {
+                'type': 'message',
+                'message': {
+                    'role': 'toolResult',
+                    'toolName': 'todo',
+                    'details': {
+                        'action': 'update',
+                        'tasks': [
+                            {'id': 3, 'subject': 'Add unit tests & Frozen Prefix A/B tooling', 'status': 'completed', 'blockedBy': [2]},
+                            {
+                                'id': 4,
+                                'subject': 'Execute Frozen Prefix A/B and Full-Chain Replay evaluations',
+                                'status': 'in_progress',
+                                'activeForm': 'executing Frozen Prefix A/B (x3) and Full-Chain Replay (20x3) evaluations',
+                                'blockedBy': [3],
+                            },
+                            {'id': 5, 'subject': 'Compile Round 5 evidence package & comprehensive report', 'status': 'pending', 'blockedBy': [4]},
+                        ],
+                    },
+                },
+            },
+        ]
+        pi_session.write_text('\n'.join(json.dumps(row) for row in lines) + '\n')
+        a.record(self.con, 'socket', '%6', '69499', 'pi', 'RUNNING', 'Working')
+        with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': self.tmp.name}), \
+             patch.object(a, 'latest_claude_transcript', side_effect=AssertionError('pi must not read claude transcripts')):
+            row = a.agents_payload(self.con, 'socket', self.live, now=time.time() + 3)['agents'][0]
+        self.assertEqual((row['cli'], row['title'], row['model'], row['effort']), ('pi', '', 'gemini-4-argon', 'high'))
+        self.assertEqual(row['preview']['users'], ['Run Round 5 evaluation'])
+        self.assertEqual(row['tasks']['total'], 3)
+        self.assertEqual((row['tasks']['completed'], row['tasks']['in_progress'], row['tasks']['pending']), (1, 1, 1))
+        self.assertEqual(row['tasks']['items'][1]['id'], 4)
+        self.assertEqual(row['tasks']['items'][1]['blocked_by'], [3])
+        self.assertIn('(20x3)', row['tasks']['items'][1]['active_form'])
+
+    def test_parse_screen_tasks_handles_nested_parens_and_multi_dependencies(self):
+        s6 = (
+            '● 任务清单 (0/2)\n'
+            '├─ ◐ #4 Execute Frozen Prefix A/B and Full-Chain Replay evaluations '
+            '(executing Frozen Prefix A/B (x3) and Full-Chain Replay (20x3) evaluations) ⛓ #3\n'
+            '└─ ○ #5 Compile Round 5 evidence package & comprehensive report ⛓ #4\n'
+        )
+        parsed6 = a.parse_screen_tasks(s6)
+        self.assertEqual(parsed6['total'], 2)
+        self.assertEqual(parsed6['items'][0], {
+            'id': 4,
+            'subject': 'Execute Frozen Prefix A/B and Full-Chain Replay evaluations',
+            'status': 'in_progress',
+            'active_form': 'executing Frozen Prefix A/B (x3) and Full-Chain Replay (20x3) evaluations',
+            'blocked_by': [3],
+        })
+        self.assertEqual(parsed6['items'][1]['blocked_by'], [4])
+        s5 = (
+            '● 任务清单 (0/4)\n'
+            '├─ ◐ #2 Prepare and verify candidate on isolated state copies '
+            '(preparing and verifying candidate on isolated state copies) ⛓ #1\n'
+            '├─ ○ #3 Perform production data inventory and reconciliation plan ⛓ #1\n'
+            '├─ ○ #4 Implement and rehearse initial service-only cutover and admission barrier ⛓ #2,#3\n'
+            '└─ ○ #5 Execute credential rotation cutover or document remaining gate evidence ⛓ #4\n'
+        )
+        parsed5 = a.parse_screen_tasks(s5)
+        self.assertEqual(parsed5['total'], 4)
+        self.assertEqual(parsed5['items'][2]['blocked_by'], [2, 3])
+
     def test_agent_sort_key_newest_pending_first(self):
         older = {'tracked': True, 'state': 'IDLE', 'needs_review': True, 'unread': True, 'pending': True, 'updated': 100, 'host': 'a', 'pane': '%1'}
         newer = {'tracked': True, 'state': 'IDLE', 'needs_review': True, 'unread': True, 'pending': True, 'updated': 200, 'host': 'a', 'pane': '%2'}

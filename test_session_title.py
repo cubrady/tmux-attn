@@ -25,9 +25,16 @@ class PaneTitleTest(unittest.TestCase):
         self.assertEqual(self.title('Fix a | b parser'), 'Fix a | b parser')
 
     def test_default_titles_are_not_titles(self):
-        for raw in ('', '  ', 'Claude Code', '✳ Claude Code', 'codex', 'seramey-mita-brain', 'brad@host', 'zsh', '2.1.303'):
+        for raw in ('', '  ', 'Claude Code', '✳ Claude Code', 'codex', 'seramey-mita-brain', 'brad@host', 'zsh', '2.1.303',
+                    'Pi-Bolt - seramey-mita-brain', 'π - seramey-mita-brain', 'pi-bin', 'Pi-Bolt'):
             with self.subTest(raw=raw):
                 self.assertEqual(self.title(raw, command='2.1.303'), '')
+
+    def test_pi_bolt_custom_session_title_strips_prefix_and_project_suffix(self):
+        self.assertEqual(
+            self.title('Pi-Bolt - Round 5 Frozen Prefix Eval - seramey-mita-brain', command='pi-bin'),
+            'Round 5 Frozen Prefix Eval',
+        )
 
     def test_title_is_clipped(self):
         self.assertEqual(len(self.title('x' * 500)), a.SESSION_TITLE_CHARS)
