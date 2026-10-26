@@ -1789,6 +1789,19 @@ class IntegrationTests(unittest.TestCase):
                     wait(lambda:result.exists() and result.read_text().strip()=='{}')
                     self.assertEqual(json.loads(result.read_text()),{})
                     result.unlink()
+                def acknowledge_sidebar():
+                    def current_item():
+                        rows=json.loads(subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))
+                        return next(row for row in rows if row['pane']==pane)
+                    revision=current_item()['revision']
+                    run('send-keys','-t',sidebar,'d')
+                    def acknowledged_revision():
+                        row=current_item()
+                        self.assertEqual(row['revision'],revision)
+                        return row['acknowledged']==revision
+                    # pending is also false during the completion settle window;
+                    # only the exact revision confirms the rendered item was read.
+                    wait(acknowledged_revision)
                 cursor_config=json.loads((home/'.cursor/hooks.json').read_text())
                 self.assertIn({'command':'echo unrelated-cursor'},cursor_config['hooks']['stop'])
                 self.assertIn('postToolUse',cursor_config['hooks'])
@@ -1825,23 +1838,28 @@ class IntegrationTests(unittest.TestCase):
                 run('select-window','-t',new)
                 subprocess.run([sys.executable,str(app),'next'],env=env,check=True)
                 self.assertEqual(run('display-message','-p','#{pane_id}'),pane)
-                run('send-keys','-t',sidebar,'d')
-                wait(lambda:not json.loads(subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))[0]['pending'])
-                event('UserPromptSubmit'); event('Stop')
+                acknowledge_sidebar()
+                # Observe each RUNNING frame before completing it so an earlier
+                # identical review count cannot masquerade as the new frame.
+                event('UserPromptSubmit')
+                wait(lambda:'🏃 1' in run('capture-pane','-p','-t',sidebar))
+                event('Stop')
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 event('UserPromptSubmit',agent='claude')
+                wait(lambda:'🏃 1' in run('capture-pane','-p','-t',sidebar))
                 event('Stop',{'background_tasks':[{'type':'shell','status':'running'}]},agent='claude')
                 # A running shell does not prove the foreground agent waits for it.
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 wait_badge('👀')
-                event('UserPromptSubmit',agent='claude'); event('Stop',agent='claude')
+                event('UserPromptSubmit',agent='claude')
+                wait(lambda:'🏃 1' in run('capture-pane','-p','-t',sidebar))
+                event('Stop',agent='claude')
                 wait(lambda:'👀 1' in run('capture-pane','-p','-t',sidebar))
                 # A different agent registering in the same pane must retain unread work.
                 event('session_start',agent='pi')
                 self.assertIn('👀 1',subprocess.check_output([sys.executable,str(app),'status'],env=env,text=True))
                 self.assertEqual(run('show-options','-wv','-t',window,'@tmux_attn_badge'),'👀')
-                run('send-keys','-t',sidebar,'d')
-                wait(lambda:not json.loads(subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))[0]['pending'])
+                acknowledge_sidebar()
                 wait_badge('💤')
                 event('UserPromptSubmit')
                 wait_badge('🏃')
