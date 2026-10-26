@@ -14,6 +14,74 @@ ROOT = Path(__file__).resolve().parent
 
 @unittest.skipUnless(shutil.which('tmux'), 'requires tmux')
 class InstallTmuxCompatibilityTests(unittest.TestCase):
+    def test_custom_codex_home_install_and_rollback_leave_default_profile_untouched(self):
+        import tomllib
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / 'home'
+            profile = base / 'custom profile'
+            home.mkdir()
+            profile.mkdir()
+            default = home / '.codex'
+            default.mkdir()
+            # Invalid TOML proves the default profile is never read for this installation.
+            default_config = 'default profile must not be read\n'
+            (default / 'config.toml').write_text(default_config)
+            original_config = '[features]\nhooks = false\n\n[hooks.state."keep"]\ntrusted = true\n'
+            original_hooks = json.dumps({'hooks': {'Stop': [{'hooks': [
+                {'type': 'command', 'command': 'echo unrelated-profile-hook'},
+            ]}]}})
+            (profile / 'config.toml').write_text(original_config)
+            (profile / 'hooks.json').write_text(original_hooks)
+            bin_dir = base / 'bin'
+            bin_dir.mkdir()
+            command = [shutil.which('tmux'), '-S', str(base / 'tmux.sock')]
+            shim = bin_dir / 'tmux'
+            shim.write_text(f'#!{sys.executable}\nimport os, sys\nos.execv({command[0]!r}, {command!r} + sys.argv[1:])\n')
+            shim.chmod(0o755)
+            env = os.environ | {
+                'HOME': str(home), 'CODEX_HOME': str(profile),
+                'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
+            }
+            for key in ('TMUX', 'TMUX_PANE', 'TMUX_ATTN_STATE_DIR'):
+                env.pop(key, None)
+            try:
+                subprocess.run(command + ['-f', '/dev/null', 'new-session', '-d', '-s', 'work'], check=True)
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / 'install.py'), '--enable-codex-hooks'],
+                    env=env, text=True, capture_output=True, check=True,
+                )
+                installed = json.loads(result.stdout)
+                self.assertEqual(installed['codex_home'], str(profile))
+                config = tomllib.loads((profile / 'config.toml').read_text())
+                self.assertTrue(config['features']['hooks'])
+                self.assertEqual(config['hooks']['state'], {'keep': {'trusted': True}})
+                hooks = json.loads((profile / 'hooks.json').read_text())['hooks']
+                commands = [h['command'] for group in hooks['Stop'] for h in group['hooks']]
+                self.assertIn('echo unrelated-profile-hook', commands)
+                self.assertTrue(any('event codex Stop' in command for command in commands))
+                self.assertIn('Stop', installed['codex_hooks_untrusted'])
+                self.assertEqual((default / 'config.toml').read_text(), default_config)
+                self.assertFalse((default / 'hooks.json').exists())
+                manifest = json.loads((Path(installed['backup']) / 'manifest.json').read_text())
+                backed_up = {entry['path'] for entry in manifest}
+                self.assertIn(str(profile / 'config.toml'), backed_up)
+                self.assertIn(str(profile / 'hooks.json'), backed_up)
+                self.assertNotIn(str(default / 'config.toml'), backed_up)
+                # Rollback follows its manifest even when the invoking profile has changed.
+                subprocess.run(
+                    [sys.executable, str(ROOT / 'rollback.py'), installed['backup']],
+                    env=env | {'CODEX_HOME': str(base / 'another profile')},
+                    text=True, capture_output=True, check=True,
+                )
+                self.assertEqual((profile / 'config.toml').read_text(), original_config)
+                self.assertEqual((profile / 'hooks.json').read_text(), original_hooks)
+                self.assertEqual((default / 'config.toml').read_text(), default_config)
+                self.assertFalse((base / 'another profile').exists())
+            finally:
+                subprocess.run(command + ['kill-server'], capture_output=True)
+
     def test_missing_popup_title_support_rejected_before_mutation(self):
         self.check_popup_title_rejection(shutil.which('tmux'), simulate_old=True)
 
@@ -55,7 +123,8 @@ os.execv({executable!r}, {command!r} + args)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content)
             before_paths = sorted(str(path.relative_to(home)) for path in home.rglob('*'))
-            env = os.environ | {'HOME': str(home), 'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']}
+            env = os.environ | {'HOME': str(home), 'CODEX_HOME': str(home / '.codex'),
+                                'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']}
             for key in ('TMUX', 'TMUX_PANE', 'TMUX_ATTN_STATE_DIR'):
                 env.pop(key, None)
             def runtime():
@@ -103,7 +172,8 @@ if not {clickable!r}:
 os.execv({command[0]!r}, {command!r} + args)
 ''')
                 shim.chmod(0o755)
-                env = os.environ | {'HOME': directory, 'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']}
+                env = os.environ | {'HOME': directory, 'CODEX_HOME': str(home / '.codex'),
+                                    'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']}
                 for key in ('TMUX', 'TMUX_PANE', 'TMUX_ATTN_STATE_DIR'):
                     env.pop(key, None)
                 try:

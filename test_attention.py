@@ -263,6 +263,26 @@ class StoreTests(unittest.TestCase):
         row=self.con.execute('SELECT * FROM panes').fetchone()
         self.assertEqual((row['state'],row['needs_review']),('IDLE',1))
 
+    def test_unmapped_codex_never_reads_another_cli_in_the_same_project(self):
+        self.write('IDLE', 'Response finished; review needed', True)
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        with patch.object(a, 'latest_claude_transcript', return_value='/wrong-claude.jsonl') as claude:
+            self.assertEqual(a.resolve_transcript_path(self.con, row, {'path': '/project'}), '')
+            self.assertEqual(a.pane_conversation_preview(self.con, row, {'path': '/project'}),
+                             {'users': [], 'agent': ''})
+            claude.assert_not_called()
+
+    def test_claude_does_not_reuse_a_codex_mapping_left_on_the_pane(self):
+        root = Path(self.tmp.name) / 'codex.jsonl'
+        root.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': 'root'}}) + '\n')
+        a.register_codex_session(self.con, 'socket', '%1', '123',
+                                 {'session_id': 'root', 'transcript_path': str(root)})
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'RUNNING', 'Working')
+        row = dict(self.con.execute('SELECT * FROM panes').fetchone())
+        with patch.object(a, 'latest_claude_transcript', return_value='/correct-claude.jsonl'):
+            self.assertEqual(a.resolve_transcript_path(self.con, row, {'path': '/project'}),
+                             '/correct-claude.jsonl')
+
     def test_agents_payload_sorting_counts_and_aliases(self):
         self.live = {
             ('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/example-wallet-gateway'},
@@ -1727,7 +1747,7 @@ class IntegrationTests(unittest.TestCase):
                 pid=initial('display-message','-p','#{pid}')
                 pane=initial('display-message','-p','#{pane_id}')
                 window=initial('display-message','-p','#{window_id}')
-                env=os.environ|{'HOME':str(home),'TMUX':f'{sock},{pid},0','TMUX_PANE':pane}
+                env=os.environ|{'HOME':str(home),'CODEX_HOME':str(home/'.codex'),'TMUX':f'{sock},{pid},0','TMUX_PANE':pane}
                 def run(*args): return subprocess.check_output(['tmux',*args],env=env,text=True).strip()
                 old_window_format=run('show-options','-gwv','window-status-format')
                 (home/'.codex').mkdir()

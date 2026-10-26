@@ -203,7 +203,7 @@ class RecoveryIntegrationTests(unittest.TestCase):
         self.home.mkdir()
         self.env = os.environ.copy()
         self.env.pop('TMUX', None)
-        self.env.update(HOME=str(self.home), TMUX_ATTN_STATE_DIR=str(self.state),
+        self.env.update(HOME=str(self.home), CODEX_HOME=str(self.home / '.codex'), TMUX_ATTN_STATE_DIR=str(self.state),
                         TMUX_ATTN_SOCKET=self.sock)
         self.children = []
         self.addCleanup(self.stop_observers)

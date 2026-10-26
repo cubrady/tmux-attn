@@ -464,21 +464,23 @@ class ReviewAcknowledgementTests(unittest.TestCase):
         self.assertTrue(body['viewable'])
         self.assertTrue(self.item()['unread'])
 
-    def test_unbound_cwd_transcript_remains_display_only_after_updates(self):
+    def test_unbound_codex_does_not_display_or_acknowledge_another_cli_transcript(self):
         self.record('First result')
         path = self.transcript([('user_message', 'Unrelated request'), ('agent_message', 'Unrelated answer')],
                                bound=False)
-        with patch.object(a, 'latest_claude_transcript', return_value=str(path)):
+        with patch.object(a, 'latest_claude_transcript', return_value=str(path)) as unrelated:
             code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
             self.assertEqual(code, 200)
-            self.assertEqual(body['preview']['agent'], 'Unrelated answer')
+            self.assertEqual(body['preview'], {'users': [], 'agent': ''})
             self.assertFalse(body['viewable'])
             self.record('New result')
             self.transcript([('user_message', 'Unrelated request'), ('agent_message', 'Unrelated answer'),
                              ('user_message', 'Unrelated second request'), ('agent_message', 'Unrelated second answer')],
                             bound=False)
             code, body = a.dispatch_preview(dict(pane='%1', pid='123'))
+            unrelated.assert_not_called()
         self.assertEqual(code, 200)
+        self.assertEqual(body['preview'], {'users': [], 'agent': ''})
         self.assertFalse(body['viewable'])
         self.assertTrue(self.item()['unread'])
 
