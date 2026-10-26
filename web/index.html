@@ -2211,11 +2211,12 @@
     function shortVersion(version) {
       return String(version || '').slice(0, 7);
     }
-    // Peers on a different version than the hub. A peer that reports none predates `tmux-attn update`.
+    // Wait for each peer's response before comparing versions; pending peers have no version yet.
+    // A peer that responds without a version predates `tmux-attn update`.
     function renderUpdateHint(hosts, hubVersion) {
       const el = document.getElementById('update-hint');
       const behind = /^[0-9a-f]{7,40}$/.test(hubVersion)
-        ? hosts.filter(h => h.ok && h.source === 'peer' && (h.version || '') !== hubVersion) : [];
+        ? hosts.filter(h => !h.pending && h.ok && h.source === 'peer' && (h.version || '') !== hubVersion) : [];
       el.hidden = behind.length === 0;
       const rows = behind.map(h => {
         const cmd = h.version ? updateCommand(hubVersion) : bootstrapCommand(hubVersion);

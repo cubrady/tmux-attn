@@ -50,7 +50,8 @@ class MigrationTests(unittest.TestCase):
             shim = bin_dir/'tmux'
             shim.write_text('#!/bin/sh\nexec '+shlex.join([real_tmux,'-L',label])+' "$@"\n')
             shim.chmod(0o755)
-            env = os.environ|{'HOME':str(destination),'PATH':str(bin_dir)+os.pathsep+os.environ['PATH']}
+            env = os.environ|{'HOME':str(destination),'CODEX_HOME':str(destination/'.codex'),
+                              'PATH':str(bin_dir)+os.pathsep+os.environ['PATH']}
             env.pop('TMUX',None)
             env.pop('TMUX_PANE',None)
             env.pop('TMUX_ATTN_STATE_DIR',None)

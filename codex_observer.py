@@ -11,12 +11,14 @@ import re
 import sqlite3
 import signal
 import shlex
+import struct
 import subprocess
+import sys
 import time
 
 from attention import (
-    STATE, BACKGROUND_WAIT, background_wait, classify, codex_root_transcript, codex_transcript_meta, db, live_panes,
-    prune_stale_panes, record, resolve_socket, tmux, observer_lock_path, log_observer_error,
+    STATE, BACKGROUND_WAIT, background_wait, classify, codex_home, codex_root_transcript, codex_transcript_meta, db, live_panes,
+    prune_stale_panes, record, resolve_socket, tmux, observer_lock_path, log_observer_error, user_home,
 )
 
 
@@ -484,6 +486,67 @@ def process_cwd(pid):
     return next((line[1:] for line in p.stdout.splitlines() if line.startswith('n')),None)
 
 
+def _darwin_procargs_environment(raw):
+    """Extract the NUL-delimited environment after argc, executable, and argv."""
+    if len(raw) < 4:
+        raise ValueError('Incomplete process arguments')
+    argc = struct.unpack_from('=i', raw)[0]
+    if not 0 < argc <= 16384:
+        raise ValueError('Invalid process argument count')
+    position = raw.find(b'\0', 4)
+    if position < 0:
+        raise ValueError('Missing process executable')
+    while position < len(raw) and raw[position] == 0:
+        position += 1
+    for _ in range(argc):
+        position = raw.find(b'\0', position)
+        if position < 0:
+            raise ValueError('Incomplete process argv')
+        position += 1
+    return raw[position:]
+
+
+def _process_environment(pid):
+    """Read the target's raw environment without printing it or parsing ps text."""
+    pid = int(pid)
+    if pid <= 0:
+        raise ValueError('Invalid process id')
+    if sys.platform.startswith('linux'):
+        return Path(f'/proc/{pid}/environ').read_bytes()
+    if sys.platform == 'darwin':
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+        size = ctypes.c_size_t()
+        if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'Cannot read target process environment')
+        if not 0 < size.value <= 16 * 1024 * 1024:
+            raise ValueError('Invalid process environment size')
+        buffer = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'Cannot read target process environment')
+        return _darwin_procargs_environment(buffer.raw[:size.value])
+    raise OSError('Target process environment is unavailable on this platform')
+
+
+def process_codex_environment(pid):
+    """Read only the target's HOME/profile fields; unreadable environments fail."""
+    environ = {}
+    for entry in _process_environment(pid).split(b'\0'):
+        key, sep, value = entry.partition(b'=')
+        if sep and key in (b'CODEX_HOME', b'HOME'):
+            name = key.decode('ascii')
+            if name in environ:
+                raise ValueError('Ambiguous target Codex profile')
+            environ[name] = os.fsdecode(value)
+    return environ
+
+
+def process_codex_home(pid):
+    """Absent CODEX_HOME uses the default; unreadable/ambiguous environments fail."""
+    return codex_home(process_codex_environment(pid))
+
+
 def startup_match(state_db, cwd, started):
     """Only an unambiguous validated startup match is accepted, never newest cwd."""
     if not state_db.exists() or not cwd:
@@ -506,14 +569,24 @@ def startup_match(state_db, cwd, started):
     return accepted[0] if len(accepted) == 1 else None
 
 
-def resumed_match(state_db, cwd, screen):
+def resumed_match(state_db, cwd, screen, home=None):
     """Bind a named resumed CLI only from an exact footer/cwd and unique root."""
     if not state_db.exists() or not cwd:
         return None
+    home = user_home() if home is None else Path(home)
     names, aligned_names = set(), set()
     for line in screen.rstrip().splitlines()[-8:]:
         fields = [part.strip() for part in line.split(' · ')]
-        if len(fields) >= 3 and str(Path(fields[1]).expanduser()) == cwd:
+        if len(fields) < 3:
+            continue
+        footer_cwd = fields[1]
+        if footer_cwd == '~':
+            expanded = home
+        elif footer_cwd.startswith('~/'):
+            expanded = home / footer_cwd[2:]
+        else:
+            expanded = Path(footer_cwd).expanduser()
+        if str(expanded) == cwd:
             # The terminal puts goal/progress indicators in a separate, right-
             # aligned column on this same line; they are not part of the name.
             names.add(fields[2])
@@ -622,7 +695,6 @@ def sync_attention_overlay(con, sock, pane, pid, key, screen, previous, overlays
 
 
 def discover(con, sock, live, table, attempted):
-    state_db = Path.home()/'.codex/state_5.sqlite'
     for (pane,pane_pid),meta in live.items():
         candidates = native_codex_pids(pane_pid,table)
         if len(candidates) != 1:
@@ -635,6 +707,9 @@ def discover(con, sock, live, table, attempted):
             continue
         attempted[cli_pid] = time.monotonic()
         try:
+            environ = process_codex_environment(cli_pid)
+            state_db = codex_home(environ) / 'state_5.sqlite'
+            home = user_home(environ)
             cwd = process_cwd(cli_pid)
             origin = 'startup'
             match = None
@@ -642,11 +717,17 @@ def discover(con, sock, live, table, attempted):
             # Revalidate their foreground identity just like explicit resume.
             if resumed or existing:
                 screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
-                match = resumed_match(state_db,cwd,screen)
+                match = resumed_match(state_db,cwd,screen,home=home)
                 origin = 'resume'
             if not match and not resumed and not same_cli:
                 match = startup_match(state_db,cwd,process_start(cli_pid))
                 origin = 'startup'
+            # A slow startup can miss the narrow time window. A verified named
+            # foreground root is equally useful for a CLI without a resume argv.
+            if not match and not resumed and not existing:
+                screen = tmux('capture-pane','-p','-J','-t',pane,check=False,sock=sock)
+                match = resumed_match(state_db,cwd,screen,home=home)
+                origin = 'resume'
         except (OSError,ValueError,subprocess.SubprocessError,sqlite3.Error):
             continue
         if not match:
@@ -691,8 +772,15 @@ def retire_mapping(con,mapping):
                'Agent exited; review current work',True,event_key='exit:'+str(mapping['cli_pid']),source='observer')
 
 
-def repair_mapping(con, mapping, state_db):
+def repair_mapping(con, mapping, state_db=None):
     """One-time recovery from child hooks corrupting a root transcript/turn."""
+    if state_db is None:
+        try:
+            state_db = process_codex_home(mapping['cli_pid']) / 'state_5.sqlite'
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return False
+    if not state_db.exists():
+        return False
     with closing(sqlite3.connect(state_db.as_uri()+'?mode=ro',uri=True,timeout=1)) as source:
         canonical = source.execute('SELECT rollout_path FROM threads WHERE id=?',(mapping['thread_id'],)).fetchone()
     if not canonical or not codex_root_transcript(canonical[0], mapping['thread_id']):
@@ -776,7 +864,7 @@ def observe():
                     if (pane,pid) not in live:
                         continue
                     if mapping['rollout_path'] and not codex_root_transcript(mapping['rollout_path'], mapping['thread_id']):
-                        repair_mapping(con,mapping,Path.home()/'.codex/state_5.sqlite')
+                        repair_mapping(con,mapping)
                         continue
                     if mapping['cli_pid'] not in table:
                         if mapping['cli_pid']:

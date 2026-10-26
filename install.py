@@ -9,7 +9,7 @@ import shutil
 import shlex
 import subprocess
 import sys
-from attention import VIEW_HOOKS, VIEW_HOOK_INDEX, view_hooks_config
+from attention import VIEW_HOOKS, VIEW_HOOK_INDEX, codex_home, view_hooks_config
 try:
     import update
 except ImportError:  # an older export without update.py still installs
@@ -24,7 +24,12 @@ ROOT = Path(__file__).resolve().parent
 DEST = HOME / '.local/share/tmux-attn'
 BACKUP = HOME / '.local/state/tmux-attn/backups' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
 import tomllib
-codex_path = HOME/'.codex/config.toml'
+try:
+    codex_root = codex_home()
+except ValueError as error:
+    raise SystemExit(str(error))
+codex_path = codex_root/'config.toml'
+codex_hooks_path = codex_root/'hooks.json'
 codex_text = codex_path.read_text() if codex_path.exists() else ''
 codex = tomllib.loads(codex_text)
 new_codex_text = None
@@ -59,8 +64,7 @@ for data in [alias_data, existing_alias_data]:
     if not isinstance(data, dict) or not isinstance(data.get('aliases'), dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in data['aliases'].items()):
         raise SystemExit('Project aliases must contain an aliases object with string keys/values.')
 alias_data = existing_alias_data | {'aliases':alias_data['aliases'] | existing_alias_data['aliases']}
-for name in ['.claude/settings.json', '.codex/hooks.json', '.cursor/hooks.json']:
-    path = HOME/name
+for path in [HOME/'.claude/settings.json', codex_hooks_path, HOME/'.cursor/hooks.json']:
     if path.exists():
         data = json.loads(path.read_text())
         if not isinstance(data, dict) or not isinstance(data.get('hooks', {}), dict):
@@ -89,7 +93,7 @@ python = sys.executable
 app = DEST / 'attention.py'
 config = HOME / '.config/tmux-attn/sidebar.conf'
 web_index = DEST / 'web' / 'index.html'
-paths = [HOME/'.tmux.conf', HOME/'.claude/settings.json', HOME/'.codex/hooks.json', HOME/'.codex/config.toml', HOME/'.pi/agent/extensions/tmux-attention.ts', config, HOME/'.local/bin/tmux-attn', app, DEST/'codex_observer.py']
+paths = [HOME/'.tmux.conf', HOME/'.claude/settings.json', codex_hooks_path, codex_path, HOME/'.pi/agent/extensions/tmux-attention.ts', config, HOME/'.local/bin/tmux-attn', app, DEST/'codex_observer.py']
 paths.append(alias_config)
 paths.append(HOME/'.cursor/hooks.json')
 paths.append(web_index)
@@ -345,5 +349,6 @@ print(json.dumps({
     'config': str(config),
     'status_control_clicks': control_clicks,
     'web_service': str(web_service),
+    'codex_home': str(codex_root),
     'codex_hooks_untrusted': codex_trust_missing,
 }, indent=2))

@@ -1,8 +1,12 @@
 import json
 import io
+import os
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,6 +14,7 @@ from datetime import datetime, timezone
 import attention as a
 from codex_observer import approval_screen,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli,pi_screen,native_pi_pids
 from codex_observer import queued_questions_screen,sync_attention_overlay,observe_codex_unmapped
+from codex_observer import _darwin_procargs_environment, process_codex_home
 
 class ObserverTests(unittest.TestCase):
  def test_native_codex_accepts_standalone_short_argv(self):
@@ -36,7 +41,7 @@ class ObserverTests(unittest.TestCase):
     screen='GPT medium · /project · My task\n← for agents'
     standalone=str(home/'.codex/packages/standalone/releases/version/bin/codex')
     executable=lambda pid,args='': standalone if pid == 456 else (args.split(None,1)[0] if args else '')
-    with patch('codex_observer.Path.home',return_value=home),patch('codex_observer.process_cwd',return_value='/project'),patch('codex_observer._process_exe',side_effect=executable),patch('codex_observer.tmux',return_value=screen):
+    with patch('codex_observer._process_environment',return_value=os.fsencode('HOME='+str(home))+b'\0'),patch('codex_observer.Path.home',return_value=home),patch('codex_observer.process_cwd',return_value='/project'),patch('codex_observer._process_exe',side_effect=executable),patch('codex_observer.tmux',return_value=screen):
      discover(con,'sock',live,table,{})
     mapping=con.execute('SELECT * FROM codex_sessions').fetchone()
     self.assertEqual((mapping['thread_id'],mapping['pane'],mapping['pid'],mapping['cli_pid'],mapping['origin']),('root','%1','123',456,'resume'))
@@ -343,7 +348,7 @@ class RepairTests(unittest.TestCase):
      live={('%1','123'):{'path':'/project'}}
      screen='GPT medium · /project · My task        Goal achieved (1h 2m)\n← for agents'
      def scan():
-      with patch('codex_observer.Path.home',return_value=home),patch('codex_observer.process_cwd',return_value='/project'),patch('codex_observer.tmux',return_value=screen):
+      with patch('codex_observer._process_environment',return_value=os.fsencode('HOME='+str(home))+b'\0'),patch('codex_observer.Path.home',return_value=home),patch('codex_observer.process_cwd',return_value='/project'),patch('codex_observer.tmux',return_value=screen):
        discover(con,'sock',live,table,{456:float('inf')})
      scan()
      mapping=con.execute('SELECT * FROM codex_sessions').fetchone()
@@ -437,6 +442,164 @@ class PiObserverTests(unittest.TestCase):
    7:(6,'pi-bolt -p "headless subagent" --mode json'),
   }
   self.assertEqual(sorted(native_pi_pids(1, table)), [2, 3, 5])
+
+
+class CodexProfileTests(unittest.TestCase):
+ def test_target_environment_preserves_spaces_and_distinguishes_missing_from_unreadable(self):
+  raw = b'OTHER=CODEX_HOME=/wrong\0CODEX_HOME=/tmp/custom profile\0SECRET=not printed\0'
+  with patch('codex_observer._process_environment', return_value=raw):
+   self.assertEqual(process_codex_home(123), Path('/tmp/custom profile'))
+  with patch.dict(os.environ, {'HOME': '/observer-user', 'CODEX_HOME': '/observer-profile'}), \
+       patch('codex_observer._process_environment', return_value=b'HOME=/target-user\0'):
+   self.assertEqual(process_codex_home(123), Path('/target-user/.codex'))
+  with patch('codex_observer._process_environment', return_value=b'HOME=/target user\0CODEX_HOME=~/profile with spaces\0'):
+   self.assertEqual(process_codex_home(123), Path('/target user/profile with spaces'))
+  with patch('codex_observer._process_environment', side_effect=PermissionError('denied')):
+   with self.assertRaises(PermissionError):
+    process_codex_home(123)
+  for invalid in (b'CODEX_HOME=\0', b'CODEX_HOME=relative\0',
+                  b'CODEX_HOME=/one\0CODEX_HOME=/two\0'):
+   with self.subTest(raw=invalid), patch('codex_observer._process_environment', return_value=invalid):
+    with self.assertRaises(ValueError):
+     process_codex_home(123)
+
+ def test_darwin_process_arguments_are_not_confused_with_environment_entries(self):
+  raw = (struct.pack('=i', 3) + b'/Applications/Codex CLI/codex\0\0\0'
+         + b'codex\0CODEX_HOME=/argv-decoy\0a title with spaces\0'
+         + b'OTHER=value with spaces\0CODEX_HOME=/Users/me/profile with spaces\0\0')
+  environment = _darwin_procargs_environment(raw)
+  with patch('codex_observer._process_environment', return_value=environment):
+   self.assertEqual(process_codex_home(123), Path('/Users/me/profile with spaces'))
+  for incomplete in (b'', struct.pack('=i', 2) + b'codex\0\0codex\0'):
+   with self.assertRaises(ValueError):
+    _darwin_procargs_environment(incomplete)
+
+ def test_linux_reads_the_target_proc_environment(self):
+  with patch('codex_observer.sys.platform', 'linux'), \
+       patch('codex_observer.Path.read_bytes', autospec=True, return_value=b'CODEX_HOME=/tmp/linux profile\0') as read:
+   self.assertEqual(process_codex_home(123), Path('/tmp/linux profile'))
+   read.assert_called_once_with(Path('/proc/123/environ'))
+
+ @unittest.skipUnless(sys.platform == 'darwin' or sys.platform.startswith('linux'), 'requires native process environment access')
+ def test_live_process_profile_and_home_are_independent_of_observer_environment(self):
+  with tempfile.TemporaryDirectory(prefix='codex profile ') as directory:
+   home = Path(directory)
+   for override in (None, str(home / 'selected profile')):
+    environment = os.environ | {'HOME': str(home)}
+    environment.pop('CODEX_HOME', None)
+    if override is not None:
+     environment['CODEX_HOME'] = override
+    with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], env=environment) as target:
+     try:
+      with patch.dict(os.environ, {'HOME': '/observer-user', 'CODEX_HOME': '/observer-profile'}):
+       self.assertEqual(process_codex_home(target.pid), Path(override) if override else home / '.codex')
+     finally:
+      target.terminate()
+      target.wait(timeout=5)
+
+ def make_profile(self, profile, thread, started=1761413573, cwd='/project'):
+  profile.mkdir(parents=True)
+  rollout = profile / 'root.jsonl'
+  meta = {'id': thread, 'originator': 'codex-tui', 'cwd': cwd, 'source': 'vscode',
+          'timestamp': datetime.fromtimestamp(started + 6.431, timezone.utc).isoformat()}
+  rollout.write_text('\n'.join(json.dumps(entry) for entry in [
+   {'type': 'session_meta', 'payload': meta},
+   {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'Investigate preview'}},
+   {'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': thread + ' completed result'}},
+  ]) + '\n')
+  with closing(sqlite3.connect(profile / 'state_5.sqlite')) as source, source:
+   source.execute('CREATE TABLE threads(id,rollout_path,cwd,agent_path,name,created_at)')
+   source.execute('INSERT INTO threads VALUES(?,?,?,?,?,?)',
+                  (thread, str(rollout), cwd, None, 'My task', started + 6))
+  return rollout
+
+ def test_delayed_discovery_expands_footer_with_target_home_outside_custom_profile(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root = Path(directory)
+   target_home = root / 'target user'
+   observer_home = root / 'observer user'
+   cwd = str(target_home / 'project')
+   profile = root / 'separate configs' / 'selected profile'
+   rollout = self.make_profile(profile, 'root', cwd=cwd)
+   table = {123: (1, 'zsh'), 456: (123, '/vendor/bin/codex')}
+   live = {('%1', '123'): {'path': cwd}}
+   screen = 'GPT medium · ~/project · My task · Main [default]\n← for agents'
+   environment = os.fsencode('HOME=' + str(target_home)) + b'\0' + os.fsencode('CODEX_HOME=' + str(profile)) + b'\0'
+   with patch.object(a, 'STATE', root / 'inbox'), closing(a.db()) as con, \
+        patch.dict(os.environ, {'HOME': str(observer_home), 'CODEX_HOME': '/observer-profile'}), \
+        patch('codex_observer._process_environment', return_value=environment) as read_environment, \
+        patch('codex_observer.process_cwd', return_value=cwd), \
+        patch('codex_observer.process_start', return_value=1761413573), \
+        patch('codex_observer.tmux', return_value=screen):
+    self.assertIsNone(startup_match(profile / 'state_5.sqlite', cwd, 1761413573))
+    self.assertIsNone(resumed_match(profile / 'state_5.sqlite', cwd, screen))
+    a.record(con, 'sock', '%1', '123', 'codex', 'IDLE', 'Response finished', True, source='observer')
+    discover(con, 'sock', live, table, {})
+    read_environment.assert_called_once_with(456)
+    mapping = con.execute('SELECT thread_id,rollout_path,origin FROM codex_sessions').fetchone()
+    self.assertEqual(tuple(mapping), ('root', str(rollout), 'resume'))
+    row = dict(con.execute('SELECT * FROM panes').fetchone())
+    self.assertEqual(a.pane_conversation_preview(con, row, {'path': cwd}),
+                     {'users': ['Investigate preview'], 'agent': 'root completed result'})
+
+ def test_delayed_unmapped_clis_bind_their_own_profile_and_restore_preview(self):
+  with tempfile.TemporaryDirectory() as directory:
+   home = Path(directory)
+   default = self.make_profile(home / '.codex', 'default-root')
+   custom_home = home / 'custom profile'
+   custom = self.make_profile(custom_home, 'custom-root')
+   table = {123: (1, 'zsh'), 456: (123, '/vendor/bin/codex'),
+            234: (1, 'zsh'), 789: (234, '/vendor/bin/codex')}
+   live = {('%1', '123'): {'path': '/project'}, ('%2', '234'): {'path': '/project'}}
+   environment = lambda pid: os.fsencode('CODEX_HOME=' + str(custom_home)) + b'\0' if pid == 456 else os.fsencode('HOME=' + str(home)) + b'\0'
+   screen = 'GPT medium · /project · My task · Main [default]\n← for agents'
+   with patch.object(a, 'STATE', home / 'inbox'), closing(a.db()) as con, \
+        patch('codex_observer.Path.home', return_value=home), \
+        patch('codex_observer.process_cwd', return_value='/project'), \
+        patch('codex_observer.process_start', return_value=1761413573), \
+        patch('codex_observer.tmux', return_value=screen):
+    for pane, pid in live:
+     a.record(con, 'sock', pane, pid, 'codex', 'IDLE', 'Response finished', True, source='observer')
+    with patch('codex_observer._process_environment', side_effect=PermissionError('denied')):
+     discover(con, 'sock', live, table, {})
+    self.assertEqual(con.execute('SELECT count(*) FROM codex_sessions').fetchone()[0], 0)
+    with patch.dict(os.environ, {'CODEX_HOME': '/observer-must-not-control-targets'}), \
+         patch('codex_observer._process_environment', side_effect=environment):
+     discover(con, 'sock', live, table, {})
+    mappings = con.execute('SELECT pane,thread_id,rollout_path,origin FROM codex_sessions ORDER BY pane').fetchall()
+    self.assertEqual([tuple(row) for row in mappings], [
+     ('%1', 'custom-root', str(custom), 'resume'), ('%2', 'default-root', str(default), 'resume')])
+    for row in con.execute('SELECT * FROM panes').fetchall():
+     preview = a.pane_conversation_preview(con, dict(row), {'path': '/project'})
+     root = 'custom-root' if row['pane'] == '%1' else 'default-root'
+     self.assertEqual(preview, {'users': ['Investigate preview'], 'agent': root + ' completed result'})
+
+ def test_native_registration_and_repair_use_the_selected_profile(self):
+  with tempfile.TemporaryDirectory() as directory:
+   home = Path(directory)
+   self.make_profile(home / '.codex', 'same-root')
+   custom_home = home / 'custom profile'
+   root = self.make_profile(custom_home, 'same-root')
+   child = home / 'child.jsonl'
+   child.write_text(json.dumps({'type': 'session_meta', 'payload': {
+    'id': 'child', 'source': {'subagent': {'parent_thread_id': 'same-root'}}}}) + '\n')
+   with patch.object(a, 'STATE', home / 'inbox'), closing(a.db()) as con, \
+        patch('attention.Path.home', return_value=home), \
+        patch.dict(os.environ, {'CODEX_HOME': str(custom_home)}):
+    a.register_codex_session(con, 'sock', '%1', '123', {'session_id': 'same-root'})
+    self.assertEqual(con.execute('SELECT rollout_path FROM codex_sessions').fetchone()[0], str(root))
+    con.execute('UPDATE codex_sessions SET rollout_path=?,cli_pid=456', (str(child),))
+    con.commit()
+    mapping = dict(con.execute('SELECT * FROM codex_sessions').fetchone())
+    with patch('codex_observer._process_environment', side_effect=PermissionError('denied')):
+     self.assertFalse(repair_mapping(con, mapping))
+    self.assertEqual(con.execute('SELECT rollout_path FROM codex_sessions').fetchone()[0], str(child))
+    with patch('codex_observer._process_environment', return_value=os.fsencode('CODEX_HOME=' + str(custom_home)) + b'\0'):
+     self.assertTrue(repair_mapping(con, mapping))
+    self.assertEqual(con.execute('SELECT rollout_path FROM codex_sessions').fetchone()[0], str(root))
+    with patch.dict(os.environ, {'CODEX_HOME': ''}):
+     a.register_codex_session(con, 'sock', '%2', '234', {'session_id': 'same-root'})
+    self.assertEqual(con.execute("SELECT rollout_path FROM codex_sessions WHERE pane='%2'").fetchone()[0], '')
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

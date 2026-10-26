@@ -18,7 +18,8 @@ ROOT=Path(__file__).resolve().parent.parent
 with tempfile.TemporaryDirectory() as directory, patch.dict(
     os.environ,
     {key: value for key, value in os.environ.items()
-     if not key.startswith('TMUX_ATTN_') and key not in ('TMUX', 'TMUX_PANE')} | {'HOME': directory},
+     if not key.startswith('TMUX_ATTN_') and key not in ('TMUX', 'TMUX_PANE')} |
+    {'HOME': directory, 'CODEX_HOME': str(Path(directory) / '.codex')},
     clear=True,
 ):
     home=Path(directory)

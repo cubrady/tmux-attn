@@ -102,6 +102,12 @@ sh install_web_service.sh     # 建議：常駐 web（macOS launchd / Linux syst
 
 然後重開／resume agent session（或 Codex `/hooks`、Pi `/reload`），讓 hooks 掛上。
 
+Codex 使用自訂資料目錄時，安裝前設定同一個 `CODEX_HOME`，例如
+`CODEX_HOME="/path/to/profile" sh bootstrap.sh`。安裝器只備份及更新所選目錄的
+`config.toml`／`hooks.json`；hooks 仍需在該 profile 的 `/hooks` 信任。
+Observer 會依每個 CLI 程序的實際 `CODEX_HOME` 動態尋找對話，支援同時使用不同 profile；
+未設定時使用預設 `~/.codex`。無法確認歸屬時保留未綁定，不借用其他 CLI 的對話。
+
 ```sh
 tmux attach                   # Prefix → a 開清單
 # 手機：http://<這台或 server 的 IP>:7788/

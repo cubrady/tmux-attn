@@ -68,7 +68,8 @@ with tempfile.TemporaryDirectory() as directory:
                  f'set-option -g @window_click_prior "tmux-attn original {event}"')
             before_hooks[event] = tmux('show-hooks', '-g', f'{event}[91]')
         unrelated_hook = tmux('show-hooks', '-g', 'after-select-window[7]')
-        env = os.environ | {'HOME': directory, 'TMUX': f'{sock},{tmux("display-message", "-p", "#{pid}")},0',
+        env = os.environ | {'HOME': directory, 'CODEX_HOME': str(home / '.codex'),
+                            'TMUX': f'{sock},{tmux("display-message", "-p", "#{pid}")},0',
                             'TMUX_PANE': alpha, 'TMUX_ATTN_SOCKET': sock,
                             'TMUX_ATTN_NOTIFY': str(home / 'disabled-notifications.json')}
         env.pop('TMUX_ATTN_STATE_DIR', None)

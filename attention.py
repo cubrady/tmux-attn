@@ -39,6 +39,30 @@ VIEW_HOOK_INDEX = 91
 VIEW_REVISION_OPTION = '@tmux_attn_view_revision'
 
 
+def user_home(environ=None):
+    """Resolve HOME for one process without borrowing the observer's environment."""
+    environ = os.environ if environ is None else environ
+    home = environ.get('HOME')
+    if home is None:
+        import pwd
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    if not home or not Path(home).is_absolute():
+        raise ValueError('HOME must be an absolute path')
+    return Path(home)
+
+
+def codex_home(environ=None):
+    """Resolve one caller's Codex profile; an invalid override never means default."""
+    environ = os.environ if environ is None else environ
+    value = environ.get('CODEX_HOME')
+    if value is None or value == '~' or value.startswith('~/'):
+        value = str(user_home(environ) / ('.codex' if value is None else value[2:]))
+    path = Path(value).expanduser()
+    if not value or not path.is_absolute():
+        raise ValueError('CODEX_HOME must be an absolute path')
+    return path
+
+
 def tmux(*args, check=True, sock=None):
     command = ['tmux'] + (['-S', sock] if sock else []) + list(args)
     p = subprocess.run(command, capture_output=True, text=True, timeout=None if args and args[0]=='display-popup' else 4)
@@ -926,6 +950,7 @@ def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_
 
 
 def resolve_transcript_path(con, row, meta):
+    agent = row.get('agent') or ''
     path = ''
     if 'transcript_path' in row.keys():
         path = row['transcript_path'] or ''
@@ -935,11 +960,13 @@ def resolve_transcript_path(con, row, meta):
     mapping = con.execute(
         'SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
         (row['socket'], row['pane'], row['pid']),
-    ).fetchone() if con is not None else None
+    ).fetchone() if con is not None and agent == 'codex' else None
     if mapping and mapping['rollout_path'] and Path(mapping['rollout_path']).is_file():
         return mapping['rollout_path']
+    # A cwd identifies a project, not a Codex thread or a different CLI's transcript.
+    if agent == 'codex':
+        return ''
     cwd = (meta or {}).get('path') or ''
-    agent = row.get('agent') or ''
     if agent == 'pi':
         found = latest_pi_transcript(cwd)
         if found:
@@ -2178,8 +2205,11 @@ def register_codex_session(con,sock,pane,pid,data):
     if path and not codex_root_transcript(path, data['session_id']):
         path = ''
     if not path:
-        database = Path.home()/'.codex/state_5.sqlite'
-        if database.exists():
+        try:
+            database = codex_home() / 'state_5.sqlite'
+        except (OSError, ValueError):
+            database = None
+        if database is not None and database.exists():
             try:
                 with closing(sqlite3.connect(database.as_uri()+'?mode=ro',uri=True,timeout=1)) as source:
                     row = source.execute('SELECT rollout_path FROM threads WHERE id=?',(data['session_id'],)).fetchone()

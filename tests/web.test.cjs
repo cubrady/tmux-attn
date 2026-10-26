@@ -508,7 +508,8 @@ test('first load consumes the fleet plan request started in the page head', asyn
   assert.match(html, /initialFleetPlanRequest/);
 });
 
-test('progressive refresh paints a fast host before a slow host finishes', async () => {
+test('progressive refresh paints a fast host without treating pending peers as versionless', async () => {
+  const hubVersion = '5d18590aaaaa';
   let releaseSlow;
   const slow = new Promise(resolve => { releaseSlow = resolve; });
   let sawSlow;
@@ -521,17 +522,17 @@ test('progressive refresh paints a fast host before a slow host finishes', async
           ok: true,
           hosts: [
             { name: 'fast', source: 'peer' },
-            { name: 'slow', source: 'local' },
+            { name: 'slow', source: 'peer' },
           ],
-          version: 'v1',
+          version: hubVersion,
         });
       }
       if (url.includes('name=fast')) {
         return response({
           ok: true,
-          version: 'v1',
+          version: hubVersion,
           summary: { wait: 1, review: 0, running: 0, idle: 0, tracked: 1, untracked: 0 },
-          hosts: [{ name: 'fast', ok: true, source: 'peer' }],
+          hosts: [{ name: 'fast', ok: true, source: 'peer', version: hubVersion }],
           agents: [{ ...review('fast-card', 2, 2), host: 'fast' }],
         });
       }
@@ -540,9 +541,9 @@ test('progressive refresh paints a fast host before a slow host finishes', async
         await slow;
         return response({
           ok: true,
-          version: 'v1',
+          version: hubVersion,
           summary: { wait: 0, review: 0, running: 1, idle: 0, tracked: 1, untracked: 0 },
-          hosts: [{ name: 'slow', ok: true, source: 'local' }],
+          hosts: [{ name: 'slow', ok: true, source: 'peer', version: hubVersion }],
           agents: [{ ...agent('slow', 'RUNNING'), project: 'slow-card', pane: '%slow', updated: 1 }],
         });
       }
@@ -554,10 +555,13 @@ test('progressive refresh paints a fast host before a slow host finishes', async
   assert.match(ui.elements.get('list').innerHTML, /fast-card/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /slow-card/);
   assert.match(ui.elements.get('hosts').innerHTML, /pending/);
+  assert.equal(ui.elements.get('update-hint').hidden, true);
+  assert.equal(ui.elements.get('update-hint').innerHTML, '');
   releaseSlow();
   for (let i = 0; i < 8; i++) await settle();
   assert.match(ui.elements.get('list').innerHTML, /slow-card/);
   assert.doesNotMatch(ui.elements.get('hosts').innerHTML, /pending/);
+  assert.equal(ui.elements.get('update-hint').hidden, true);
 });
 
 test('later icon needs two taps to save and two taps to restore', async () => {
