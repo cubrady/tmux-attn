@@ -3639,7 +3639,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.equal(box.hidden, false);
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
   assert.match(box.innerHTML, /class="usage-mini-gauges"/);
-  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel" hidden/);
+  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel"[^>]*hidden/);
 
   // 3. Filtering to Pi hides usage completely; filtering to Cursor scopes cards to Cursor
   pickAgent(ui, 'pi');
@@ -3650,10 +3650,11 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.doesNotMatch(box.innerHTML, /carol/);
   pickAgent(ui, '');
 
-  // 4. Clicking the toggle expands the visual detail panel (no hidden attribute) with progress bars, expected tick, and pace warning
+  // 4. Clicking the toggle expands the floating detail popover (no hidden attribute) with progress bars, expected tick, and pace warning
   box.listeners.click({ target: { closest: sel => sel === '[data-usage-toggle]' ? {} : null } });
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="true"/);
-  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel">/);
+  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel" role="dialog"[^>]*>/);
+  assert.doesNotMatch(box.innerHTML, /id="usage-panel"[^>]*hidden/);
   assert.match(box.innerHTML, /class="usage-bar-expected" style="left:12%"/);
   assert.match(box.innerHTML, /超前 56% · 預計 9h 24m 後用盡/);
   assert.match(box.innerHTML, /已達視窗上限/);
@@ -3662,6 +3663,10 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   box.listeners.click({ target: { closest: sel => sel === '[data-usage-refresh]' ? {} : null } });
   await new Promise(r => setImmediate(r));
   assert.equal(calls.at(-1), '/api/usage?providers=codex%2Cclaude%2Ccursor&refresh=1');
+
+  // 6. Pressing Escape or clicking outside closes the floating popover
+  ui.document.listeners.keydown({ key: 'Escape' });
+  assert.match(box.innerHTML, /id="usage-panel"[^>]*hidden/);
 });
 
 
