@@ -89,7 +89,7 @@
       top: 0;
       z-index: 2;
       margin: -4px -8px 0;
-      padding: 10px 8px 12px;
+      padding: 8px 8px 10px;
       background: var(--header-bg);
       backdrop-filter: blur(16px) saturate(1.2);
       -webkit-backdrop-filter: blur(16px) saturate(1.2);
@@ -144,7 +144,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      margin-bottom: 4px;
+      margin-bottom: 2px;
     }
     .brand-actions {
       display: inline-flex;
@@ -209,9 +209,9 @@
     .notify-dot[hidden] { display: none; }
     h1 {
       margin: 0;
-      font-size: 1.25rem;
+      font-size: 1.12rem;
       font-weight: 600;
-      letter-spacing: -0.04em;
+      letter-spacing: -0.03em;
     }
     .live {
       display: inline-flex;
@@ -266,8 +266,9 @@
     }
     .meta {
       color: var(--muted);
-      font-size: 0.8rem;
-      margin-bottom: 12px;
+      font-size: 0.74rem;
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 8px;
     }
     .summary {
       display: grid;
@@ -275,9 +276,8 @@
       gap: 1px;
       background: var(--line);
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: var(--radius);
       overflow: hidden;
-      box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
     }
     .stat {
       appearance: none;
@@ -286,12 +286,12 @@
       margin: 0;
       border: 0;
       background: var(--card);
-      padding: 16px 8px 14px;
+      padding: 10px 8px 9px;
       text-align: center;
       color: inherit;
       font: inherit;
       cursor: pointer;
-      min-height: 4.5rem;
+      min-height: 3.35rem;
     }
     .stat:disabled {
       opacity: 0.42;
@@ -308,17 +308,17 @@
     }
     .stat .n {
       font-family: var(--mono);
-      font-size: clamp(1rem, 5vw, 1.45rem);
+      font-size: clamp(0.98rem, 4.2vw, 1.25rem);
       font-weight: 600;
       font-variant-numeric: tabular-nums;
       letter-spacing: -0.04em;
-      line-height: 1.15;
+      line-height: 1.1;
       white-space: nowrap;
     }
     .stat .l {
-      margin-top: 6px;
-      min-height: 1.45em;
-      font-size: 0.78rem;
+      margin-top: 3px;
+      min-height: 1.25em;
+      font-size: 0.72rem;
       font-weight: 600;
       letter-spacing: 0.02em;
       color: var(--muted);
@@ -329,12 +329,12 @@
       justify-content: flex-end;
       align-items: center;
       gap: 5px;
-      min-height: 28px;
-      padding: 3px 12px;
+      min-height: 24px;
+      padding: 2px 10px;
       border: 0;
       background: var(--card);
       color: var(--muted);
-      font: 600 0.72rem var(--font);
+      font: 600 0.68rem var(--font);
       cursor: pointer;
     }
     .summary-later:hover { color: var(--fg); background: color-mix(in srgb, var(--accent) 6%, var(--card)); }
@@ -344,7 +344,7 @@
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      margin-top: 10px;
+      margin-top: 8px;
       align-items: center;
     }
     .host-pill {
@@ -435,12 +435,20 @@
       opacity: 0.88;
       margin-left: 0.15em;
     }
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px 10px;
+      margin-top: 6px;
+    }
+    .filter-bar:empty { display: none; }
     .agent-filters {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 6px;
-      margin-top: 10px;
     }
     .agent-filter-label { color: var(--muted); font-size: 0.68rem; line-height: 1.2; margin-right: 2px; }
     .agent-filter {
@@ -467,24 +475,23 @@
     .agent-filter:focus-visible, .other-agent-wait:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .other-agent-wait {
       display: block;
-      margin-top: 8px;
-      padding: 4px 0;
+      margin-top: 6px;
+      padding: 2px 0;
       border: 0;
       background: transparent;
       color: var(--wait);
-      font: 500 0.75rem var(--font);
+      font: 500 0.74rem var(--font);
       text-align: left;
       cursor: pointer;
     }
     .agent-filters[hidden], .other-agent-wait[hidden], .agent-usage[hidden], .usage-panel[hidden] { display: none; }
-    .agent-usage {
-      margin-top: 8px;
+    .agent-usage:not([hidden]) {
+      display: contents;
     }
     .usage-bar-head {
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+      margin-left: auto;
     }
     .usage-toggle {
       appearance: none;
@@ -494,7 +501,7 @@
       font-family: var(--mono);
       font-size: 0.68rem;
       font-weight: 600;
-      padding: 4px 9px;
+      padding: 4px 8px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: var(--bg-elevated);
@@ -524,14 +531,14 @@
       display: inline-flex;
       align-items: flex-end;
       gap: 2px;
-      height: 12px;
+      height: 11px;
       padding: 1px 2px;
       border-radius: 3px;
       background: color-mix(in srgb, var(--line) 55%, transparent);
     }
     .usage-mini-col {
-      width: 4px;
-      height: 10px;
+      width: 3.5px;
+      height: 9px;
       border-radius: 1.5px;
       background: color-mix(in srgb, var(--line) 90%, transparent);
       display: flex;
@@ -550,7 +557,9 @@
       opacity: 0.75;
     }
     .usage-panel {
-      margin-top: 8px;
+      flex: 0 0 100%;
+      width: 100%;
+      margin-top: 2px;
       padding: 10px 12px;
       border: 1px solid var(--line);
       border-radius: var(--radius);
@@ -2232,21 +2241,21 @@
     }
     .skel-stat {
       background: var(--card);
-      padding: 16px 8px;
+      padding: 10px 8px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 10px;
-      min-height: 4.5rem;
+      gap: 6px;
+      min-height: 3.35rem;
       justify-content: center;
     }
-    .skel-stat .skel-n { height: 1.35rem; width: 3.2rem; }
-    .skel-stat .skel-l { height: 0.7rem; width: 2.2rem; }
+    .skel-stat .skel-n { height: 1.15rem; width: 3rem; }
+    .skel-stat .skel-l { height: 0.68rem; width: 2.2rem; }
     .skel-hosts {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      margin-top: 10px;
+      margin-top: 8px;
     }
     .skel-host { height: 1.45rem; width: 4.5rem; border-radius: 6px; }
     .skel-list {
@@ -2303,8 +2312,10 @@
         <div class="meta" id="meta"></div>
         <div class="summary" id="summary" aria-live="polite"></div>
         <div class="hosts" id="hosts"></div>
-        <div class="agent-filters" id="agent-filters" role="group" aria-label="依 coding agent 篩選" hidden></div>
-        <div class="agent-usage" id="agent-usage" role="region" aria-label="Coding agent 用量" hidden></div>
+        <div class="filter-bar">
+          <div class="agent-filters" id="agent-filters" role="group" aria-label="依 coding agent 篩選" hidden></div>
+          <div class="agent-usage" id="agent-usage" role="region" aria-label="Coding agent 用量" hidden></div>
+        </div>
         <div aria-live="polite"><button type="button" class="other-agent-wait" id="other-agent-wait" hidden></button></div>
       </div>
       <div class="skel-page" id="skel-header" aria-hidden="true">
