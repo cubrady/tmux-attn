@@ -1395,8 +1395,9 @@ UPLOAD_ID_RE = re.compile(r'^[0-9a-f]{32}\.(?:png|jpg|gif|webp|' + '|'.join(TEXT
 PEER_UPLOAD_TIMEOUT = 20
 # A peer's 404 on a new route means that host has not been updated; say so instead of passing 'not found' on.
 PEER_OUTDATED = 'peer is running an older tmux-attn without this feature'
-# Claude Code reads a pasted image path asynchronously; give it a beat before Enter.
-IMAGE_SETTLE_SECONDS = 0.4
+# TUIs can process a paste asynchronously (including Claude's image paths). Give
+# them time to finish handling it before sending the separate submit key.
+PASTE_SETTLE_SECONDS = 0.4
 
 
 def image_extension(data):
@@ -1632,9 +1633,8 @@ def send_to_pane(pane, pid, text, submit=True, sock=None, images=(), files=()):
                 tmux('send-keys', '-t', pane, 'Space', sock=sock)
             paste_to_pane(pane, path, sock)
             pasted = True
-        if submit and (paths or not text.endswith('\n')):
-            if paths:
-                time.sleep(IMAGE_SETTLE_SECONDS)
+        if submit:
+            time.sleep(PASTE_SETTLE_SECONDS)
             tmux('send-keys', '-t', pane, 'Enter', sock=sock)
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         return f'paste failed: {exc}'

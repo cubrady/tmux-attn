@@ -1039,7 +1039,8 @@ class StoreTests(unittest.TestCase):
                 events.append(('key', args[-1]))
             return ''
         with patch.object(a, 'live_panes', return_value=self.LIVE), patch.object(a, 'tmux', side_effect=fake_tmux), \
-             patch.object(a.subprocess, 'run', side_effect=fake_run), patch.object(a, 'IMAGE_SETTLE_SECONDS', 0):
+             patch.object(a.subprocess, 'run', side_effect=fake_run), \
+             patch.object(a.time, 'sleep', side_effect=lambda seconds: events.append(('wait', seconds))):
             error = a.send_to_pane('%1', '123', text, submit=submit, images=ids)
         return error, events
 
@@ -1051,7 +1052,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(events, [
             ('load', 'look at these'), ('paste', True), ('key', 'Space'),
             ('load', str(a.upload_path(first))), ('paste', True), ('key', 'Space'),
-            ('load', str(a.upload_path(second))), ('paste', True), ('key', 'Enter'),
+            ('load', str(a.upload_path(second))), ('paste', True), ('wait', a.PASTE_SETTLE_SECONDS), ('key', 'Enter'),
         ])
         # Each path is its own paste: Codex only attaches a paste that is exactly an image path.
         self.assertTrue(all(Path(value).is_absolute() for kind, value in events if kind == 'load' and value != 'look at these'))
@@ -1060,7 +1061,7 @@ class StoreTests(unittest.TestCase):
         image_id, _ = a.store_upload(self.PNG)
         error, events = self._send_events('   ', [image_id])
         self.assertIsNone(error)
-        self.assertEqual([kind for kind, _ in events], ['load', 'paste', 'key'])
+        self.assertEqual([kind for kind, _ in events], ['load', 'paste', 'wait', 'key'])
         self.assertEqual(events[0], ('load', str(a.upload_path(image_id))))
         self.assertEqual(events[-1], ('key', 'Enter'))
         error, events = self._send_events('hi', ['b' * 32 + '.png'])
@@ -1070,7 +1071,17 @@ class StoreTests(unittest.TestCase):
 
     def test_send_to_pane_text_only_sequence_is_unchanged(self):
         error, events = self._send_events('hello', [])
-        self.assertEqual((error, events), (None, [('load', 'hello'), ('paste', True), ('key', 'Enter')]))
+        self.assertEqual((error, events), (None, [('load', 'hello'), ('paste', True),
+                                                 ('wait', a.PASTE_SETTLE_SECONDS), ('key', 'Enter')]))
+
+    def test_trailing_newline_is_pasted_and_submitted_separately(self):
+        error, events = self._send_events('long message\n', [])
+        self.assertEqual((error, events), (None, [('load', 'long message\n'), ('paste', True),
+                                                 ('wait', a.PASTE_SETTLE_SECONDS), ('key', 'Enter')]))
+
+    def test_text_without_submit_is_only_pasted(self):
+        error, events = self._send_events('hello\n', [], submit=False)
+        self.assertEqual((error, events), (None, [('load', 'hello\n'), ('paste', True)]))
 
     def test_web_upload_endpoint_and_request_size_limit(self):
         handler = a.make_web_handler()
