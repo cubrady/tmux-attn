@@ -3670,9 +3670,11 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="true"/);
   assert.match(box.innerHTML, /class="usage-panel" id="usage-panel" role="dialog"[^>]*>/);
   assert.doesNotMatch(box.innerHTML, /id="usage-panel"[^>]*hidden/);
-  assert.match(box.innerHTML, /class="usage-bar-expected" style="left:12%"/);
+  assert.match(box.innerHTML, /剩 32%/);
+  assert.match(box.innerHTML, /剩 0%/);
+  assert.match(box.innerHTML, /class="usage-bar-expected" style="left:88%"/);
   assert.match(box.innerHTML, /超前 56% · 預計 9h 24m 後用盡/);
-  assert.match(box.innerHTML, /已達視窗上限/);
+  assert.match(box.innerHTML, /已用盡/);
 
   // 5. Clicking refresh forces a refresh=1 call and keeps popover open
   dispatchUsageClick('[data-usage-refresh]');
