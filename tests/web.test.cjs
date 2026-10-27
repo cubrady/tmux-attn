@@ -45,7 +45,10 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
     document, performance: { now: () => nowMs },
     fetch: (url, options) => {
       const fleetPoll = typeof url === 'string' && (url === '/api/fleet' || url.startsWith('/api/fleet/'));
-      if (!fetchRequest || (fleetPoll && !overrides.allowFleetFetch)) return new Promise(() => {});
+      const usagePoll = typeof url === 'string' && url.startsWith('/api/usage');
+      if (!fetchRequest || (fleetPoll && !overrides.allowFleetFetch) || (usagePoll && !overrides.allowUsageFetch)) {
+        return new Promise(() => {});
+      }
       return fetchRequest(url, options);
     },
     setInterval() {}, setTimeout() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => String(value) },
@@ -59,6 +62,7 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
     document,
     setNow(ms) { nowMs = ms; },
     render: data => context.render(data),
+    renderUsage: data => context.renderUsage(data),
     open: agent => context.openSheet(agent),
     close: () => context.closeSheet(),
     refreshPreview: () => elements.get('sheet-refresh').listeners.click(),
@@ -3507,4 +3511,131 @@ test('notification toggle manages permission, persists preference and fires edge
   ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [newerWait, nowReview, betaReview] });
   assert.equal(created.length, 2);
 });
+
+test('coding agent usage shows only active providers, skips pi, and expands details with refresh', async () => {
+  const calls = [];
+  const sampleUsage = {
+    ok: true,
+    providers: ['codex', 'claude'],
+    updated_at: Math.floor(Date.now() / 1000) - 120,
+    accounts: [
+      {
+        provider: 'codex',
+        account: 'cutebrady@gmail.com',
+        label: 'cutebrady',
+        plan: 'prolite',
+        windows: [
+          {
+            key: 'secondary',
+            label: 'Weekly',
+            shortLabel: '週',
+            usedPercent: 68,
+            windowMinutes: 10080,
+            resetsAt: new Date(Date.now() + 6 * 86400 * 1000).toISOString(),
+            resetDescription: 'Nov 2 at 3:46 PM',
+            pace: { stage: 'farAhead', deltaPercent: 56, etaSeconds: 33800, willLastToReset: false },
+          },
+        ],
+      },
+      {
+        provider: 'codex',
+        account: 'kaichenlin@gmail.com',
+        label: 'kaichenlin',
+        plan: 'plus',
+        windows: [
+          {
+            key: 'primary',
+            label: 'Session',
+            shortLabel: '5h',
+            usedPercent: 100,
+            windowMinutes: 300,
+            resetsAt: new Date(Date.now() + 95 * 60 * 1000).toISOString(),
+            resetDescription: '1:06 PM',
+          },
+          {
+            key: 'secondary',
+            label: 'Weekly',
+            shortLabel: '週',
+            usedPercent: 30,
+            windowMinutes: 10080,
+            resetsAt: new Date(Date.now() + 6 * 86400 * 1000).toISOString(),
+            resetDescription: 'Nov 2 at 6:41 PM',
+          },
+        ],
+      },
+      {
+        provider: 'claude',
+        account: 'Brad.Chang@sonice-aioe.com',
+        label: 'Brad.Chang',
+        plan: 'Team',
+        windows: [
+          {
+            key: 'primary',
+            label: 'Session',
+            shortLabel: '5h',
+            usedPercent: 12,
+            windowMinutes: 300,
+            resetsAt: new Date(Date.now() + 180 * 60 * 1000).toISOString(),
+            resetDescription: '4:20 PM',
+          },
+        ],
+      },
+    ],
+  };
+
+  const ui = dashboard({
+    allowUsageFetch: true,
+    fetchRequest: async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => sampleUsage };
+    },
+  });
+
+  // 1. Only Pi running -> no usage fetch and box stays hidden
+  ui.render({ hosts: [{ name: 'work', ok: true }], agents: [filterSession('pi', 'work', 'RUNNING')] });
+  assert.equal(calls.length, 0);
+  assert.equal(ui.elements.get('agent-usage').hidden, true);
+
+  // 2. Codex + Claude + Pi running -> fetches codex,claude (never pi) and renders 3 pills
+  ui.render({
+    hosts: [{ name: 'work', ok: true }],
+    agents: [
+      filterSession('codex', 'work', 'RUNNING'),
+      filterSession('claude', 'work', 'WAIT'),
+      filterSession('pi', 'work', 'RUNNING'),
+    ],
+  });
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(calls, ['/api/usage?providers=codex%2Cclaude']);
+  const box = ui.elements.get('agent-usage');
+  assert.equal(box.hidden, false);
+  assert.match(box.innerHTML, /cutebrady/);
+  assert.match(box.innerHTML, /週 68%/);
+  assert.match(box.innerHTML, /kaichenlin/);
+  assert.match(box.innerHTML, /5h 100% \(1h 35m\) · 週 30%/);
+  assert.match(box.innerHTML, /Brad\.Chang/);
+  assert.doesNotMatch(box.innerHTML, /id="usage-panel"/);
+
+  // 3. Filtering to Pi hides usage strip; filtering to Codex shows only Codex pills
+  pickAgent(ui, 'pi');
+  assert.equal(box.hidden, true);
+  pickAgent(ui, 'codex');
+  assert.equal(box.hidden, false);
+  assert.match(box.innerHTML, /cutebrady/);
+  assert.doesNotMatch(box.innerHTML, /Brad\.Chang/);
+  pickAgent(ui, '');
+
+  // 4. Clicking a usage pill opens the detail panel with progress bars, pace warning, and refresh button
+  box.listeners.click({ target: { closest: sel => sel === '[data-usage-toggle]' ? {} : null } });
+  assert.match(box.innerHTML, /id="usage-panel"/);
+  assert.match(box.innerHTML, /額度與重置時間/);
+  assert.match(box.innerHTML, /超前 56% · 預計 9h 24m 後用盡/);
+  assert.match(box.innerHTML, /已達視窗上限/);
+
+  // 5. Clicking refresh forces a refresh=1 call
+  box.listeners.click({ target: { closest: sel => sel === '[data-usage-refresh]' ? {} : null } });
+  await new Promise(r => setImmediate(r));
+  assert.equal(calls.at(-1), '/api/usage?providers=codex%2Cclaude&refresh=1');
+});
+
 

@@ -476,7 +476,206 @@
       text-align: left;
       cursor: pointer;
     }
-    .agent-filters[hidden], .other-agent-wait[hidden] { display: none; }
+    .agent-filters[hidden], .other-agent-wait[hidden], .agent-usage[hidden] { display: none; }
+    .agent-usage {
+      margin-top: 8px;
+    }
+    .usage-strip {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    .usage-label {
+      color: var(--muted);
+      font-size: 0.68rem;
+      line-height: 1.2;
+      margin-right: 2px;
+    }
+    .usage-pill {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      font-weight: 500;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      color: var(--fg);
+      line-height: 1.2;
+      cursor: pointer;
+      font-variant-numeric: tabular-nums;
+    }
+    .usage-pill:hover, .usage-pill:focus-visible {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    }
+    .usage-pill[aria-expanded="true"] {
+      background: var(--card);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .usage-pill.tone-warn {
+      border-color: color-mix(in srgb, var(--wait) 55%, var(--line));
+    }
+    .usage-pill.tone-danger {
+      border-color: color-mix(in srgb, var(--danger) 65%, var(--line));
+      background: color-mix(in srgb, var(--danger-bg) 55%, var(--bg-elevated));
+    }
+    .usage-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--running);
+      flex: 0 0 auto;
+    }
+    .usage-pill.tone-warn .usage-dot { background: var(--wait); }
+    .usage-pill.tone-danger .usage-dot { background: var(--danger); }
+    .usage-provider {
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .usage-acct {
+      font-weight: 600;
+      color: var(--fg);
+    }
+    .usage-wins {
+      color: var(--muted);
+    }
+    .usage-pill.tone-danger .usage-wins {
+      color: var(--danger);
+      font-weight: 600;
+    }
+    .usage-panel {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+    }
+    .usage-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .usage-panel-title {
+      font-weight: 600;
+      color: var(--fg);
+    }
+    .usage-panel-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .usage-refresh {
+      appearance: none;
+      font: 600 0.68rem var(--font);
+      padding: 2px 7px;
+      border-radius: 5px;
+      border: 1px solid var(--line);
+      background: var(--bg-elevated);
+      color: var(--fg);
+      cursor: pointer;
+    }
+    .usage-refresh:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    .usage-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+      gap: 8px;
+    }
+    .usage-card {
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .usage-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 0.74rem;
+    }
+    .usage-card-id {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      font-family: var(--mono);
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .usage-plan {
+      font-family: var(--mono);
+      font-size: 0.64rem;
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      flex: 0 0 auto;
+    }
+    .usage-win {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .usage-win-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 0.7rem;
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .usage-win-name {
+      color: var(--fg);
+      font-weight: 500;
+    }
+    .usage-win-meta {
+      color: var(--muted);
+      font-size: 0.66rem;
+      text-align: right;
+    }
+    .usage-win-pct.tone-warn { color: var(--wait); font-weight: 600; }
+    .usage-win-pct.tone-danger { color: var(--danger); font-weight: 600; }
+    .usage-bar {
+      height: 5px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--line) 85%, transparent);
+      overflow: hidden;
+    }
+    .usage-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--accent);
+      transition: width 180ms var(--ease);
+    }
+    .usage-bar-fill.tone-warn { background: var(--wait); }
+    .usage-bar-fill.tone-danger { background: var(--danger); }
+    .usage-pace {
+      font-size: 0.66rem;
+      color: var(--wait);
+      line-height: 1.3;
+    }
+    .usage-pace.tone-danger {
+      color: var(--danger);
+    }
+    .usage-pill:focus-visible, .usage-refresh:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     @media (prefers-color-scheme: dark) {
       .host-pill.tone-0, .host-chip.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
       .host-pill.tone-1, .host-chip.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
@@ -2082,6 +2281,7 @@
         <div class="summary" id="summary" aria-live="polite"></div>
         <div class="hosts" id="hosts"></div>
         <div class="agent-filters" id="agent-filters" role="group" aria-label="依 coding agent 篩選" hidden></div>
+        <div class="agent-usage" id="agent-usage" role="region" aria-label="Coding agent 用量" hidden></div>
         <div aria-live="polite"><button type="button" class="other-agent-wait" id="other-agent-wait" hidden></button></div>
       </div>
       <div class="skel-page" id="skel-header" aria-hidden="true">
@@ -2213,6 +2413,14 @@
     const refreshPendingHosts = new Set();
     const AGENT_FILTER_STORE = 'tmux-attn:agent-filter';
     const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor' };
+    const USAGE_PROVIDERS = ['codex', 'claude', 'cursor'];
+    const USAGE_POLL_MS = 60_000;
+    let usageByProvider = new Map();
+    let usageFetchedAt = new Map();
+    let usageUpdatedAt = 0;
+    let usageExpanded = false;
+    let usageRefreshing = false;
+    let usageReqSeq = 0;
     let agentFilter = readAgentFilter();
     const NOTIFY_STORE = 'tmux-attn:notify';
     const FAVICON_CALM_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="tmux Attention"><rect width="32" height="32" rx="8" fill="#0f766e"/><rect x="5" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="5" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/></svg>';
@@ -2444,6 +2652,215 @@
       const notice = document.getElementById('other-agent-wait');
       notice.hidden = !others;
       notice.textContent = others ? `其他 agent 有 ${others} 個等你 · 查看全部 →` : '';
+      renderAgentUsage();
+      syncAgentUsage();
+    }
+    function activeUsageProviders() {
+      const agents = hostVisibleAgents().filter(a => category(a) !== 'shell');
+      const scoped = agentFilter ? agents.filter(a => agentKind(a) === agentFilter) : agents;
+      const present = new Set();
+      for (const a of scoped) {
+        const kind = agentKind(a);
+        if (USAGE_PROVIDERS.includes(kind)) present.add(kind);
+      }
+      return USAGE_PROVIDERS.filter(p => present.has(p));
+    }
+    function usageToneForWindow(win) {
+      const pct = Number(win?.usedPercent) || 0;
+      if (pct >= 100) return 'danger';
+      if (pct >= 75 || win?.pace?.willLastToReset === false) return 'warn';
+      return 'ok';
+    }
+    function usageToneForAccount(acc) {
+      let tone = 'ok';
+      for (const win of acc?.windows || []) {
+        const wTone = usageToneForWindow(win);
+        if (wTone === 'danger') return 'danger';
+        if (wTone === 'warn') tone = 'warn';
+      }
+      return tone;
+    }
+    function formatUsageDurationSec(sec) {
+      const totalMin = Math.max(1, Math.ceil((Number(sec) || 0) / 60));
+      if (totalMin < 60) return `${totalMin}m`;
+      if (totalMin < 1440) {
+        const h = Math.floor(totalMin / 60);
+        const m = totalMin % 60;
+        return m ? `${h}h ${m}m` : `${h}h`;
+      }
+      const d = Math.floor(totalMin / 1440);
+      const h = Math.floor((totalMin % 1440) / 60);
+      return h ? `${d}d ${h}h` : `${d}d`;
+    }
+    function formatResetCountdown(resetsAt) {
+      if (!resetsAt) return '';
+      const targetMs = Date.parse(resetsAt);
+      if (!Number.isFinite(targetMs)) return '';
+      const diffSec = Math.floor((targetMs - Date.now()) / 1000);
+      if (diffSec <= 0) return '';
+      return formatUsageDurationSec(diffSec);
+    }
+    function formatLocalResetClock(resetsAt) {
+      if (!resetsAt) return '';
+      const targetMs = Date.parse(resetsAt);
+      if (!Number.isFinite(targetMs)) return '';
+      const d = new Date(targetMs);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const diffHours = Math.abs(targetMs - Date.now()) / 3600000;
+      if (diffHours <= 20) return `${hh}:${mm}`;
+      return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
+    }
+    function formatResetDetail(resetsAt, resetDescription) {
+      const countdown = formatResetCountdown(resetsAt);
+      const clock = formatLocalResetClock(resetsAt);
+      if (countdown && clock) return `${countdown} 後重置 (${clock})`;
+      if (countdown) return `${countdown} 後重置`;
+      const desc = String(resetDescription || '').trim();
+      return desc ? `重置 ${desc}` : '';
+    }
+    function formatWindowPillSummary(win) {
+      const pct = Math.max(0, Math.min(100, Math.round(Number(win?.usedPercent) || 0)));
+      const label = escapeHtml(win?.shortLabel || win?.label || '');
+      const cd = pct >= 100 ? formatResetCountdown(win?.resetsAt) : '';
+      return `${label} ${pct}%${cd ? ` (${escapeHtml(cd)})` : ''}`;
+    }
+    function renderAgentUsage() {
+      const box = document.getElementById('agent-usage');
+      if (!box) return;
+      const providers = activeUsageProviders();
+      const accounts = [];
+      for (const p of providers) {
+        const rows = usageByProvider.get(p) || [];
+        for (const row of rows) {
+          if (row && Array.isArray(row.windows) && row.windows.length) accounts.push(row);
+        }
+      }
+      if (!providers.length || !accounts.length) {
+        box.hidden = true;
+        box.innerHTML = '';
+        return;
+      }
+      box.hidden = false;
+      const pillsHtml = accounts.map(acc => {
+        const tone = usageToneForAccount(acc);
+        const providerName = AGENT_LABELS[acc.provider] || acc.provider || '';
+        const acctLabel = acc.label || acc.account || providerName;
+        const winsText = (acc.windows || []).map(formatWindowPillSummary).join(' · ');
+        const titleParts = [`${providerName} ${acc.account || acctLabel}${acc.plan ? ` (${acc.plan})` : ''}`];
+        for (const win of acc.windows || []) {
+          const detail = formatResetDetail(win.resetsAt, win.resetDescription);
+          titleParts.push(`${win.label || win.shortLabel}: 已用 ${win.usedPercent}%${detail ? ` · ${detail}` : ''}`);
+        }
+        return `<button type="button" class="usage-pill tone-${tone}" data-usage-toggle aria-expanded="${usageExpanded ? 'true' : 'false'}" title="${escapeHtml(titleParts.join(' | '))}">` +
+          `<span class="usage-dot" aria-hidden="true"></span>` +
+          `<span class="usage-provider">${escapeHtml(providerName)}</span>` +
+          `<span class="usage-acct">${escapeHtml(acctLabel)}</span>` +
+          `<span class="usage-wins">${winsText}</span>` +
+          `</button>`;
+      }).join('');
+      let panelHtml = '';
+      if (usageExpanded) {
+        const ageSec = usageUpdatedAt > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - usageUpdatedAt) : null;
+        const ageText = ageSec === null ? '' : (ageSec < 60 ? '剛剛更新' : `${Math.floor(ageSec / 60)} 分鐘前更新`);
+        const cardsHtml = accounts.map(acc => {
+          const providerName = AGENT_LABELS[acc.provider] || acc.provider || '';
+          const winsHtml = (acc.windows || []).map(win => {
+            const pct = Math.max(0, Math.min(100, Math.round(Number(win.usedPercent) || 0)));
+            const wTone = usageToneForWindow(win);
+            const resetInfo = formatResetDetail(win.resetsAt, win.resetDescription);
+            let paceHtml = '';
+            if (pct >= 100) {
+              paceHtml = `<div class="usage-pace tone-danger">⛔ 已達視窗上限${resetInfo ? ` · ${escapeHtml(resetInfo)}` : ''}</div>`;
+            } else if (win.pace && win.pace.willLastToReset === false) {
+              const delta = Number.isFinite(win.pace.deltaPercent) && win.pace.deltaPercent > 0 ? `超前 ${win.pace.deltaPercent}%` : '消耗偏快';
+              const eta = Number.isFinite(win.pace.etaSeconds) && win.pace.etaSeconds > 0
+                ? ` · 預計 ${formatUsageDurationSec(win.pace.etaSeconds)} 後用盡`
+                : '';
+              paceHtml = `<div class="usage-pace">⚡ ${escapeHtml(delta + eta)}</div>`;
+            }
+            return `<div class="usage-win">` +
+              `<div class="usage-win-row">` +
+                `<span class="usage-win-name">${escapeHtml(win.label || win.shortLabel)} · <span class="usage-win-pct tone-${wTone}">已用 ${pct}%</span></span>` +
+                `<span class="usage-win-meta">${escapeHtml(resetInfo)}</span>` +
+              `</div>` +
+              `<div class="usage-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">` +
+                `<div class="usage-bar-fill tone-${wTone}" style="width:${pct}%"></div>` +
+              `</div>` +
+              paceHtml +
+            `</div>`;
+          }).join('');
+          return `<div class="usage-card" data-usage-provider="${escapeHtml(acc.provider)}" data-usage-account="${escapeHtml(acc.account || acc.label)}">` +
+            `<div class="usage-card-head">` +
+              `<span class="usage-card-id" title="${escapeHtml(acc.account || '')}">${escapeHtml(providerName)} · ${escapeHtml(acc.account || acc.label)}</span>` +
+              (acc.plan ? `<span class="usage-plan">${escapeHtml(acc.plan)}</span>` : '') +
+            `</div>` +
+            winsHtml +
+          `</div>`;
+        }).join('');
+        panelHtml = `<div class="usage-panel" id="usage-panel">` +
+          `<div class="usage-panel-head">` +
+            `<span class="usage-panel-title">額度與重置時間</span>` +
+            `<span class="usage-panel-actions">` +
+              (ageText ? `<span>${escapeHtml(ageText)}</span>` : '') +
+              `<button type="button" class="usage-refresh" data-usage-refresh${usageRefreshing ? ' disabled' : ''}>${usageRefreshing ? '更新中…' : '重新整理'}</button>` +
+            `</span>` +
+          `</div>` +
+          `<div class="usage-cards">${cardsHtml}</div>` +
+        `</div>`;
+      }
+      const nextMarkup = `<div class="usage-strip">${`<span class="usage-label" aria-hidden="true">用量</span>`}${pillsHtml}</div>${panelHtml}`;
+      if (box.innerHTML !== nextMarkup) box.innerHTML = nextMarkup;
+    }
+    function renderUsage(data) {
+      if (!data || !Array.isArray(data.accounts)) return;
+      const providers = Array.isArray(data.providers) && data.providers.length
+        ? data.providers
+        : [...new Set(data.accounts.map(a => a && a.provider).filter(Boolean))];
+      const grouped = new Map(providers.map(p => [p, []]));
+      for (const acc of data.accounts) {
+        if (!acc || !acc.provider) continue;
+        if (!grouped.has(acc.provider)) grouped.set(acc.provider, []);
+        grouped.get(acc.provider).push(acc);
+      }
+      const now = Date.now();
+      for (const [p, list] of grouped.entries()) {
+        usageByProvider.set(p, list);
+        usageFetchedAt.set(p, now);
+      }
+      if (Number.isFinite(data.updated_at) && data.updated_at > 0) {
+        usageUpdatedAt = data.updated_at;
+      } else {
+        usageUpdatedAt = Math.floor(now / 1000);
+      }
+      renderAgentUsage();
+    }
+    async function syncAgentUsage({ force = false } = {}) {
+      const providers = activeUsageProviders();
+      if (!providers.length) return;
+      const now = Date.now();
+      const needed = force
+        ? providers
+        : providers.filter(p => !usageFetchedAt.has(p) || (now - (usageFetchedAt.get(p) || 0)) >= USAGE_POLL_MS);
+      if (!needed.length || (usageRefreshing && !force)) return;
+      const seq = ++usageReqSeq;
+      usageRefreshing = true;
+      if (usageExpanded) renderAgentUsage();
+      const url = `/api/usage?providers=${encodeURIComponent(needed.join(','))}${force ? '&refresh=1' : ''}`;
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res || !res.ok) return;
+        const data = await res.json();
+        if (seq !== usageReqSeq || !data || !data.ok) return;
+        renderUsage({ ...data, providers: data.providers || needed });
+      } catch (_) {
+        // Usage is supplemental; never surface errors on the main dashboard.
+      } finally {
+        if (seq === usageReqSeq) {
+          usageRefreshing = false;
+          renderAgentUsage();
+        }
+      }
     }
     function hostSessionCounts(agents) {
       // Count tracked agent sessions only — bare shell panes are not sessions.
@@ -4005,6 +4422,16 @@
       if (!button) return;
       setAgentFilter(button.dataset.agentFilter);
       if (latestPayload) render(latestPayload);
+    });
+    document.getElementById('agent-usage').addEventListener('click', (event) => {
+      if (event.target.closest('[data-usage-refresh]')) {
+        syncAgentUsage({ force: true });
+        return;
+      }
+      if (event.target.closest('[data-usage-toggle]')) {
+        usageExpanded = !usageExpanded;
+        renderAgentUsage();
+      }
     });
     document.getElementById('other-agent-wait').addEventListener('click', () => {
       setAgentFilter('');
