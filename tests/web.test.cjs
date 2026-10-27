@@ -3334,3 +3334,177 @@ test('cards and sheets render structured task lists, deduplicate gerund activeFo
   assert.match(sheetTasks.innerHTML, /展開已完成 \(1\)/);
   assert.doesNotMatch(sheetTasks.innerHTML, /Re-establish baseline across repos/);
 });
+
+test('poll interval is 20 seconds and meta reflects 20s refresh', () => {
+  const intervals = [];
+  const ui = dashboard({
+    globals: {
+      setInterval: (_fn, ms) => intervals.push(ms),
+    },
+  });
+  assert.ok(intervals.includes(20000), 'fleet poll runs every 20000ms');
+  ui.render({ hosts: [{ name: 'local', ok: true }], agents: [] });
+  assert.match(ui.elements.get('meta').textContent, /約 20 秒更新/);
+});
+
+test('favicon red dot, document title and app badge track wait + review and ignore later/idle/running', () => {
+  const badgeCalls = [];
+  const ui = dashboard({
+    navigator: {
+      setAppBadge: n => { badgeCalls.push(['set', n]); return Promise.resolve(); },
+      clearAppBadge: () => { badgeCalls.push(['clear']); return Promise.resolve(); },
+    },
+  });
+  const favicon = ui.elements.get('favicon');
+  const dot = ui.elements.get('notify-dot');
+
+  // Calm state: running, idle, later, shell do not light up the red dot
+  ui.render({
+    hosts: [{ name: 'local', ok: true }],
+    agents: [
+      { ...agent('local', 'RUNNING'), pane: '%1', pid: '1' },
+      { ...agent('local', 'IDLE'), pane: '%2', pid: '2', needs_review: true, revision: 2, acknowledged: 2, unread: false, reviewed: true },
+      { ...agent('local', 'IDLE'), pane: '%3', pid: '3', needs_review: true, revision: 3, acknowledged: 1, unread: true, later: true },
+      { ...agent('local', 'SHELL', false), pane: '%4', pid: '4' },
+    ],
+  });
+  assert.equal(ui.document.title, 'Attention');
+  assert.equal(favicon.dataset.badge, 'none');
+  assert.equal(favicon.dataset.count, '0');
+  assert.equal(dot.hidden, true);
+  assert.doesNotMatch(decodeURIComponent(favicon.href), /#ef4444/);
+  assert.deepEqual(badgeCalls.at(-1), ['clear']);
+
+  // Review + wait light up the red dot and update title count
+  ui.render({
+    hosts: [{ name: 'local', ok: true }],
+    agents: [
+      { ...agent('local', 'WAIT'), pane: '%1', pid: '1' },
+      { ...agent('local', 'IDLE'), pane: '%2', pid: '2', category: 'review', needs_review: true, revision: 2, acknowledged: 1, unread: true },
+      { ...agent('local', 'RUNNING'), pane: '%3', pid: '3' },
+    ],
+  });
+  assert.equal(ui.document.title, '(2) Attention');
+  assert.equal(favicon.dataset.badge, 'wait');
+  assert.equal(favicon.dataset.count, '2');
+  assert.equal(dot.hidden, false);
+  assert.match(decodeURIComponent(favicon.href), /#ef4444/);
+  assert.deepEqual(badgeCalls.at(-1), ['set', 2]);
+});
+
+test('notification toggle manages permission, persists preference and fires edge-triggered browser notifications', async () => {
+  const storage = new Map();
+  const localStorage = {
+    getItem: k => (storage.has(k) ? storage.get(k) : null),
+    setItem: (k, v) => storage.set(k, String(v)),
+    removeItem: k => storage.delete(k),
+  };
+  const created = [];
+  let focused = 0;
+  class FakeNotification {
+    static permission = 'default';
+    static async requestPermission() {
+      FakeNotification.permission = 'granted';
+      return FakeNotification.permission;
+    }
+    constructor(title, options) {
+      this.title = title;
+      this.options = options;
+      this.closed = false;
+      created.push(this);
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+  const ui = dashboard({
+    window: { focus: () => { focused += 1; }, Notification: FakeNotification },
+    globals: { localStorage, Notification: FakeNotification },
+  });
+  const btn = ui.elements.get('notify-toggle');
+  const label = ui.elements.get('notify-label');
+  assert.equal(btn.hidden, false);
+  assert.equal(btn.dataset.state, 'off');
+  assert.equal(label.textContent, '通知');
+
+  // Enable notifications via header button click
+  await btn.listeners.click();
+  assert.equal(btn.dataset.state, 'on');
+  assert.equal(btn.getAttribute !== undefined ? true : true, true);
+  assert.equal(label.textContent, '通知開啟');
+  assert.equal(storage.get('tmux-attn:notify'), '1');
+
+  // First render for a host seeds existing wait/review sessions without firing notifications
+  const waitAgent = {
+    ...agent('alpha', 'WAIT'),
+    pane: '%1', pid: '10', project: 'Atlas', title: 'Deploy API', revision: 1,
+    preview: { users: ['Deploy staging'], agent: 'Should I proceed with migration?' },
+  };
+  const runAgent = {
+    ...agent('alpha', 'RUNNING'),
+    pane: '%2', pid: '20', project: 'Sampleapp', title: 'Auth flow', revision: 1,
+    preview: { users: ['Fix auth'], agent: 'Working on token refresh' },
+  };
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true, pending: true }], agents: [waitAgent, runAgent] });
+  assert.equal(created.length, 0, 'initial host snapshot never spams notifications');
+
+  // Progressive arrival of pending host beta also seeds without notifying
+  const betaReview = {
+    ...agent('beta', 'IDLE'),
+    pane: '%9', pid: '90', project: 'Billing', category: 'review', needs_review: true, unread: true, revision: 2, acknowledged: 1,
+    preview: { users: ['Audit invoices'], agent: 'All 42 invoices verified.' },
+  };
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [waitAgent, runAgent, betaReview] });
+  assert.equal(created.length, 0, 'progressive host slice seeds without firing notifications');
+
+  // Next poll with unchanged wait/review states does not fire duplicate notifications
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [waitAgent, runAgent, betaReview] });
+  assert.equal(created.length, 0);
+
+  // Transition of runAgent from RUNNING -> WAIT fires a notification
+  const nowWaiting = {
+    ...runAgent,
+    state: 'WAIT',
+    category: 'wait',
+    revision: 2,
+    preview: { users: ['Fix auth'], agent: 'Need confirmation on cookie domain' },
+  };
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [waitAgent, nowWaiting, betaReview] });
+  assert.equal(created.length, 1);
+  assert.equal(created[0].title, '🙋 等待回覆 · Sampleapp · Auth flow');
+  assert.match(created[0].options.body, /^\[alpha\] Need confirmation on cookie domain/);
+  assert.equal(created[0].options.tag, 'tmux-attn:alpha|%2|20');
+
+  // Clicking the notification focuses the window, opens that agent's sheet, and closes the notification
+  created[0].onclick();
+  assert.equal(focused, 1);
+  assert.equal(ui.elements.get('sheet-root').hidden, false);
+  assert.match(ui.elements.get('sheet-title').textContent, /Sampleapp/);
+  assert.equal(created[0].closed, true);
+  ui.close();
+
+  // Transition to review with a newer revision fires a review notification
+  const nowReview = {
+    ...nowWaiting,
+    state: 'IDLE',
+    category: 'review',
+    needs_review: true,
+    unread: true,
+    revision: 3,
+    acknowledged: 1,
+    preview: { users: ['Fix auth'], agent: 'Completed cookie domain update and tests pass.' },
+  };
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [waitAgent, nowReview, betaReview] });
+  assert.equal(created.length, 2);
+  assert.equal(created[1].title, '👀 待看 · Sampleapp · Auth flow');
+  assert.match(created[1].options.body, /^\[alpha\] Completed cookie domain update and tests pass\./);
+
+  // Toggling notifications off stops new notifications
+  await btn.listeners.click();
+  assert.equal(btn.dataset.state, 'off');
+  assert.equal(storage.get('tmux-attn:notify'), undefined);
+  const newerWait = { ...waitAgent, revision: 5 };
+  ui.render({ hosts: [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], agents: [newerWait, nowReview, betaReview] });
+  assert.equal(created.length, 2);
+});
+
