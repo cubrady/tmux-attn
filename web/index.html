@@ -4487,6 +4487,7 @@
       if (latestPayload) render(latestPayload);
     });
     document.getElementById('agent-usage').addEventListener('click', (event) => {
+      if (typeof event.stopPropagation === 'function') event.stopPropagation();
       if (event.target.closest('[data-usage-refresh]')) {
         syncAgentUsage({ force: true });
         return;
@@ -4503,7 +4504,8 @@
     });
     document.addEventListener('click', (event) => {
       if (!usageExpanded) return;
-      if (event.target?.closest?.('#agent-usage')) return;
+      const box = document.getElementById('agent-usage');
+      if (event.target?.closest?.('#agent-usage') || (box && typeof event.composedPath === 'function' && event.composedPath().includes(box))) return;
       usageExpanded = false;
       renderAgentUsage();
     });
