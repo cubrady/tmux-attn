@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="tmux attention — multi-host agent status">
   <title>Attention</title>
-  <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
+  <link id="favicon" rel="icon" href="/icons/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/favicon.svg">
   <meta name="theme-color" content="#0f766e" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0c0c0e" media="(prefers-color-scheme: dark)">
@@ -146,6 +146,67 @@
       gap: 12px;
       margin-bottom: 4px;
     }
+    .brand-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .notify-btn {
+      appearance: none;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font: 600 0.72rem/1 var(--font);
+      color: var(--muted);
+      background: color-mix(in srgb, var(--line) 35%, var(--card));
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 9px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: color 140ms var(--ease), border-color 140ms var(--ease), background 140ms var(--ease);
+    }
+    .notify-btn[hidden] { display: none; }
+    .notify-btn:hover {
+      color: var(--fg);
+      border-color: color-mix(in srgb, var(--fg) 22%, var(--line));
+    }
+    .notify-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .notify-btn[data-state="on"] {
+      color: var(--accent);
+      border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+      background: color-mix(in srgb, var(--accent) 12%, var(--card));
+    }
+    .notify-btn[data-state="denied"] {
+      color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+      background: color-mix(in srgb, var(--danger) 10%, var(--card));
+    }
+    .notify-icon {
+      display: inline-flex;
+      align-items: center;
+    }
+    .notify-icon svg {
+      width: 12px;
+      height: 12px;
+      flex-shrink: 0;
+    }
+    .notify-dot {
+      position: absolute;
+      top: -2px;
+      right: -2px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--wait);
+      box-shadow: 0 0 0 2px var(--bg);
+    }
+    .notify-dot[hidden] { display: none; }
     h1 {
       margin: 0;
       font-size: 1.25rem;
@@ -2007,7 +2068,14 @@
     <header>
       <div class="brand">
         <h1>Attention</h1>
-        <div class="live" id="clock" data-state="loading">…</div>
+        <div class="brand-actions">
+          <button type="button" class="notify-btn" id="notify-toggle" aria-pressed="false" hidden>
+            <span class="notify-icon" id="notify-icon" aria-hidden="true"></span>
+            <span id="notify-label">通知</span>
+            <span class="notify-dot" id="notify-dot" hidden aria-hidden="true"></span>
+          </button>
+          <div class="live" id="clock" data-state="loading">…</div>
+        </div>
       </div>
       <div class="live-content">
         <div class="meta" id="meta"></div>
@@ -2146,6 +2214,14 @@
     const AGENT_FILTER_STORE = 'tmux-attn:agent-filter';
     const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor' };
     let agentFilter = readAgentFilter();
+    const NOTIFY_STORE = 'tmux-attn:notify';
+    const FAVICON_CALM_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="tmux Attention"><rect width="32" height="32" rx="8" fill="#0f766e"/><rect x="5" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="5" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/></svg>';
+    const FAVICON_BADGE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="tmux Attention — needs attention"><rect width="32" height="32" rx="8" fill="#0f766e"/><rect x="5" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="5" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="5" width="10" height="10" rx="2.2" fill="#f8fafc"/><circle cx="25" cy="7" r="5.5" fill="#0f766e"/><circle cx="25" cy="7" r="4.2" fill="#ef4444"/></svg>';
+    const BELL_ON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
+    const BELL_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M18.63 13A17.89 17.89 0 0 1 18 8"/><path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"/><path d="M18 8a6 6 0 0 0-9.33-5"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+    let notifyEnabled = readNotifyPref();
+    const notifiedHostSeeded = new Set();
+    const prevAgentNotifyState = new Map();
     let activeGroup = '';
     let laterExpanded = false;
     const laterBusy = new Set();
@@ -2227,7 +2303,7 @@
           `<button type="button" class="copy-cmd" data-copy="${escapeHtml(cmd)}">複製</button></div></div>`;
       });
       const html = behind.length ? '<div class="update-title">版本與 hub 不一致，請在該主機執行：</div>' + rows.join('') : '';
-      // The poll renders every 10s; rewriting identical markup would drop a text selection and the 已複製 label.
+      // The poll renders every 20s; rewriting identical markup would drop a text selection and the 已複製 label.
       if (html !== updateHintHtml) {
         updateHintHtml = html;
         el.innerHTML = html;
@@ -3588,6 +3664,162 @@
       }
       return counts;
     }
+    function notificationApi() {
+      return typeof Notification !== 'undefined' ? Notification : (window && window.Notification) || null;
+    }
+    function readNotifyPref() {
+      try {
+        return localStorage.getItem(NOTIFY_STORE) === '1';
+      } catch (_) {
+        return false;
+      }
+    }
+    function writeNotifyPref(enabled) {
+      notifyEnabled = !!enabled;
+      try {
+        if (notifyEnabled) localStorage.setItem(NOTIFY_STORE, '1');
+        else localStorage.removeItem(NOTIFY_STORE);
+      } catch (_) { /* Keep preference in memory when browser storage is unavailable. */ }
+    }
+    function notifyState() {
+      const Api = notificationApi();
+      if (!Api) return 'unsupported';
+      if (Api.permission === 'denied') return 'denied';
+      if (Api.permission === 'granted' && notifyEnabled) return 'on';
+      return 'off';
+    }
+    function paintNotifyButton() {
+      const btn = document.getElementById('notify-toggle');
+      const icon = document.getElementById('notify-icon');
+      const label = document.getElementById('notify-label');
+      if (!btn || !icon || !label) return;
+      const state = notifyState();
+      btn.dataset.state = state;
+      if (state === 'unsupported') {
+        btn.hidden = true;
+        btn.setAttribute('aria-pressed', 'false');
+        return;
+      }
+      btn.hidden = false;
+      const on = state === 'on';
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      icon.innerHTML = on ? BELL_ON_SVG : BELL_OFF_SVG;
+      if (state === 'on') {
+        label.textContent = '通知開啟';
+        btn.title = '瀏覽器通知已開啟（點擊關閉）';
+        btn.setAttribute('aria-label', '瀏覽器通知已開啟，點擊關閉');
+      } else if (state === 'denied') {
+        label.textContent = '通知封鎖';
+        btn.title = '瀏覽器已封鎖通知，請從網址列開啟權限';
+        btn.setAttribute('aria-label', '瀏覽器已封鎖通知，請從網址列開啟權限');
+      } else {
+        label.textContent = '通知';
+        btn.title = '開啟瀏覽器通知（等待回覆與待看時提醒）';
+        btn.setAttribute('aria-label', '開啟瀏覽器通知');
+      }
+    }
+    function updateAttentionIndicators(agents) {
+      let waitCount = 0;
+      let reviewCount = 0;
+      for (const a of agents) {
+        if (a.later) continue;
+        const cat = category(a);
+        if (cat === 'wait') waitCount += 1;
+        else if (cat === 'review') reviewCount += 1;
+      }
+      const attentionCount = waitCount + reviewCount;
+      document.title = attentionCount > 0 ? `(${attentionCount}) Attention` : 'Attention';
+      const favicon = document.getElementById('favicon');
+      if (favicon) {
+        const svg = attentionCount > 0 ? FAVICON_BADGE_SVG : FAVICON_CALM_SVG;
+        favicon.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+        favicon.dataset.badge = attentionCount > 0 ? (waitCount > 0 ? 'wait' : 'review') : 'none';
+        favicon.dataset.count = String(attentionCount);
+      }
+      const dot = document.getElementById('notify-dot');
+      if (dot) {
+        dot.hidden = attentionCount === 0;
+      }
+      try {
+        if (attentionCount > 0 && typeof navigator.setAppBadge === 'function') {
+          Promise.resolve(navigator.setAppBadge(attentionCount)).catch(() => {});
+        } else if (attentionCount === 0 && typeof navigator.clearAppBadge === 'function') {
+          Promise.resolve(navigator.clearAppBadge()).catch(() => {});
+        }
+      } catch (_) {}
+    }
+    function notificationSnippet(a, cat) {
+      const firstQuestion = Array.isArray(a.questions) && a.questions[0]?.title
+        ? clipText(a.questions[0].title, 100).trim()
+        : '';
+      const rawAgent = clipText(a.preview?.agent, 240).replace(/\s+/g, ' ').trim();
+      const fallbackReason = a.reason && !GENERIC_REASONS.has(a.reason) ? String(a.reason).trim() : '';
+      const snippet = firstQuestion || rawAgent || taskHint(a) || fallbackReason || (cat === 'wait' ? '等待你的回覆' : '已完成，等待檢閱');
+      const hostPrefix = showHostChips() ? `[${agentHostName(a)}] ` : '';
+      return hostPrefix + (snippet.length > 100 ? snippet.slice(0, 99) + '…' : snippet);
+    }
+    function sendBrowserNotification(a, cat) {
+      const Api = notificationApi();
+      if (!Api || notifyState() !== 'on') return null;
+      const key = agentKey(a);
+      const prefix = cat === 'wait' ? '🙋 等待回覆' : '👀 待看';
+      const title = `${prefix} · ${identityLine(a)}`;
+      const body = notificationSnippet(a, cat);
+      try {
+        const note = new Api(title, {
+          body,
+          tag: 'tmux-attn:' + key,
+          icon: '/icons/favicon.svg',
+        });
+        note.onclick = () => {
+          try { if (typeof window.focus === 'function') window.focus(); } catch (_) {}
+          const target = latestAgents.find(item => agentKey(item) === key && item.tracked);
+          if (target) openSheet(target);
+          try { if (typeof note.close === 'function') note.close(); } catch (_) {}
+        };
+        return note;
+      } catch (_) {
+        return null;
+      }
+    }
+    function notifyAttentionTransitions(agents, hosts) {
+      const pendingHostNames = new Set(hosts.filter(h => h.pending).map(h => h.name));
+      const activeHostNames = new Set();
+      const onlineHostNames = new Set();
+      for (const h of hosts) {
+        if (!h.name || h.pending) continue;
+        activeHostNames.add(h.name);
+        if (h.ok !== false && !h.stale) onlineHostNames.add(h.name);
+      }
+      const seenKeys = new Set();
+      for (const a of agents) {
+        const hName = agentHostName(a);
+        if (pendingHostNames.has(hName)) continue;
+        activeHostNames.add(hName);
+        if (!hosts.some(h => h.name === hName)) onlineHostNames.add(hName);
+        const key = agentKey(a);
+        seenKeys.add(key);
+        const cat = a.later ? 'later' : category(a);
+        const rev = Number(a.revision) || 0;
+        const prev = prevAgentNotifyState.get(key);
+        if (notifiedHostSeeded.has(hName) && (cat === 'wait' || cat === 'review')) {
+          const transitioned = !prev || prev.cat !== cat || (rev > 0 && prev.revision > 0 && rev > prev.revision);
+          const viewingSameSheet = sheetOpen && selectedKey === key && document.visibilityState !== 'hidden';
+          if (transitioned && !viewingSameSheet) {
+            sendBrowserNotification(a, cat);
+          }
+        }
+        prevAgentNotifyState.set(key, { host: hName, cat, revision: rev });
+      }
+      for (const [key, prev] of [...prevAgentNotifyState.entries()]) {
+        if (onlineHostNames.has(prev.host) && !seenKeys.has(key)) {
+          prevAgentNotifyState.delete(key);
+        }
+      }
+      for (const hName of activeHostNames) {
+        notifiedHostSeeded.add(hName);
+      }
+    }
     function render(data) {
       latestPayload = data;
       const s = data.summary || {};
@@ -3640,7 +3872,10 @@
         `追蹤 ${s.tracked || 0}，其他 ${s.untracked || 0}` +
         (hosts.length ? `，主機 ${okHosts}/${hosts.length}` : '') +
         filterNote +
-        '，約 10 秒更新';
+        '，約 20 秒更新';
+      paintNotifyButton();
+      updateAttentionIndicators(latestAgents);
+      notifyAttentionTransitions(latestAgents, hosts);
       const hostButtons = [];
       if (hosts.length > 1) {
         const total = Object.values(sessionCounts).reduce((n, v) => n + v, 0);
@@ -4000,7 +4235,33 @@
         renderAttachments();
       }
     });
-    const POLL_MS = 10000;
+    document.getElementById('notify-toggle').addEventListener('click', async () => {
+      const Api = notificationApi();
+      if (!Api) return;
+      const state = notifyState();
+      if (state === 'on') {
+        writeNotifyPref(false);
+        paintNotifyButton();
+        return;
+      }
+      if (Api.permission === 'granted') {
+        writeNotifyPref(true);
+        paintNotifyButton();
+        return;
+      }
+      if (Api.permission === 'default' && typeof Api.requestPermission === 'function') {
+        try {
+          const result = await Api.requestPermission();
+          writeNotifyPref(result === 'granted');
+        } catch (_) {
+          writeNotifyPref(false);
+        }
+        paintNotifyButton();
+        return;
+      }
+      paintNotifyButton();
+    });
+    const POLL_MS = 20000;
     let refreshInFlight = false;
     let hasLoaded = false;
     let lastSuccessAt = 0;
@@ -4226,6 +4487,7 @@
         }
       }
     }
+    paintNotifyButton();
     refresh();
     setInterval(refresh, POLL_MS);
     setInterval(() => {
