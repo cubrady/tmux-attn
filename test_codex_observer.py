@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import attention as a
 from codex_observer import approval_screen,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli,pi_screen,native_pi_pids
 from codex_observer import queued_questions_screen,sync_attention_overlay,observe_codex_unmapped
+from codex_observer import codex_terminal_footer,read_codex_terminals,parked_codex_terminals
 from codex_observer import _darwin_procargs_environment, process_codex_home
 
 class ObserverTests(unittest.TestCase):
@@ -600,6 +601,170 @@ class CodexProfileTests(unittest.TestCase):
     with patch.dict(os.environ, {'CODEX_HOME': ''}):
      a.register_codex_session(con, 'sock', '%2', '234', {'session_id': 'same-root'})
     self.assertEqual(con.execute("SELECT rollout_path FROM codex_sessions WHERE pane='%2'").fetchone()[0], '')
+
+ def test_codex_background_terminals_hold_wait_and_retire_to_review(self):
+  footer_2 = (
+   '• Handed off Phase A to pi-gemini-argon.\n\n'
+   '  Worked for 2h 33m 38s • 11:20 AM\n\n'
+   '  2 background terminals running · /ps to view · /stop to close\n\n\n'
+   '› Ask Codex to do anything\n\n'
+   '  GPT-6.1-Sol high · ~/proj/sonice · Task · Main [default]\n'
+   '  ← for agents · ? for shortcuts\n'
+  )
+  footer_1_ps = (
+   '/ps\n\nBackground terminals\n\n'
+   '  • python3 mount_models.py\n\n'
+   '  1 background terminal running · /ps to view · /stop to close\n\n\n'
+   '› Ask Codex to do anything\n\n'
+   '  GPT-6.1-Sol high · ~/proj/sonice · Task · Main [default]\n'
+   '  ← for agents · ? for shortcuts\n'
+  )
+  self.assertEqual(codex_terminal_footer(footer_2), 2)
+  self.assertEqual(codex_terminal_footer(footer_1_ps), 1)
+  # Quoted text above Worked for or during active foreground work must not match.
+  quoted = (
+   '• Quoted:\n  2 background terminals running · /ps to view · /stop to close\n'
+   '  Worked for 1m 10s • 11:20 AM\n\n'
+   '› Ask Codex to do anything\n  GPT high · /project · task\n  ← for agents\n'
+  )
+  self.assertEqual(codex_terminal_footer(quoted), 0)
+  self.assertEqual(codex_terminal_footer('• Working (12s • esc to interrupt)\n' + footer_2), 0)
+
+  with tempfile.TemporaryDirectory() as directory:
+   root = Path(directory)
+   rollout = root / 'rollout.jsonl'
+   rows = [
+    {'timestamp': '2026-10-27T00:46:45Z', 'type': 'event_msg',
+     'payload': {'type': 'task_started', 'turn_id': 'turn-1'}},
+    # Persistent helper launched >2h earlier in the same turn (daemon).
+    {'timestamp': '2026-10-27T00:57:28Z', 'type': 'response_item',
+     'payload': {'type': 'custom_tool_call_output', 'output': [
+      {'type': 'input_text', 'text': json.dumps({
+       'chunk_id': '016d90', 'wall_time_seconds': 1.0,
+       'session_id': 83341, 'original_token_count': 0, 'output': '',
+      })},
+     ], 'internal_chat_message_metadata_passthrough': {'turn_id': 'turn-1'}}},
+    # Short command that yielded a session_id then finished inside the turn.
+    {'timestamp': '2026-10-27T03:10:06Z', 'type': 'response_item',
+     'payload': {'type': 'custom_tool_call_output', 'output': [
+      {'type': 'input_text', 'text': json.dumps({
+       'chunk_id': '4b0338', 'wall_time_seconds': 1.0,
+       'session_id': 65141, 'original_token_count': 0, 'output': '',
+      })},
+     ], 'internal_chat_message_metadata_passthrough': {'turn_id': 'turn-1'}}},
+    {'timestamp': '2026-10-27T03:10:32Z', 'type': 'event_msg',
+     'payload': {'type': 'item_completed', 'turn_id': 'turn-1',
+                 'item': {'type': 'CommandExecution', 'process_id': '65141', 'status': 'completed', 'exit_code': 0}}},
+    # Delegated background agent (pi-gemini-argon) still running when turn completes.
+    {'timestamp': '2026-10-27T03:11:50Z', 'type': 'response_item',
+     'payload': {'type': 'custom_tool_call_output', 'output': [
+      {'type': 'input_text', 'text': json.dumps({
+       'chunk_id': '3d98e2', 'wall_time_seconds': 1.0,
+       'session_id': 91136, 'original_token_count': 0, 'output': '',
+      })},
+     ], 'internal_chat_message_metadata_passthrough': {'turn_id': 'turn-1'}}},
+    # Stdout JSON mentioning session_id inside output text must never spoof a terminal.
+    {'timestamp': '2026-10-27T03:17:13Z', 'type': 'response_item',
+     'payload': {'type': 'custom_tool_call_output', 'output': [
+      {'type': 'input_text', 'text': json.dumps({
+       'chunk_id': 'a50f65', 'wall_time_seconds': 0.01, 'exit_code': 0,
+       'original_token_count': 20, 'output': '{"session_id": 77777}',
+      })},
+     ], 'internal_chat_message_metadata_passthrough': {'turn_id': 'turn-1'}}},
+    {'timestamp': '2026-10-27T03:20:24Z', 'type': 'event_msg',
+     'payload': {'type': 'task_complete', 'turn_id': 'turn-1', 'last_agent_message': 'Delegated to Argon.'}},
+   ]
+   rollout.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+
+   # Active cohort has 91136 (83341 is an old daemon from >2h earlier).
+   self.assertEqual(set(read_codex_terminals(rollout)['started']), {'83341', '65141', '91136'})
+   self.assertEqual(parked_codex_terminals(footer_2, rollout),
+                    ('RUNNING', 'Background work: waiting on 1 terminal', False))
+
+   with patch.object(a, 'STATE', root / 'inbox'), closing(a.db()) as con:
+    key = ('%46', '482294', 'root', str(rollout))
+    overlays = {}
+    _, previous = read_lifecycle(rollout, 0)
+    self.assertTrue(sync_attention_overlay(con, 'sock', '%46', '482294', key, footer_2, previous, overlays))
+    row = dict(con.execute('SELECT * FROM panes').fetchone())
+    self.assertEqual((row['state'], row['reason'], row['needs_review']),
+                     ('RUNNING', 'Background work: waiting on 1 terminal', 0))
+    self.assertEqual(a.agent_emoji(row), '⏳')
+
+    # Repeated scans while 91136 is running keep the same revision.
+    self.assertTrue(sync_attention_overlay(con, 'sock', '%46', '482294', key, footer_2, previous, overlays))
+    self.assertEqual(con.execute('SELECT revision FROM panes').fetchone()[0], row['revision'])
+
+    # Observer restart recovery: overlays dict is empty, but DB has Background work: waiting on 1 terminal.
+    overlays.clear()
+    # Now 91136 finishes after task_complete, leaving only the old mount_models.py daemon (83341).
+    rows.append({
+     'timestamp': '2026-10-27T03:33:09Z', 'type': 'event_msg',
+     'payload': {'type': 'item_completed', 'turn_id': 'turn-1',
+                 'item': {'type': 'CommandExecution', 'process_id': '91136', 'status': 'completed', 'exit_code': 0}},
+    })
+    rollout.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+    self.assertIsNone(parked_codex_terminals(footer_1_ps, rollout))
+    self.assertTrue(sync_attention_overlay(con, 'sock', '%46', '482294', key, footer_1_ps, previous, overlays))
+    completed_row = dict(con.execute('SELECT * FROM panes').fetchone())
+    self.assertEqual((completed_row['state'], completed_row['needs_review'], completed_row['event_key']),
+                     ('IDLE', 1, 'turn-1'))
+    self.assertGreater(completed_row['revision'], row['revision'])
+    self.assertEqual(a.agent_emoji(completed_row), '👀')
+
+    # Once acknowledged by the user, subsequent observer ticks keep it in 💤.
+    a.acknowledge(con, completed_row)
+    ack_row = dict(con.execute('SELECT * FROM panes').fetchone())
+    self.assertFalse(sync_attention_overlay(con, 'sock', '%46', '482294', key, footer_1_ps, previous, overlays))
+    after_row = dict(con.execute('SELECT * FROM panes').fetchone())
+    self.assertEqual(after_row['revision'], ack_row['revision'])
+    self.assertEqual(after_row['acknowledged'], ack_row['acknowledged'])
+
+    # Parallel cohort (2 active jobs) steps down from 2 -> 1 -> IDLE, and direct function_call_output works.
+    rows.extend([
+     {'timestamp': '2026-10-27T03:40:00Z', 'type': 'event_msg',
+      'payload': {'type': 'task_started', 'turn_id': 'turn-2'}},
+     {'timestamp': '2026-10-27T03:40:10Z', 'type': 'response_item',
+      'payload': {'type': 'function_call_output',
+                  'output': 'Chunk ID: ede5c5\nWall time: 1.0022 seconds\nProcess running with session ID 41090\nOriginal token count: 0\nOutput:\n'}},
+     {'timestamp': '2026-10-27T03:40:30Z', 'type': 'response_item',
+      'payload': {'type': 'custom_tool_call_output', 'output': [
+       {'type': 'input_text', 'text': json.dumps({
+        'chunk_id': '998877', 'wall_time_seconds': 1.0,
+        'session_id': 41091, 'original_token_count': 0, 'output': '',
+       })},
+      ], 'internal_chat_message_metadata_passthrough': {'turn_id': 'turn-2'}}},
+     {'timestamp': '2026-10-27T03:41:00Z', 'type': 'event_msg',
+      'payload': {'type': 'task_complete', 'turn_id': 'turn-2', 'last_agent_message': 'Two jobs running.'}},
+    ])
+    rollout.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+    _, previous2 = read_lifecycle(rollout, 0)
+    self.assertEqual(parked_codex_terminals(footer_2, rollout),
+                     ('RUNNING', 'Background work: waiting on 2 terminals', False))
+    self.assertTrue(sync_attention_overlay(con, 'sock', '%46', '482294', key, footer_2, previous2, overlays))
+    self.assertEqual(con.execute('SELECT reason FROM panes').fetchone()[0],
+                     'Background work: waiting on 2 terminals')
+
+    # Job 1 finishes; job 2 still running.
+    rows.append({
+     'timestamp': '2026-10-27T03:42:00Z', 'type': 'event_msg',
+     'payload': {'type': 'item_completed', 'turn_id': 'turn-2',
+                 'item': {'type': 'CommandExecution', 'process_id': '41090', 'status': 'completed', 'exit_code': 0}},
+    })
+    rollout.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+    self.assertEqual(parked_codex_terminals(footer_1_ps, rollout),
+                     ('RUNNING', 'Background work: waiting on 1 terminal', False))
+    self.assertTrue(sync_attention_overlay(con, 'sock', '%46', '482294', key, footer_1_ps, previous2, overlays))
+    self.assertEqual(con.execute('SELECT reason FROM panes').fetchone()[0],
+                     'Background work: waiting on 1 terminal')
+
+    # Turn abort never holds background wait even if footer remains.
+    rows.extend([
+     {'timestamp': '2026-10-27T03:45:00Z', 'type': 'event_msg',
+      'payload': {'type': 'turn_aborted', 'turn_id': 'turn-2'}},
+    ])
+    rollout.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+    self.assertIsNone(parked_codex_terminals(footer_1_ps, rollout))
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

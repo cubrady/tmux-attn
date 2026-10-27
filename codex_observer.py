@@ -676,22 +676,244 @@ def queued_questions_screen(text):
     return int(count[1])
 
 
-def sync_attention_overlay(con, sock, pane, pid, key, screen, previous, overlays):
+CODEX_BG_COHORT_SECONDS = 120
+_codex_cache = OrderedDict()
+
+
+def codex_terminal_footer(text):
+    """Require Codex's live background-terminal footer above the prompt."""
+    lines = text.rstrip().splitlines()
+    if approval_screen(text) or queued_questions_screen(text):
+        return 0
+    tail = '\n'.join(lines[-18:])
+    if re.search(r'(?:• Working \(|esc to interrupt)', tail):
+        return 0
+    prompts = [i for i, line in enumerate(lines) if re.match(r'^\s*›(?:\s|$)', line)]
+    if not prompts:
+        return 0
+    index = prompts[-1]
+    if len(lines) - index > 8:
+        return 0
+    after = lines[index + 1:]
+    if not any(' · ' in line or '← for agents' in line or '? for shortcuts' in line for line in after):
+        return 0
+    for line in reversed(lines[max(0, index - 6):index]):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = re.match(
+            r'^([1-9]\d*)\s+background terminals? running\s*·\s*/ps to view\s*·\s*/stop to close$',
+            stripped,
+        )
+        if match:
+            return int(match[1])
+        break
+    return 0
+
+
+def _codex_output_session_ids(output):
+    if isinstance(output, str):
+        texts = [output]
+    elif isinstance(output, list):
+        texts = [b['text'] for b in output if isinstance(b, dict) and isinstance(b.get('text'), str)]
+    else:
+        return ()
+    ids = []
+    for text in texts:
+        match = re.match(
+            r'^Chunk ID: [0-9a-f]+\nWall time: [0-9.]+ seconds\nProcess running with session ID (\d+)\n',
+            text,
+        )
+        if match:
+            ids.append(match[1])
+            continue
+        if 'session_id' not in text or 'chunk_id' not in text:
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        val = data.get('value') if isinstance(data.get('value'), dict) else data
+        if (isinstance(val, dict)
+                and isinstance(val.get('chunk_id'), str)
+                and type(val.get('session_id')) is int
+                and val.get('exit_code') is None
+                and isinstance(val.get('output'), str)):
+            ids.append(str(val['session_id']))
+    return ids
+
+
+def read_codex_terminals(path):
+    """Bounded, cached Codex background-terminal ledger; None means unavailable."""
+    if not path:
+        return None
+    path = Path(path)
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        if key in _codex_cache:
+            _codex_cache.move_to_end(key)
+            return _codex_cache[key]
+        previous = next((value for old, value in reversed(_codex_cache.items())
+                         if old[0] == str(path) and old[1] == stat.st_ino
+                         and old[2] < stat.st_size
+                         and value['offset'] <= stat.st_size
+                         and stat.st_size - value['offset'] <= TAIL_BYTES), None)
+        with path.open('rb') as stream:
+            if previous:
+                stream.seek(previous['offset'])
+            elif stat.st_size > TAIL_BYTES:
+                stream.seek(stat.st_size - TAIL_BYTES)
+                stream.readline(TAIL_BYTES)
+            raw = stream.read(TAIL_BYTES)
+            complete = raw.rfind(b'\n') + 1
+            offset = stream.tell() - len(raw) + complete
+            raw = raw[:complete]
+    except OSError:
+        return None
+    known_turn = bool(previous and previous['known_turn'])
+    turn_id = previous['turn_id'] if previous else ''
+    aborted = bool(previous and previous['aborted'])
+    stop_stamp = previous['stop_stamp'] if previous else 0
+    started = {sid: dict(info) for sid, info in previous['started'].items()} if previous else {}
+    completed_in_turn = set(previous['completed_in_turn']) if previous else set()
+    completed_after_turn = dict(previous['completed_after_turn']) if previous else {}
+    for line in raw.splitlines():
+        if not any(marker in line for marker in (
+            b'"task_started"', b'"task_complete"', b'"turn_aborted"', b'"user_message"',
+            b'"UserMessage"', b'session_id', b'Process running with session ID', b'"CommandExecution"',
+        )):
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        payload = row.get('payload')
+        if not isinstance(payload, dict):
+            continue
+        stamp = _stamp(row.get('timestamp'))
+        row_turn = payload.get('turn_id') or ''
+        if not row_turn and isinstance(payload.get('internal_chat_message_metadata_passthrough'), dict):
+            row_turn = payload['internal_chat_message_metadata_passthrough'].get('turn_id') or ''
+        if row_turn:
+            if turn_id and row_turn != turn_id:
+                started, completed_in_turn, completed_after_turn, aborted, stop_stamp = {}, set(), {}, False, 0
+            turn_id = row_turn
+            known_turn = True
+        kind = row.get('type')
+        if kind == 'event_msg':
+            ptype = payload.get('type')
+            if ptype in ('task_started', 'user_message'):
+                started, completed_in_turn, completed_after_turn, aborted, stop_stamp = {}, set(), {}, False, 0
+                if row_turn:
+                    turn_id = row_turn
+                known_turn = True
+            elif ptype == 'turn_aborted':
+                started, completed_in_turn, completed_after_turn, aborted, stop_stamp = {}, set(), {}, True, stamp
+                known_turn = True
+            elif ptype == 'task_complete':
+                aborted = False
+                stop_stamp = stamp or -1
+                known_turn = True
+            elif ptype == 'item_completed':
+                item = payload.get('item')
+                if isinstance(item, dict):
+                    if item.get('type') == 'UserMessage' and not row_turn:
+                        started, completed_in_turn, completed_after_turn, aborted, stop_stamp = {}, set(), {}, False, 0
+                        known_turn = True
+                    elif item.get('type') == 'CommandExecution':
+                        sid = str(item.get('process_id') or '')
+                        if sid:
+                            if stop_stamp:
+                                completed_after_turn[sid] = stamp
+                            else:
+                                completed_in_turn.add(sid)
+        elif kind == 'response_item' and payload.get('type') in ('custom_tool_call_output', 'function_call_output'):
+            for sid in _codex_output_session_ids(payload.get('output')):
+                if sid not in started:
+                    started[sid] = {'started': stamp, 'active': stamp}
+                else:
+                    started[sid]['active'] = max(started[sid]['active'], stamp)
+    answer = {
+        'known_turn': known_turn, 'turn_id': turn_id, 'aborted': aborted,
+        'stop_stamp': stop_stamp, 'started': started,
+        'completed_in_turn': completed_in_turn, 'completed_after_turn': completed_after_turn,
+        'offset': offset,
+    }
+    for old in list(_codex_cache):
+        if old[0] == str(path):
+            del _codex_cache[old]
+    _codex_cache[key] = answer
+    while len(_codex_cache) > 32:
+        _codex_cache.popitem(last=False)
+    return answer
+
+
+def parked_codex_terminals(screen, transcript):
+    """Hold RUNNING (⏳) when a completed Codex turn is parked on active background terminals."""
+    count = codex_terminal_footer(screen)
+    if not count:
+        return None
+    ledger = read_codex_terminals(transcript)
+    if not ledger or not ledger['known_turn'] or ledger['aborted'] or not ledger['started']:
+        return None
+    stop_stamp = ledger['stop_stamp']
+    running_at_stop = {
+        sid: info for sid, info in ledger['started'].items()
+        if sid not in ledger['completed_in_turn']
+    }
+    if not running_at_stop:
+        return None
+    latest_active = max(info['active'] for info in running_at_stop.values())
+    cohort = [
+        sid for sid, info in running_at_stop.items()
+        if latest_active - info['active'] <= CODEX_BG_COHORT_SECONDS
+        and (stop_stamp <= 0 or stop_stamp - info['active'] < STALE_SECONDS)
+    ]
+    running = [sid for sid in cohort if sid not in ledger['completed_after_turn']]
+    if not running:
+        return None
+    count = min(count, len(running))
+    reason = f'Background work: waiting on {count} terminal' + ('s' if count != 1 else '')
+    return 'RUNNING', reason, False
+
+
+def sync_attention_overlay(con, sock, pane, pid, key, screen, previous, overlays, rollout_path=None):
     questions = queued_questions_screen(screen)
     reason = ('Approval dialog visible' if approval_screen(screen) else
               f'Queued follow-up questions: {questions}' if questions else None)
     if reason:
-        overlays[key] = reason
+        overlays[key] = ('WAIT', reason)
         record(con,sock,pane,pid,'codex','WAIT',reason,source='observer')
-    else:
-        old_reason = overlays.pop(key,None)
-        current = con.execute('SELECT state,reason FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
-        # Recover our persisted screen state after an observer restart, too.
-        if not old_reason and current and (current['reason'] == 'Approval dialog visible' or current['reason'].startswith('Queued follow-up questions: ')):
-            old_reason = current['reason']
-        if previous and current and tuple(current) == ('WAIT',old_reason):
-            state,_,turn = previous
-            record(con,sock,pane,pid,'codex',*state,event_key=turn,source='observer')
+        return True
+    path = rollout_path if rollout_path is not None else (key[3] if isinstance(key, tuple) and len(key) > 3 else None)
+    turn_settled = (not previous) or (previous[0][0] == 'IDLE' and 'Interrupted' not in previous[0][1])
+    parked = parked_codex_terminals(screen, path) if turn_settled and path else None
+    if parked:
+        state, parked_reason, review = parked
+        overlays[key] = (state, parked_reason)
+        record(con,sock,pane,pid,'codex',state,parked_reason,review,source='observer')
+        return True
+    old = overlays.pop(key,None)
+    if isinstance(old, str):
+        old = ('WAIT', old)
+    current = con.execute('SELECT state,reason FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
+    # Recover our persisted screen state after an observer restart, too.
+    if not old and current:
+        cur_reason = current['reason'] or ''
+        if current['state'] == 'WAIT' and (cur_reason == 'Approval dialog visible' or cur_reason.startswith('Queued follow-up questions: ')):
+            old = ('WAIT', cur_reason)
+        elif current['state'] == 'RUNNING' and re.match(r'^Background work: waiting on \d+ terminals?$', cur_reason):
+            old = ('RUNNING', cur_reason)
+    if previous and current and old and (current['state'], current['reason']) == old:
+        state,_,turn = previous
+        record(con,sock,pane,pid,'codex',*state,event_key=turn,source='observer')
+        return True
+    return False
 
 
 def discover(con, sock, live, table, attempted):
@@ -872,16 +1094,16 @@ def observe():
                         continue
                     key = (pane,pid,mapping['thread_id'],mapping['rollout_path'])
                     offset,previous = cursors.get(key,(0,None))
+                    event = None
                     if mapping['rollout_path'] and Path(mapping['rollout_path']).is_file():
                         offset,event = read_lifecycle(mapping['rollout_path'],offset)
                         previous = event or previous
                         cursors[key] = (offset,previous)
-                        if event:
-                            state,stamp,turn = event
-                            record(con,sock,pane,pid,'codex',*state,event_time=stamp,event_key=turn,source='observer')
-                    # The UI can await human input while the main turn keeps running.
+                    # The UI can await human input or parked background terminals.
                     screen = tmux('capture-pane','-p','-t',pane,'-S','-35',check=False,sock=sock)
-                    sync_attention_overlay(con,sock,pane,pid,key,screen,previous,overlays)
+                    if not sync_attention_overlay(con,sock,pane,pid,key,screen,previous,overlays) and event:
+                        state,stamp,turn = event
+                        record(con,sock,pane,pid,'codex',*state,event_time=stamp,event_key=turn,source='observer')
             except Exception as exc:
                 log_observer_error(exc)
             time.sleep(2)
