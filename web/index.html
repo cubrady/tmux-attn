@@ -2774,11 +2774,15 @@
       const desc = String(resetDescription || '').trim();
       return desc ? `重置 ${desc}` : '';
     }
+    function remainingPercentForWindow(win) {
+      const used = Math.max(0, Math.min(100, Math.round(Number(win?.usedPercent) || 0)));
+      return 100 - used;
+    }
     function formatWindowPillSummary(win) {
-      const pct = Math.max(0, Math.min(100, Math.round(Number(win?.usedPercent) || 0)));
+      const remain = remainingPercentForWindow(win);
       const label = escapeHtml(win?.shortLabel || win?.label || '');
-      const cd = pct >= 100 ? formatResetCountdown(win?.resetsAt) : '';
-      return `${label} ${pct}%${cd ? ` (${escapeHtml(cd)})` : ''}`;
+      const cd = remain <= 0 ? formatResetCountdown(win?.resetsAt) : '';
+      return `${label} 剩 ${remain}%${cd ? ` (${escapeHtml(cd)})` : ''}`;
     }
     function renderAgentUsage() {
       const box = document.getElementById('agent-usage');
@@ -2802,8 +2806,8 @@
         const tone = usageToneForAccount(acc);
         if (tone === 'danger') overallTone = 'danger';
         else if (tone === 'warn' && overallTone !== 'danger') overallTone = 'warn';
-        const maxPct = (acc.windows || []).reduce((m, w) => Math.max(m, Math.min(100, Math.max(0, Math.round(Number(w?.usedPercent) || 0)))), 0);
-        const hPct = Math.max(18, maxPct);
+        const minRemain = (acc.windows || []).reduce((m, w) => Math.min(m, remainingPercentForWindow(w)), 100);
+        const hPct = Math.max(16, minRemain);
         return `<span class="usage-mini-col"><span class="usage-mini-fill tone-${tone}" style="height:${hPct}%"></span></span>`;
       }).join('');
       const toggleHtml = `<button type="button" class="usage-toggle tone-${overallTone}" data-usage-toggle aria-expanded="${usageExpanded ? 'true' : 'false'}" aria-controls="usage-panel">` +
@@ -2818,19 +2822,19 @@
         const acctLabel = acc.label || acc.account || providerName;
         const badge = cliBadge(acc.provider, true);
         const winsHtml = (acc.windows || []).map(win => {
-          const pct = Math.max(0, Math.min(100, Math.round(Number(win.usedPercent) || 0)));
+          const remainPct = remainingPercentForWindow(win);
           const wTone = usageToneForWindow(win);
           const shortReset = formatResetCountdown(win.resetsAt) || formatLocalResetClock(win.resetsAt);
           const resetInfo = formatResetDetail(win.resetsAt, win.resetDescription);
-          const expectedPct = Number.isFinite(win.pace?.expectedUsedPercent)
-            ? Math.max(0, Math.min(100, Math.round(win.pace.expectedUsedPercent)))
+          const expectedRemainPct = Number.isFinite(win.pace?.expectedUsedPercent)
+            ? Math.max(0, Math.min(100, 100 - Math.round(win.pace.expectedUsedPercent)))
             : null;
-          const expectedTick = expectedPct !== null && expectedPct > 0 && expectedPct < 100
-            ? `<span class="usage-bar-expected" style="left:${expectedPct}%" title="預期進度 ${expectedPct}%"></span>`
+          const expectedTick = expectedRemainPct !== null && expectedRemainPct > 0 && expectedRemainPct < 100
+            ? `<span class="usage-bar-expected" style="left:${expectedRemainPct}%" title="預期剩餘 ${expectedRemainPct}%"></span>`
             : '';
           let paceHtml = '';
-          if (pct >= 100) {
-            paceHtml = `<div class="usage-pace tone-danger">⛔ 已達視窗上限${resetInfo ? ` · ${escapeHtml(resetInfo)}` : ''}</div>`;
+          if (remainPct <= 0) {
+            paceHtml = `<div class="usage-pace tone-danger">⛔ 已用盡${resetInfo ? ` · ${escapeHtml(resetInfo)}` : ''}</div>`;
           } else if (win.pace && win.pace.willLastToReset === false) {
             const delta = Number.isFinite(win.pace.deltaPercent) && win.pace.deltaPercent > 0 ? `超前 ${win.pace.deltaPercent}%` : '消耗偏快';
             const eta = Number.isFinite(win.pace.etaSeconds) && win.pace.etaSeconds > 0
@@ -2839,14 +2843,14 @@
             paceHtml = `<div class="usage-pace">⚡ ${escapeHtml(delta + eta)}</div>`;
           }
           return `<div class="usage-win">` +
-            `<div class="usage-meter-row" title="${escapeHtml(`${win.label || win.shortLabel}: 已用 ${pct}%${resetInfo ? ` · ${resetInfo}` : ''}`)}">` +
+            `<div class="usage-meter-row" title="${escapeHtml(`${win.label || win.shortLabel}: 剩餘 ${remainPct}%${resetInfo ? ` · ${resetInfo}` : ''}`)}">` +
               `<span class="usage-win-tag">${escapeHtml(win.shortLabel || win.label)}</span>` +
-              `<div class="usage-bar" role="progressbar" aria-label="${escapeHtml(win.label || win.shortLabel)}" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">` +
-                `<div class="usage-bar-fill tone-${wTone}" style="width:${pct}%"></div>` +
+              `<div class="usage-bar" role="progressbar" aria-label="${escapeHtml(win.label || win.shortLabel)}" aria-valuenow="${remainPct}" aria-valuemin="0" aria-valuemax="100">` +
+                `<div class="usage-bar-fill tone-${wTone}" style="width:${remainPct}%"></div>` +
                 expectedTick +
               `</div>` +
               `<span class="usage-win-stat">` +
-                `<span class="usage-win-pct tone-${wTone}">${pct}%</span>` +
+                `<span class="usage-win-pct tone-${wTone}">剩 ${remainPct}%</span>` +
                 (shortReset ? `<span class="usage-win-reset">${escapeHtml(shortReset)}</span>` : '') +
               `</span>` +
             `</div>` +
@@ -2861,9 +2865,9 @@
           winsHtml +
         `</div>`;
       }).join('');
-      const panelHtml = `<div class="usage-panel" id="usage-panel" role="dialog" aria-label="Coding agent 額度與重置時間"${usageExpanded ? '' : ' hidden'}>` +
+      const panelHtml = `<div class="usage-panel" id="usage-panel" role="dialog" aria-label="Coding agent 剩餘額度與重置時間"${usageExpanded ? '' : ' hidden'}>` +
         `<div class="usage-panel-head">` +
-          `<span class="usage-panel-title">額度與重置時間</span>` +
+          `<span class="usage-panel-title">剩餘額度與重置時間</span>` +
           `<span class="usage-panel-actions">` +
             (ageText ? `<span>${escapeHtml(ageText)}</span>` : '') +
             `<button type="button" class="usage-refresh" data-usage-refresh${usageRefreshing ? ' disabled' : ''}>${usageRefreshing ? '更新中…' : '重新整理'}</button>` +
