@@ -149,8 +149,10 @@
     .brand-actions {
       display: inline-flex;
       align-items: center;
+      justify-content: flex-end;
       gap: 8px;
-      flex-shrink: 0;
+      flex-shrink: 1;
+      min-width: 0;
     }
     .notify-btn {
       appearance: none;
@@ -166,7 +168,14 @@
       padding: 5px 9px;
       cursor: pointer;
       white-space: nowrap;
+      min-width: 0;
+      max-width: 100%;
       transition: color 140ms var(--ease), border-color 140ms var(--ease), background 140ms var(--ease);
+    }
+    #notify-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
     }
     .notify-btn[hidden] { display: none; }
     .notify-btn:hover {
@@ -217,7 +226,7 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      flex-shrink: 0;
+      flex: 0 0 auto;
       font-family: var(--mono);
       font-size: 0.68rem;
       font-weight: 600;
@@ -1105,10 +1114,12 @@
       text-transform: none;
     }
     .sheet-env {
-      display: inline-flex;
+      display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 4px 8px;
+      width: 100%;
+      min-width: 0;
       font: 0.7rem/1.4 var(--mono);
       color: var(--muted);
     }
@@ -1607,19 +1618,27 @@
     }
     .sheet-top {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 10px;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
     }
     .sheet-cli:empty { display: none; }
-    .sheet-heading { flex: 1 1 auto; min-width: 0; }
+    .sheet-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
     .sheet-title {
+      flex: 1 1 auto;
+      min-width: 0;
       margin: 0;
+      padding-top: 6px;
       font-size: 1.05rem;
       font-weight: 600;
       letter-spacing: -0.025em;
       overflow: hidden;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
       display: -webkit-box;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
@@ -1637,10 +1656,11 @@
     .sheet-context[hidden] { display: none; }
     .sheet-meta {
       display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 2px 8px;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 2px;
       margin-top: 3px;
+      min-width: 0;
     }
     .icon-btn.refresh.fresh {
       width: auto;
@@ -2379,25 +2399,25 @@
     <div class="sheet" id="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title" aria-describedby="sheet-context">
       <div class="sheet-drag" id="sheet-drag">
         <div class="sheet-handle" aria-hidden="true"></div>
+        <div class="sheet-host" id="sheet-host" hidden></div>
         <div class="sheet-top">
           <span class="sheet-cli" id="sheet-cli"></span>
-          <div class="sheet-heading">
-            <div class="sheet-host" id="sheet-host" hidden></div>
-            <h2 class="sheet-title" id="sheet-title">回覆</h2>
-            <div class="sheet-context" id="sheet-context" hidden></div>
-            <div class="sheet-meta">
-              <span class="sheet-reason" id="sheet-reason"></span>
-              <span class="sheet-env" id="sheet-env" hidden></span>
-            </div>
+          <h2 class="sheet-title" id="sheet-title">回覆</h2>
+          <div class="sheet-actions">
+            <button type="button" class="sheet-later" id="sheet-later" hidden></button>
+            <button type="button" class="icon-btn refresh" id="sheet-refresh" title="重新整理內容">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+              <span class="refresh-label sr-only" id="sheet-refresh-label">重新整理內容</span>
+            </button>
+            <button type="button" class="icon-btn" id="sheet-close" aria-label="關閉">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
           </div>
-          <button type="button" class="sheet-later" id="sheet-later" hidden></button>
-          <button type="button" class="icon-btn refresh" id="sheet-refresh" title="重新整理內容">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
-            <span class="refresh-label sr-only" id="sheet-refresh-label">重新整理內容</span>
-          </button>
-          <button type="button" class="icon-btn" id="sheet-close" aria-label="關閉">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-          </button>
+        </div>
+        <div class="sheet-context" id="sheet-context" hidden></div>
+        <div class="sheet-meta">
+          <span class="sheet-reason" id="sheet-reason"></span>
+          <span class="sheet-env" id="sheet-env" hidden></span>
         </div>
       </div>
       <div class="sheet-path" id="sheet-path" hidden></div>
