@@ -77,6 +77,80 @@ class WebLaterTests(unittest.TestCase):
             with urlopen(base + '/api/fleet') as response:
                 self.assertTrue(json.load(response)['agents'][0]['later'])
 
+    def test_usage_payload_normalizes_multi_account_falls_back_and_caches(self):
+        a._USAGE_CACHE.clear()
+        calls = []
+
+        def fake_runner(cmd):
+            calls.append(cmd)
+            provider = cmd[cmd.index('--provider') + 1]
+            if provider == 'codex' and '--all-accounts' in cmd:
+                return [
+                    {
+                        'provider': 'codex',
+                        'account': 'alice@example.com',
+                        'rateWindowLabels': {'secondary': 'Weekly'},
+                        'pace': {'secondary': {'stage': 'farAhead', 'deltaPercent': 55, 'etaSeconds': 34588,
+                                               'expectedUsedPercent': 12, 'willLastToReset': False,
+                                               'summary': '55% in deficit'}},
+                        'usage': {
+                            'loginMethod': 'prolite',
+                            'primary': None,
+                            'secondary': {'usedPercent': 67, 'windowMinutes': 10080,
+                                          'resetsAt': '2026-11-02T07:46:55Z', 'resetDescription': 'Nov 2'},
+                            'updatedAt': '2026-10-27T03:17:17Z',
+                        },
+                    },
+                    {
+                        'provider': 'codex',
+                        'account': 'bob@example.com',
+                        'rateWindowLabels': {'primary': 'Session', 'secondary': 'Weekly'},
+                        'usage': {
+                            'loginMethod': 'plus',
+                            'primary': {'usedPercent': 100, 'windowMinutes': 300,
+                                        'resetsAt': '2026-10-27T05:06:48Z', 'resetDescription': '1:06 PM'},
+                            'secondary': {'usedPercent': 30, 'windowMinutes': 10080,
+                                          'resetsAt': '2026-11-02T10:41:57Z', 'resetDescription': 'Nov 2'},
+                            'updatedAt': '2026-10-27T03:17:20Z',
+                        },
+                    },
+                ]
+            if provider == 'claude':
+                if '--all-accounts' in cmd:
+                    return [{'provider': 'claude', 'error': {'code': 1, 'message': 'No token accounts'}}]
+                return [{
+                    'provider': 'claude',
+                    'rateWindowLabels': {'primary': 'Session', 'secondary': 'Weekly'},
+                    'usage': {
+                        'accountEmail': 'carol@example.com',
+                        'loginMethod': 'Team',
+                        'primary': {'usedPercent': 0, 'windowMinutes': 300,
+                                    'resetsAt': '2026-10-27T08:20:00Z', 'resetDescription': '4:20pm'},
+                        'secondary': {'usedPercent': 100, 'windowMinutes': 10080,
+                                      'resetsAt': '2026-10-28T21:00:00Z', 'resetDescription': 'Oct 29'},
+                    },
+                }]
+            return []
+
+        res = a.usage_payload('codex,claude,pi', now=1000.0, binary='/usr/bin/codexbar', runner=fake_runner)
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['providers'], ['codex', 'claude'])
+        self.assertEqual([acc['label'] for acc in res['accounts']], ['alice', 'bob', 'carol'])
+        self.assertEqual(res['accounts'][0]['windows'][0]['shortLabel'], '週')
+        self.assertEqual(res['accounts'][0]['windows'][0]['pace']['deltaPercent'], 55)
+        self.assertEqual(res['accounts'][1]['windows'][0]['shortLabel'], '5h')
+        self.assertEqual(res['accounts'][1]['windows'][0]['usedPercent'], 100)
+
+        # Cached within TTL does not invoke runner again
+        before_calls = len(calls)
+        cached_res = a.usage_payload('codex,claude', now=1050.0, binary='/usr/bin/codexbar', runner=fake_runner)
+        self.assertEqual(len(calls), before_calls)
+        self.assertEqual(len(cached_res['accounts']), 3)
+
+        # Force refresh bypasses TTL
+        a.usage_payload('codex', force_refresh=True, now=1060.0, binary='/usr/bin/codexbar', runner=fake_runner)
+        self.assertEqual(len(calls), before_calls + 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import secrets
 import shlex
+import shutil
 import socket as socket_mod
 import sqlite3
 import stat
@@ -2980,6 +2981,232 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
     }
 
 
+USAGE_PROVIDERS = ('codex', 'claude', 'cursor')
+_USAGE_CACHE = {}
+_USAGE_TTL = 180.0
+_USAGE_STALE_TTL = 1800.0
+_USAGE_TIMEOUT = 15.0
+
+
+def codexbar_bin():
+    override = clean(os.environ.get('TMUX_ATTN_CODEXBAR') or '')
+    if override:
+        return override if Path(override).is_file() or shutil.which(override) else None
+    found = shutil.which('codexbar')
+    if found:
+        return found
+    for candidate in ('/opt/homebrew/bin/codexbar', '/usr/local/bin/codexbar'):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _short_usage_window_label(raw_label, window_minutes, key):
+    label = clean(str(raw_label or ''))
+    if window_minutes == 300 or label.lower() == 'session':
+        return '5h', label or 'Session'
+    if window_minutes == 10080 or label.lower() == 'weekly':
+        return '週', label or 'Weekly'
+    if window_minutes == 1440 or label.lower() == 'daily':
+        return '日', label or 'Daily'
+    if isinstance(window_minutes, int) and window_minutes > 0:
+        if window_minutes % 1440 == 0:
+            days = window_minutes // 1440
+            return f'{days}d', label or f'{days}d'
+        if window_minutes % 60 == 0:
+            hours = window_minutes // 60
+            return f'{hours}h', label or f'{hours}h'
+    fallback = label or key
+    return fallback[:6], fallback
+
+
+def _short_account_label(account, provider):
+    text = clean(str(account or ''))
+    if not text:
+        return provider.capitalize()
+    local_part = text.split('@', 1)[0] or text
+    return local_part[:24]
+
+
+def _normalize_usage_window(key, raw_win, raw_label, raw_pace):
+    if not isinstance(raw_win, dict):
+        return None
+    used = raw_win.get('usedPercent')
+    if not isinstance(used, (int, float)) or isinstance(used, bool):
+        return None
+    used_pct = max(0, min(100, round(float(used))))
+    win_mins = raw_win.get('windowMinutes')
+    if not isinstance(win_mins, int) or isinstance(win_mins, bool) or win_mins <= 0:
+        win_mins = None
+    short_label, full_label = _short_usage_window_label(raw_label, win_mins, key)
+    window = {
+        'key': key,
+        'label': full_label,
+        'shortLabel': short_label,
+        'usedPercent': used_pct,
+        'windowMinutes': win_mins,
+        'resetsAt': clean(str(raw_win.get('resetsAt') or '')),
+        'resetDescription': clean(str(raw_win.get('resetDescription') or '')),
+    }
+    if isinstance(raw_pace, dict):
+        will_last = raw_pace.get('willLastToReset')
+        eta = raw_pace.get('etaSeconds')
+        delta = raw_pace.get('deltaPercent')
+        expected = raw_pace.get('expectedUsedPercent')
+        window['pace'] = {
+            'stage': clean(str(raw_pace.get('stage') or '')),
+            'summary': clean(str(raw_pace.get('summary') or '')),
+            'willLastToReset': will_last if isinstance(will_last, bool) else None,
+            'etaSeconds': int(eta) if isinstance(eta, (int, float)) and not isinstance(eta, bool) and eta >= 0 else None,
+            'deltaPercent': round(float(delta)) if isinstance(delta, (int, float)) and not isinstance(delta, bool) else None,
+            'expectedUsedPercent': round(float(expected)) if isinstance(expected, (int, float)) and not isinstance(expected, bool) else None,
+        }
+    return window
+
+
+def _normalize_usage_account(item, fallback_provider):
+    if not isinstance(item, dict) or item.get('error'):
+        return None
+    usage = item.get('usage')
+    if not isinstance(usage, dict):
+        return None
+    provider = clean(str(item.get('provider') or fallback_provider or '')).lower()
+    if provider not in USAGE_PROVIDERS:
+        return None
+    identity = usage.get('identity') if isinstance(usage.get('identity'), dict) else {}
+    account = clean(str(item.get('account') or usage.get('accountEmail') or identity.get('accountEmail') or ''))
+    plan = clean(str(usage.get('loginMethod') or identity.get('loginMethod') or ''))
+    labels = item.get('rateWindowLabels') if isinstance(item.get('rateWindowLabels'), dict) else {}
+    paces = item.get('pace') if isinstance(item.get('pace'), dict) else {}
+    windows = []
+    for key in ('primary', 'secondary', 'tertiary'):
+        win = _normalize_usage_window(key, usage.get(key), labels.get(key), paces.get(key))
+        if win is not None:
+            windows.append(win)
+    if not windows:
+        return None
+    return {
+        'provider': provider,
+        'account': account or provider,
+        'label': _short_account_label(account, provider),
+        'plan': plan,
+        'windows': windows,
+        'updatedAt': clean(str(usage.get('updatedAt') or '')),
+    }
+
+
+def _run_codexbar_json(cmd, timeout=_USAGE_TIMEOUT):
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    raw = (proc.stdout or '').strip()
+    if not raw:
+        return []
+    data = json.loads(raw)
+    return data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+
+
+def _fetch_provider_usage(provider, binary=None, runner=_run_codexbar_json):
+    if provider not in USAGE_PROVIDERS:
+        return []
+    binary = binary or codexbar_bin()
+    if not binary:
+        return []
+    for args in (
+        [binary, 'usage', '--provider', provider, '--all-accounts', '--no-credits', '--format', 'json'],
+        [binary, 'usage', '--provider', provider, '--no-credits', '--format', 'json'],
+    ):
+        try:
+            items = runner(args)
+        except Exception:
+            items = []
+        accounts = [row for item in items if (row := _normalize_usage_account(item, provider)) is not None]
+        if accounts:
+            return accounts
+    return []
+
+
+def parse_usage_providers(raw_providers):
+    if isinstance(raw_providers, str):
+        parts = [clean(part).lower() for part in raw_providers.split(',')]
+    elif isinstance(raw_providers, (list, tuple, set)):
+        parts = [clean(str(part)).lower() for part in raw_providers]
+    else:
+        parts = []
+    seen = []
+    for part in parts:
+        if part in USAGE_PROVIDERS and part not in seen:
+            seen.append(part)
+    return seen
+
+
+def usage_payload(providers, force_refresh=False, now=None, ttl=_USAGE_TTL, stale_ttl=_USAGE_STALE_TTL,
+                  binary=None, runner=_run_codexbar_json):
+    """Return normalized coding-agent usage accounts for active supported providers."""
+    now = time.time() if now is None else float(now)
+    wanted = parse_usage_providers(providers)
+    if not wanted:
+        return {'ok': True, 'providers': [], 'accounts': [], 'updated_at': int(now)}
+    to_fetch = []
+    results_by_provider = {}
+    for provider in wanted:
+        cached = _USAGE_CACHE.get(provider)
+        if not force_refresh and cached is not None and 0 <= now - cached[0] < ttl:
+            results_by_provider[provider] = [dict(row) for row in cached[1]]
+        else:
+            to_fetch.append(provider)
+    if to_fetch:
+        resolved_bin = binary if binary is not None else codexbar_bin()
+        if not resolved_bin:
+            for provider in to_fetch:
+                results_by_provider[provider] = []
+        elif len(to_fetch) == 1:
+            provider = to_fetch[0]
+            fresh = _fetch_provider_usage(provider, binary=resolved_bin, runner=runner)
+            if fresh:
+                _USAGE_CACHE[provider] = (now, fresh)
+                results_by_provider[provider] = [dict(row) for row in fresh]
+            else:
+                cached = _USAGE_CACHE.get(provider)
+                if not force_refresh and cached is not None and 0 <= now - cached[0] <= stale_ttl:
+                    results_by_provider[provider] = [dict(row) for row in cached[1]]
+                else:
+                    _USAGE_CACHE[provider] = (now, [])
+                    results_by_provider[provider] = []
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(to_fetch))) as pool:
+                futures = {
+                    provider: pool.submit(_fetch_provider_usage, provider, resolved_bin, runner)
+                    for provider in to_fetch
+                }
+                for provider, future in futures.items():
+                    try:
+                        fresh = future.result()
+                    except Exception:
+                        fresh = []
+                    if fresh:
+                        _USAGE_CACHE[provider] = (now, fresh)
+                        results_by_provider[provider] = [dict(row) for row in fresh]
+                    else:
+                        cached = _USAGE_CACHE.get(provider)
+                        if not force_refresh and cached is not None and 0 <= now - cached[0] <= stale_ttl:
+                            results_by_provider[provider] = [dict(row) for row in cached[1]]
+                        else:
+                            _USAGE_CACHE[provider] = (now, [])
+                            results_by_provider[provider] = []
+    accounts = []
+    timestamps = []
+    for provider in wanted:
+        accounts.extend(results_by_provider.get(provider, ()))
+        cached = _USAGE_CACHE.get(provider)
+        if cached is not None:
+            timestamps.append(int(cached[0]))
+    return {
+        'ok': True,
+        'providers': wanted,
+        'accounts': accounts,
+        'updated_at': max(timestamps) if timestamps else int(now),
+    }
+
+
 def web_later_db():
     """Web-only grouping; no pane event, tmux status, or hook reads this database."""
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -4195,6 +4422,18 @@ def make_web_handler(fleet_only=False):
                 except Exception as exc:
                     sys.stderr.write(f'web /api/fleet: {type(exc).__name__}: {exc}\n')
                     self._send(500, json.dumps({'ok': False, 'error': 'failed to load fleet'}),
+                               'application/json; charset=utf-8')
+                return
+            if path == '/api/usage':
+                query = parse_qs(urlparse(self.path).query)
+                raw_providers = ','.join(query.get('providers', []))
+                force_refresh = query.get('refresh', [''])[0].lower() in ('1', 'true', 'yes')
+                try:
+                    payload = usage_payload(raw_providers, force_refresh=force_refresh)
+                    self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/usage: {type(exc).__name__}: {exc}\n')
+                    self._send(500, json.dumps({'ok': False, 'error': 'failed to load usage'}),
                                'application/json; charset=utf-8')
                 return
             if path.startswith('/icons/'):
