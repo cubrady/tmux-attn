@@ -291,6 +291,13 @@ class UpdateTests(unittest.TestCase):
         self.assertIn('--reinstall', out)
         self.assertNotIn(('reinstall', False), self.services.calls)
 
+    def test_opencode_plugin_changes_are_flagged_for_reinstall(self):
+        self.publish({'opencode-attention.ts': 'export default {}\n'}, 'opencode plugin')
+        code, out = self.run_update()
+        self.assertEqual(code, 0)
+        self.assertIn('--reinstall', out)
+        self.assertFalse((self.runtime / 'opencode-attention.ts').exists())
+
     def test_hook_definition_changes_in_attention_py_are_flagged_too(self):
         self.publish({'attention.py': 'VIEW_HOOKS = ()\n'}, 'hooks in core')
         self.run_update('--ref', 'origin/main')

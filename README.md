@@ -6,7 +6,7 @@
 
 tmux Attention 讓你一眼知道：誰在問你、誰做完還沒看、誰還在跑——在 tmux 底列、手機或另一台電腦的網頁上都一樣。
 
-支援 **Claude Code** · **Codex** · **Cursor CLI** · **Pi**。
+支援 **Claude Code** · **Codex** · **Cursor CLI** · **Pi** · **OpenCode**。
 
 主 repo：[`cubrady/tmux-attn`](https://github.com/cubrady/tmux-attn)。所有更新與 issue 集中在此；舊私人 repo `tmux-attention` 已封存。
 
@@ -100,7 +100,12 @@ sh install.sh --solo          # 單機
 sh install_web_service.sh     # 建議：常駐 web（macOS launchd / Linux systemd）
 ```
 
-然後重開／resume agent session（或 Codex `/hooks`、Pi `/reload`），讓 hooks 掛上。
+然後重開／resume agent session（或 Codex `/hooks`、Pi `/reload`；OpenCode 首次安裝後重開 TUI），讓 hooks 掛上。
+
+OpenCode 使用 TUI plugin，安裝器會寫入
+`~/.config/opencode/plugins/tmux-attention/tui.ts`，只回報在 tmux pane 內執行的
+OpenCode TUI；`opencode run` 等沒有 TUI pane 的模式不會出現在清單。OpenCode
+的標題、模型與權限狀態由 plugin 直接提供，不需要讀 transcript。
 
 Codex 使用自訂資料目錄時，安裝前設定同一個 `CODEX_HOME`，例如
 `CODEX_HOME="/path/to/profile" sh bootstrap.sh`。安裝器只備份及更新所選目錄的
@@ -134,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/<tag-或-sha>/upd
 - 比對 git 物件與已安裝檔案，只複製有變的；`attention.py` 變了才重啟 web 服務與 observer，只有網頁變了不重啟。
 - 先備份，再部署，驗證通過才 fast-forward checkout；web 服務重啟後 `/api/health` 不健康（或版本不符）會自動還原。
 - checkout 有未提交修改、已分叉、或指定的 `--ref` 比 checkout 舊時拒絕執行；不會動 tmux，也不會改 web 服務綁定的位址。
-- hooks 或 tmux 設定相關檔案（`install.py`、`bootstrap.sh`、`pi-attention.ts`）有變時只提示，要加 `--reinstall` 才會重跑安裝器。
+- hooks 或 tmux 設定相關檔案（`install.py`、`bootstrap.sh`、`pi-attention.ts`、`opencode-attention.ts`）有變時只提示，要加 `--reinstall` 才會重跑安裝器。
 - 還原：`tmux-attn update --rollback`（最近一次）或 `--rollback <備份目錄>`。
 - hub 畫面會在 peer 版本與 hub 不同時顯示提示與可複製的指令。更新只能由該機器自己執行，沒有任何遠端觸發的 HTTP 端點（面板沒有登入機制）。
 
@@ -153,7 +158,7 @@ Ask: SETUP=solo|multi
 Then EXACTLY follow printed NEXT STEPS:
   sh ~/.local/share/tmux-attn/install_web_service.sh   # required (not bare `tmux-attn web`)
   curl -s http://127.0.0.1:7788/api/health
-  reload hooks (Claude new session | Codex /hooks | Cursor reopen | Pi /reload)
+  reload hooks (Claude new session | Codex /hooks | Cursor reopen | Pi /reload | OpenCode restart TUI)
   verify: ~/.local/bin/tmux-attn status   # expect non-zero counts when an agent is live
 Join uses POST SERVER_URL/api/peers (no SSH). Phone opens server:7788.
 Report: install JSON (status_control_clicks), web health, peers, tmux status line.

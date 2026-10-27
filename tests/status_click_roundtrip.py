@@ -55,6 +55,10 @@ with tempfile.TemporaryDirectory() as directory, patch.dict(
         env.pop('TMUX_ATTN_STATE_DIR',None)
         import json
         result=json.loads(subprocess.check_output([sys.executable,str(ROOT/'install.py'),'--enable-codex-hooks'],env=env,text=True))
+        opencode_plugin=Path(result['opencode_plugin'])
+        assert opencode_plugin.is_file()
+        plugin_text=opencode_plugin.read_text()
+        assert 'event", "opencode"' in plugin_text and '__PYTHON__' not in plugin_text
         assert 'original-control' in (Path(result['backup'])/'key-root-MouseDown1Control0.conf').read_text()
         assert 'original-prefix' in (Path(result['backup'])/'key-a.conf').read_text()
         assert original_status in tmux('list-keys','-T','root')
@@ -116,6 +120,7 @@ with tempfile.TemporaryDirectory() as directory, patch.dict(
         drain(2.2)
         click(97,targets[2])  # wait 0 leaves current pane unchanged
         subprocess.run([sys.executable,str(ROOT/'rollback.py'),result['backup']],env=env,check=True,capture_output=True)
+        assert not opencode_plugin.exists()
         assert tmux('show-option','-gv','mouse')=='off'
         assert 'original-control' in tmux('list-keys','-T','root')
         assert 'original-double' in tmux('list-keys','-T','root')

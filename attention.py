@@ -215,6 +215,9 @@ def db():
             ('preview_revision', 'INTEGER DEFAULT 0'),
             ('handoff_response', "TEXT DEFAULT ''"),
             ('handoff_revision', 'INTEGER DEFAULT 0'),
+            ('hint_title', "TEXT DEFAULT ''"),
+            ('hint_model', "TEXT DEFAULT ''"),
+            ('hint_effort', "TEXT DEFAULT ''"),
         ]:
             if column not in {r[1] for r in con.execute('PRAGMA table_info(panes)')}:
                 try:
@@ -645,7 +648,9 @@ def transcript_model(path, agent=''):
 
 
 def pane_model(con, row):
-    """(model id, effort) for a tracked pane's transcript."""
+    """(model id, effort) for a tracked pane's transcript, or the plugin's live hint."""
+    if row.get('agent') == 'opencode':
+        return (row.get('hint_model') or '', row.get('hint_effort') or '')
     return transcript_model(resolve_transcript_path(con, row, row), row.get('agent') or '')
 
 
@@ -957,6 +962,11 @@ def resolve_transcript_path(con, row, meta):
     path = ''
     if 'transcript_path' in row.keys():
         path = row['transcript_path'] or ''
+    # OpenCode reports state and title through its TUI plugin; its storage is not a
+    # transcript this process can parse. Return before a path left by a prior CLI
+    # could win the existence check below.
+    if agent == 'opencode':
+        return ''
     # A new Claude session can bind its transcript before the file is created.
     if path and (row.get('agent') == 'claude' or Path(path).is_file()):
         return path
@@ -1218,7 +1228,7 @@ def full_message_for_pane(con, pane, pid, role, index, sig):
     return None, 'content changed; refresh preview'
 
 
-def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event_time=None, event_key="", replace_identity=False, source='hook'):
+def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event_time=None, event_key="", replace_identity=False, source='hook', clear_source=False):
     reason = clean(reason)
     source = clean(source or 'hook', 32) or 'hook'
     notify = False
@@ -1246,6 +1256,14 @@ def record(con, sock, pane, pid, agent, state, reason, needs_review=False, event
             agent=excluded.agent,state=excluded.state,reason=excluded.reason,
             updated=excluded.updated,revision=panes.revision+1,needs_review=excluded.needs_review,event_key=excluded.event_key,last_event_time=excluded.last_event_time,source=excluded.source''',
             (sock, pane, pid, agent, state, reason,stamp,int(needs_review),event_key,stamp,source))
+        if old and (old['agent'] != agent or clear_source):
+            # Source-bound previews, transcripts and hints describe one CLI session;
+            # a pane reused by another agent or OpenCode session must not inherit them.
+            con.execute("""UPDATE panes SET hint_title='',hint_model='',hint_effort='',
+                transcript_path='',preview_users='[]',preview_agent='',preview_revision=0,
+                preview_mtime=0,handoff_response='',handoff_revision=0
+                WHERE socket=? AND pane=? AND pid=?""",
+                        (sock, pane, pid))
         notify = became_wait
         revision = con.execute('SELECT revision FROM panes WHERE socket=? AND pane=? AND pid=?',
                                (sock, pane, pid)).fetchone()['revision']
@@ -2230,6 +2248,33 @@ def register_codex_session(con,sock,pane,pid,data):
             (sock,pane,pid,data['session_id'],path))
 
 
+HINT_FIELDS = (('title', 'hint_title', 120), ('model', 'hint_model', 120), ('effort', 'hint_effort', 60))
+
+
+def event_hints(agent, data):
+    """Metadata the OpenCode TUI plugin knows but no transcript can supply."""
+    if agent != 'opencode' or not isinstance(data, dict):
+        return {}
+    return {
+        column: clean(data[source], limit).strip()
+        for source, column, limit in HINT_FIELDS
+        if isinstance(data.get(source), str)
+    }
+
+
+def remember_hints(con, sock, pane, pid, hints):
+    """Store live title/model hints without touching the pane's attention revision."""
+    if not hints:
+        return
+    existing = con.execute('SELECT agent FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
+    if not existing or existing['agent'] != 'opencode':
+        record(con, sock, pane, pid, 'opencode', 'IDLE', 'Registered; no new work yet')
+    assignments = ','.join(f'{column}=?' for column in hints)
+    with con:
+        con.execute(f'UPDATE panes SET {assignments} WHERE socket=? AND pane=? AND pid=?',
+                    (*hints.values(), sock, pane, pid))
+
+
 def event_command(agent, event):
     # Hooks must never approve, block or fail the agent's own work.
     try:
@@ -2242,8 +2287,10 @@ def event_command(agent, event):
         if agent == 'codex' and codex_child_hook(data):
             print('{}')
             return
+        hints = event_hints(agent, data)
+        session_key = clean(data.get('session_id'), 200) if agent == 'opencode' else ''
         state = classify(agent, event, data)
-        target = hook_target() if state else None
+        target = hook_target() if state or hints else None
         if state and not target and agent == 'codex' and data.get('session_id'):
             with closing(db()) as con:
                 mappings = con.execute('SELECT * FROM codex_sessions WHERE thread_id=?',(data['session_id'],)).fetchall()
@@ -2265,6 +2312,7 @@ def event_command(agent, event):
                     register_codex_session(con,sock,pane,pid,data)
                 # Reattaching/restarting must not discard an unread completion.
                 existing = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock,pane,pid)).fetchone()
+                session_changed = bool(session_key and existing and existing['event_key'] != session_key)
                 recorded_revision = None
                 clear_session = (agent == 'claude' and event in ('SessionStart', 'session_start')
                                  and data.get('source') == 'clear')
@@ -2276,7 +2324,12 @@ def event_command(agent, event):
                         state = ('IDLE', 'Agent exited; review current work', True)
                 if clear_session or event not in ('SessionStart','session_start','sessionStart') or not existing:
                     if state:
-                        recorded_revision = record(con, sock, pane, pid, agent, *state,event_key=(data.get('generation_id','') if agent == 'cursor' else data.get('turn_id','')))
+                        recorded_revision = record(con, sock, pane, pid, agent, *state,
+                                                   event_key=(data.get('generation_id','') if agent == 'cursor'
+                                                              else session_key if agent == 'opencode'
+                                                              else data.get('turn_id','')),
+                                                   replace_identity=session_changed,
+                                                   clear_source=session_changed)
                 user_text = hook_user_text(data) if event in (
                     'UserPromptSubmit', 'beforeSubmitPrompt', 'agent_start',
                 ) else ''
@@ -2303,6 +2356,7 @@ def event_command(agent, event):
                         transcript_path=transcript or None,
                         expected_revision=recorded_revision,
                     )
+                remember_hints(con, sock, pane, pid, hints)
     except Exception as exc:
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (STATE / 'hook-errors.log').open('a') as f:
@@ -2343,10 +2397,13 @@ def live_panes(sock=None):
 SESSION_TITLE_CHARS = 80
 # Agents write their session title into the tmux pane title: Claude Code as "<glyph> title",
 # Codex as "title | project". Anything else here is a shell prompt or a default placeholder.
-GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'cursor', 'cursor agent', 'agent', 'pi', 'pi-bolt', 'pi-bin', 'pi-agent', 'π', 'zsh', 'bash', 'fish', 'sh', 'tmux'}
+GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'opencode', 'cursor', 'cursor agent', 'agent', 'pi', 'pi-bolt', 'pi-bin', 'pi-agent', 'π', 'zsh', 'bash', 'fish', 'sh', 'tmux', 'new session'}
 
 
-def pane_session_title(raw, path='', command=''):
+def pane_session_title(raw, path='', command='', hint=''):
+    hinted = clean(hint).strip()
+    if hinted and hinted.lower() not in GENERIC_PANE_TITLES:
+        return hinted[:SESSION_TITLE_CHARS]
     title = clean(raw).strip()
     title = re.sub(r'^[^\w]+\s+', '', title)  # status glyph or spinner frame
     title = re.sub(r'^(?:pi(?:-bolt)?|π)\s+-\s+', '', title, flags=re.I).strip()
@@ -2676,7 +2733,7 @@ def agent_severity(row):
     return ''
 
 
-KNOWN_CLI_ICONS = ('claude', 'codex', 'agent', 'pi')
+KNOWN_CLI_ICONS = ('claude', 'codex', 'agent', 'pi', 'opencode')
 
 
 def cli_label(agent):
@@ -2687,6 +2744,7 @@ def cli_label(agent):
         'codex': 'codex',
         'cursor': 'agent',
         'pi': 'pi',
+        'opencode': 'opencode',
     }.get(key, key or 'unknown')
 
 
@@ -2704,6 +2762,8 @@ def command_cli(command):
         return 'agent'
     if key in ('pi', 'pi-bolt', 'pi-bin', 'pi-agent'):
         return 'pi'
+    if key in ('opencode',):
+        return 'opencode'
     # Claude Code sometimes surfaces as a version-looking binary name.
     if key.replace('.', '').isdigit() and key.count('.') >= 2:
         return 'claude'
@@ -3856,10 +3916,14 @@ def pane_handoff(con, row):
         text = row['preview_agent']
     else:
         return empty
+    # OpenCode has no transcript this process can own; its completed response is
+    # the hook cache itself. Skip stale transcript/codex paths left by a prior CLI.
+    if row.get('agent') == 'opencode':
+        return {'revision': row['revision'], 'source': 'completed response', **extract_decision_inbox(text)}
     # Check every cache against its owned source, even a short, fresh hook cache.
     # Never discover by cwd here, and read only one bounded tail window.
     path = row.get('transcript_path') or ''
-    if not path:
+    if not path and row.get('agent') == 'codex':
         mapping = con.execute('SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
                               (row['socket'], row['pane'], row['pid'])).fetchone()
         path = mapping['rollout_path'] if mapping else ''
@@ -3916,6 +3980,7 @@ def agents_payload(con, sock=None, live=None, now=None):
         model, effort = pane_model(con, row)
         tasks = pane_tasks(con, row)
         env = git_workdir_info(row.get('path', ''))
+        hint_title = (row.get('hint_title') or '') if row.get('agent') == 'opencode' else ''
         agent_row = {
             'pane': row['pane'],
             'pid': row['pid'],
@@ -3932,7 +3997,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'command': command,
             'tracked': True,
             'project': labels.get(row['path'], Path(row['path']).name if row.get('path') else ''),
-            'title': pane_session_title(row.get('pane_title'), row.get('path', ''), command),
+            'title': pane_session_title(row.get('pane_title'), row.get('path', ''), command, hint_title),
             'path': row.get('path', ''),
             'repo': env['repo'],
             'branch': env['branch'],

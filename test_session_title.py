@@ -39,6 +39,12 @@ class PaneTitleTest(unittest.TestCase):
     def test_title_is_clipped(self):
         self.assertEqual(len(self.title('x' * 500)), a.SESSION_TITLE_CHARS)
 
+    def test_opencode_plugin_hint_beats_the_generic_terminal_title(self):
+        self.assertEqual(a.pane_session_title('OpenCode', '/project', 'opencode', 'Fix OAuth flow'),
+                         'Fix OAuth flow')
+        self.assertEqual(a.pane_session_title('OpenCode', '/project', 'opencode', 'OpenCode'), '')
+        self.assertEqual(a.pane_session_title('new session', '/project', 'opencode'), '')
+
 
 class LivePanesTitleTest(unittest.TestCase):
     def test_live_panes_reads_pane_title(self):
