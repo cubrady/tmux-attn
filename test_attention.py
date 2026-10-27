@@ -36,6 +36,12 @@ class StoreTests(unittest.TestCase):
         a.record(self.con,'socket','%1','123','codex',state,reason,review)
     def rows(self, **kw):
         return a.items(self.con,'socket',self.live,now=time.time()+3,**kw)[0]
+    def hook(self, agent, event, data=None):
+        with patch.object(a.sys,'stdin',io.StringIO(json.dumps(data or {}))), \
+             patch.object(a.sys,'stdout',io.StringIO()) as out, \
+             patch.object(a,'hook_target',return_value=('socket','%1','123')):
+            a.event_command(agent,event)
+            self.assertEqual(json.loads(out.getvalue()),{})
     def test_lifecycle_ack_new_work(self):
         self.write('RUNNING','Working'); self.assertEqual(self.rows(),[])
         self.write('WAIT','Approve'); item=self.rows()[0]
@@ -184,6 +190,162 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.rows(),[])
         hook('cursor','stop',{'status':'completed','generation_id':'two'})
         self.assertEqual(len(self.rows()),1)
+
+    def test_opencode_events_use_the_shared_state_model(self):
+        self.assertEqual(a.classify('opencode','UserPromptSubmit',{})[0],'RUNNING')
+        self.assertEqual(a.classify('opencode','agent_start',{})[0],'RUNNING')
+        self.assertEqual(a.classify('opencode','PermissionRequest',
+                                    {'tool_input':{'description':'Approve npm test'}}),
+                         ('WAIT','Approval needed: Approve npm test'))
+        self.assertEqual(a.classify('opencode','Stop',{'last_assistant_message':'Done'})[0],'IDLE')
+        failed=a.classify('opencode','StopFailure',{})
+        self.assertEqual((failed[0],failed[2]),('IDLE',True))
+        self.assertEqual(a.classify('opencode','Interrupt',{})[0],'IDLE')
+        self.assertIsNone(a.classify('opencode','opencode_meta',{}))
+        self.assertEqual((a.cli_label('opencode'),a.command_cli('opencode')),('opencode','opencode'))
+
+    def test_opencode_metadata_registers_hints_without_a_visible_item(self):
+        self.hook('opencode','opencode_meta',{'title':'Fix OAuth','model':'gpt-6','effort':'high'})
+        row=self.con.execute('SELECT * FROM panes').fetchone()
+        self.assertEqual((row['agent'],row['state'],row['reason']),
+                         ('opencode','IDLE','Registered; no new work yet'))
+        self.assertEqual((row['hint_title'],row['hint_model'],row['hint_effort']),
+                         ('Fix OAuth','gpt-6','high'))
+        revision=row['revision']
+        self.assertEqual(self.rows(),[])
+        self.hook('opencode','opencode_meta',{'title':'Fix OAuth flow','model':'gpt-6.1'})
+        row=self.con.execute('SELECT * FROM panes').fetchone()
+        self.assertEqual((row['hint_title'],row['hint_model'],row['hint_effort']),
+                         ('Fix OAuth flow','gpt-6.1','high'))
+        self.assertEqual(row['revision'],revision)
+
+    def test_opencode_hints_can_clear_effort_and_are_ignored_for_other_agents(self):
+        self.hook('opencode','opencode_meta',{'title':'Fix OAuth','model':'gpt-6','effort':'high'})
+        self.hook('opencode','opencode_meta',{'model':'gpt-6','effort':''})
+        row=self.con.execute('SELECT * FROM panes').fetchone()
+        self.assertEqual((row['hint_title'],row['hint_model'],row['hint_effort']),
+                         ('Fix OAuth','gpt-6',''))
+        self.hook('claude','opencode_meta',{'title':'Not OpenCode','model':'gpt-6'})
+        row=self.con.execute('SELECT * FROM panes').fetchone()
+        self.assertEqual((row['agent'],row['hint_title']),('opencode','Fix OAuth'))
+
+    def test_opencode_hint_updates_preserve_an_unread_completion(self):
+        self.hook('opencode','UserPromptSubmit',{'prompt':'Fix login'})
+        self.hook('opencode','Stop',{'last_assistant_message':'Login is fixed.'})
+        before=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.hook('opencode','opencode_meta',{'title':'Login fix','model':'gpt-6','effort':'high'})
+        after=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual((after['revision'],after['needs_review']),
+                         (before['revision'],before['needs_review']))
+        self.assertEqual((after['hint_title'],after['state']),('Login fix','IDLE'))
+        self.assertEqual(self.rows()[0]['state'],'IDLE')
+        self.assertEqual(a.pane_conversation_preview(self.con,after,self.live[('%1','123')]),
+                         {'users':['Fix login'],'agent':'Login is fixed.'})
+
+    def test_opencode_uses_hints_and_never_another_cli_transcript(self):
+        stale = Path(self.tmp.name) / 'old-claude.jsonl'
+        stale.write_text(json.dumps({'type': 'user', 'message': {'content': 'old prompt'}}) + '\n')
+        a.record(self.con, 'socket', '%1', '123', 'claude', 'IDLE', 'Response finished; review needed', True)
+        with self.con:
+            self.con.execute('UPDATE panes SET transcript_path=? WHERE socket=? AND pane=? AND pid=?',
+                             (str(stale), 'socket', '%1', '123'))
+        self.hook('opencode','UserPromptSubmit',{'prompt':'Fix OAuth'})
+        self.hook('opencode','opencode_meta',{'title':'Fix OAuth','model':'gpt-6','effort':'high'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual((row['agent'],row['transcript_path']), ('opencode',''))
+        with self.con:
+            self.con.execute('UPDATE panes SET transcript_path=? WHERE socket=? AND pane=? AND pid=?',
+                             (str(stale), 'socket', '%1', '123'))
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual(a.pane_model(self.con,row),('gpt-6','high'))
+        with patch.object(a,'latest_claude_transcript',return_value='/wrong-claude.jsonl') as claude, \
+             patch.object(a,'latest_cursor_transcript',return_value='/wrong-cursor.jsonl'), \
+             patch.object(a,'latest_pi_transcript',return_value='/wrong-pi.jsonl'):
+            self.assertEqual(a.resolve_transcript_path(self.con,row,{'path':'/project'}),'')
+            self.assertEqual(a.pane_conversation_preview(self.con,row,{'path':'/project'}),
+                             {'users':['Fix OAuth'],'agent':''})
+            claude.assert_not_called()
+
+    def test_hints_do_not_leak_when_another_agent_reuses_the_pane(self):
+        self.hook('opencode','opencode_meta',{'title':'OpenCode work','model':'gpt-6','effort':'high'})
+        self.hook('claude','UserPromptSubmit',{'prompt':'new task'})
+        row=self.con.execute('SELECT * FROM panes').fetchone()
+        self.assertEqual(row['agent'],'claude')
+        self.assertEqual((row['hint_title'],row['hint_model'],row['hint_effort']),('','',''))
+        self.hook('opencode','opencode_meta',{'title':'Back to OpenCode','model':'gpt-6.1'})
+        row=self.con.execute('SELECT * FROM panes').fetchone()
+        self.assertEqual((row['agent'],row['state'],row['hint_title'],row['hint_model']),
+                         ('opencode','IDLE','Back to OpenCode','gpt-6.1'))
+
+    def test_agent_takeover_clears_previous_preview_and_handoff(self):
+        stale=Path(self.tmp.name)/'old-claude.jsonl'
+        stale.write_text(json.dumps({'type':'user','message':{'content':'old claude prompt'}})+'\n')
+        self.hook('claude','UserPromptSubmit',{'prompt':'old claude prompt'})
+        self.hook('claude','Stop',{'last_assistant_message':'old claude answer'})
+        with self.con:
+            self.con.execute('UPDATE panes SET transcript_path=?,preview_mtime=123 WHERE socket=? AND pane=? AND pid=?',
+                             (str(stale),'socket','%1','123'))
+        self.hook('opencode','UserPromptSubmit',{'prompt':'new opencode prompt'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual((row['agent'],row['transcript_path'],row['preview_users'],
+                          row['preview_agent'],row['preview_mtime'],row['handoff_response'],
+                          row['handoff_revision']),
+                         ('opencode','','["new opencode prompt"]','',0,'',0))
+
+    def test_opencode_handoff_ignores_a_stale_foreign_transcript(self):
+        stale=Path(self.tmp.name)/'old-claude.jsonl'
+        stale.write_text('\n'.join(json.dumps(row) for row in [
+            {'type':'user','message':{'content':'Fix login'}},
+            {'type':'assistant','message':{'content':[{'type':'text','text':'Please approve the deployment.'}]}},
+            {'type':'user','message':{'content':'Now another task'}},
+        ])+'\n')
+        self.hook('opencode','UserPromptSubmit',{'prompt':'Fix login'})
+        self.hook('opencode','Stop',{'last_assistant_message':'Please approve the deployment.'})
+        with self.con:
+            self.con.execute('UPDATE panes SET transcript_path=? WHERE socket=? AND pane=? AND pid=?',
+                             (str(stale),'socket','%1','123'))
+        handoff=a.pane_handoff(self.con,dict(self.con.execute('SELECT * FROM panes').fetchone()))
+        self.assertEqual(handoff['source'],'completed response')
+        self.assertEqual([item['next_step'] for item in handoff['items']],
+                         ['Please approve the deployment.'])
+
+    def test_opencode_session_switch_clears_previous_preview_and_bumps_revision(self):
+        self.hook('opencode','UserPromptSubmit',{'session_id':'open-a','prompt':'A prompt'})
+        self.hook('opencode','Stop',{'session_id':'open-a','last_assistant_message':'A answer'})
+        before=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        a.acknowledge(self.con,before)
+        self.hook('opencode','idle_no_review',{'session_id':'open-b','title':'B title','model':'gpt-6'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertGreater(row['revision'],before['revision'])
+        self.assertEqual((row['state'],row['needs_review'],row['hint_title'],row['hint_model']),
+                         ('IDLE',0,'B title','gpt-6'))
+        self.assertEqual((row['preview_users'],row['preview_agent'],row['handoff_response']),
+                         ('[]','',''))
+        self.assertEqual(self.rows(),[])
+
+    def test_opencode_session_switch_surfaces_an_unread_completion(self):
+        self.hook('opencode','UserPromptSubmit',{'session_id':'open-a','prompt':'A prompt'})
+        self.hook('opencode','Stop',{'session_id':'open-a','last_assistant_message':'A answer'})
+        a.acknowledge(self.con,dict(self.con.execute('SELECT * FROM panes').fetchone()))
+        self.hook('opencode','Stop',{'session_id':'open-b','title':'B title',
+                                     'last_assistant_message':'Please approve B.'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertGreater(row['revision'],row['acknowledged'])
+        self.assertEqual((row['hint_title'],row['preview_agent']),('B title','Please approve B.'))
+        self.assertEqual([item['next_step'] for item in a.pane_handoff(self.con,row)['items']],
+                         ['Please approve B.'])
+
+    def test_agents_payload_exposes_opencode_title_model_and_icon(self):
+        self.live={('%1','123'):{'pane':'%1','pid':'123','session':'work','window':'agent',
+                                 'window_id':'@1','path':'/project','command':'opencode',
+                                 'pane_title':'OpenCode'}}
+        self.hook('opencode','opencode_meta',{'title':'Fix OAuth','model':'gpt-6','effort':'high'})
+        with patch.object(a,'git_workdir_info',return_value={'repo':'demo','branch':'main','dirty':False}), \
+             patch.object(a,'load_project_aliases',return_value={}):
+            payload=a.agents_payload(self.con,'socket',self.live,now=time.time()+3)
+        row=payload['agents'][0]
+        self.assertEqual((row['cli'],row['title'],row['model'],row['model_label'],row['effort']),
+                         ('opencode','Fix OAuth','gpt-6','gpt-6','high'))
 
     def test_project_aliases_path_overrides_and_collisions(self):
         paths=['/a/web-app-sampleapp','/a/a-long-new-project','/b/a-long-new-platform','/a/sampleapp-api','/a/sampleapp-web','/a/shared','/b/shared']
@@ -1743,6 +1905,36 @@ class ClaudeSessionResetTests(unittest.TestCase):
         row = self.row()
         self.assertEqual((row['preview_users'], row['preview_agent']), ('[]', ''))
         self.assertGreater(row['revision'], stale['revision'])
+
+
+class OpenCodePluginTests(unittest.TestCase):
+    def test_tui_plugin_reports_the_expected_events_with_installer_placeholders(self):
+        source=(Path(__file__).with_name('opencode-attention.ts')).read_text()
+        self.assertIn('__PYTHON__',source)
+        self.assertIn('__ATTENTION__',source)
+        self.assertIn('Plugin.define',source)
+        self.assertIn('context.ui.router.current()',source)
+        for event in ('session.inbox.enqueued','session.step.started','session.execution.started',
+                      'session.execution.succeeded','session.execution.failed',
+                      'session.execution.interrupted','session.status',
+                      'session.idle','session.text.ended','permission.asked','permission.replied',
+                      'session.created','session.renamed','session.model.selected',
+                      'session.deleted'):
+            self.assertIn(f'"{event}"',source)
+        for command in ('UserPromptSubmit','agent_start','PermissionRequest','PostToolUse',
+                        'Stop','StopFailure','Interrupt','SessionEnd','opencode_meta'):
+            self.assertIn(f'"{command}"',source)
+        self.assertIn('payload.effort = ref.variant || ""',source)
+        self.assertIn('payload.session_id = sid',source)
+        self.assertIn('createEffect',source)
+        self.assertIn('subscriptions.splice(0)',source)
+        self.assertIn('active !== sid',source)
+        self.assertIn('sid !== tracked',source)
+        self.assertIn('if (sid === routed) return;',source)
+        self.assertIn('lastAssistantText',source)
+        self.assertIn('info.outcome === "failed"',source)
+        self.assertNotIn('tui.session.select',source)
+        self.assertNotIn('transcript_path',source)
 
 
 class IntegrationTests(unittest.TestCase):

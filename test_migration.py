@@ -34,6 +34,8 @@ class MigrationTests(unittest.TestCase):
                 self.assertIn('tmux-attn/test_join_peer.py', names)
                 self.assertIn('tmux-attn/test_observer_recovery.py', names)
                 self.assertIn('tmux-attn/tests/web.test.cjs', names)
+                self.assertIn('tmux-attn/opencode-attention.ts', names)
+                self.assertIn('tmux-attn/web/icons/opencode.svg', names)
                 self.assertFalse(any('.claude' in name or 'sqlite' in name for name in names))
                 for member in archive.getmembers():
                     target = extracted/member.name
@@ -67,6 +69,8 @@ class MigrationTests(unittest.TestCase):
                 target_aliases = destination/'.config/tmux-attn/project-aliases.json'
                 self.assertEqual(json.loads(target_aliases.read_text()),exported)
                 app = destination/'.local/share/tmux-attn/attention.py'
+                opencode_plugin = destination/'.config/opencode/plugins/tmux-attention/tui.ts'
+                self.assertIn('event", "opencode"', opencode_plugin.read_text())
                 generated = (destination/'.claude/settings.json').read_text()
                 self.assertIn(str(app),generated)
                 self.assertNotIn(str(source_home),generated)
