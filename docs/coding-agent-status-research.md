@@ -96,3 +96,21 @@ Transcript 每次最多讀取尾端 2 MiB；持續觀測時以檔案身分、大
 
 回歸測試見 `test_claude_background.py`：本輪模擬、舊回合與常駐程序、完成／失敗通知、
 恢復後的 session 身分、增量與截斷 transcript、輸出警示，以及 WAIT／前景優先順序。
+
+## Codex 背景 terminals（2026-10-27）
+
+Codex 透過 `unified_exec`（`tools.exec_command` / `exec_command`）啟動逾 `yield_time_ms`
+的背景程序時，程序掛在 `codex app-server` 下而非 TUI 子程序樹，且背景程序結束時只會在
+rollout JSONL 追加 `event_msg/item_completed`（`CommandExecution`），不會自動喚醒主回合。
+當主回合 `task_complete` 結束但仍在等待背景任務時，Observer 交叉驗證：
+
+1. 輸入提示 `›` 正上方的原生狀態列顯示 `N background terminal(s) running · /ps to view · /stop to close`。
+2. Rollout transcript 本輪（依 `task_started` 與 `turn_id` 切分）有回傳 `session_id`（無 `exit_code`）
+   且在 `task_complete` 前尚未收到對應 `process_id` 之 `CommandExecution` `item_completed`。
+3. 排除本輪早期啟動的常駐 helper（與本輪最後一波未完成背景任務相差逾 120 秒，或距 `task_complete`
+   逾一小時），只將最新活躍批次（active cohort）視為等待中的背景任務。
+
+滿足時覆寫為 `RUNNING` + `Background work: waiting on N terminal(s)`（顯示 ⏳）；當最新批次的
+背景任務在 `task_complete` 後寫入 `item_completed`（即使舊常駐 helper 如 `sshfs` 仍使畫面顯示
+`1 background terminal running`），或畫面底部列消失時，自動轉回 `IDLE` + `needs_review`（👀）提醒驗收。
+
