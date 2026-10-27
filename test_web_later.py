@@ -151,6 +151,36 @@ class WebLaterTests(unittest.TestCase):
         a.usage_payload('codex', force_refresh=True, now=1060.0, binary='/usr/bin/codexbar', runner=fake_runner)
         self.assertEqual(len(calls), before_calls + 1)
 
+    def test_cursor_direct_usage_builds_monthly_included_api_and_auto_windows(self):
+        def fake_rpc(token, method):
+            self.assertEqual(token, 'valid-jwt-token')
+            if method == 'GetCurrentPeriodUsage':
+                return {
+                    'billingCycleStart': '1791940711000',
+                    'billingCycleEnd': '1794619111000',
+                    'planUsage': {
+                        'totalPercentUsed': 62.6,
+                        'apiPercentUsed': 88.2,
+                        'autoPercentUsed': 60.1,
+                    },
+                }
+            if method == 'GetPlanInfo':
+                return {'planInfo': {'planName': 'Pro', 'billingCycleEnd': '1794619111000'}}
+            if method == 'GetMe':
+                return {'email': 'cutebrady@gmail.com'}
+            return {}
+
+        accounts = a._fetch_cursor_direct_usage(rpc=fake_rpc, tokens=['valid-jwt-token'], now=1793075000.0)
+        self.assertEqual(len(accounts), 1)
+        acc = accounts[0]
+        self.assertEqual(acc['provider'], 'cursor')
+        self.assertEqual(acc['label'], 'cutebrady')
+        self.assertEqual(acc['plan'], 'Pro')
+        self.assertEqual([w['shortLabel'] for w in acc['windows']], ['月', 'API', 'Auto'])
+        self.assertEqual([w['usedPercent'] for w in acc['windows']], [63, 88, 60])
+        self.assertFalse(acc['windows'][0]['pace']['willLastToReset'])
+        self.assertTrue(acc['windows'][1]['pace']['willLastToReset'])
+
 
 if __name__ == '__main__':
     unittest.main()

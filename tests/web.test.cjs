@@ -3516,7 +3516,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   const calls = [];
   const sampleUsage = {
     ok: true,
-    providers: ['codex', 'claude'],
+    providers: ['codex', 'claude', 'cursor'],
     updated_at: Math.floor(Date.now() / 1000) - 120,
     accounts: [
       {
@@ -3580,6 +3580,33 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
           },
         ],
       },
+      {
+        provider: 'cursor',
+        account: 'cutebrady@gmail.com',
+        label: 'cutebrady',
+        plan: 'Pro',
+        windows: [
+          {
+            key: 'primary',
+            label: 'Included',
+            shortLabel: '月',
+            usedPercent: 63,
+            windowMinutes: 44640,
+            resetsAt: new Date(Date.now() + 18 * 86400 * 1000).toISOString(),
+            resetDescription: 'Resets Nov 14',
+            pace: { stage: 'farAhead', deltaPercent: 21, expectedUsedPercent: 42, etaSeconds: 666233, willLastToReset: false },
+          },
+          {
+            key: 'secondary',
+            label: 'API',
+            shortLabel: 'API',
+            usedPercent: 88,
+            windowMinutes: 44640,
+            resetsAt: new Date(Date.now() + 18 * 86400 * 1000).toISOString(),
+            resetDescription: 'Resets Nov 14',
+          },
+        ],
+      },
     ],
   };
 
@@ -3596,29 +3623,30 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.equal(calls.length, 0);
   assert.equal(ui.elements.get('agent-usage').hidden, true);
 
-  // 2. Codex + Claude + Pi running -> fetches codex,claude (never pi); panel is default hidden behind visual mini-gauges toggle
+  // 2. Codex + Claude + Cursor ('agent') + Pi running -> fetches codex,claude,cursor (never pi); panel is default hidden
   ui.render({
     hosts: [{ name: 'work', ok: true }],
     agents: [
       filterSession('codex', 'work', 'RUNNING'),
       filterSession('claude', 'work', 'WAIT'),
+      filterSession('agent', 'work', 'RUNNING'),
       filterSession('pi', 'work', 'RUNNING'),
     ],
   });
   await new Promise(r => setImmediate(r));
-  assert.deepEqual(calls, ['/api/usage?providers=codex%2Cclaude']);
+  assert.deepEqual(calls, ['/api/usage?providers=codex%2Cclaude%2Ccursor']);
   const box = ui.elements.get('agent-usage');
   assert.equal(box.hidden, false);
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
   assert.match(box.innerHTML, /class="usage-mini-gauges"/);
   assert.match(box.innerHTML, /class="usage-panel" id="usage-panel" hidden/);
 
-  // 3. Filtering to Pi hides usage completely; filtering to Codex scopes cards to Codex
+  // 3. Filtering to Pi hides usage completely; filtering to Cursor scopes cards to Cursor
   pickAgent(ui, 'pi');
   assert.equal(box.hidden, true);
-  pickAgent(ui, 'codex');
+  pickAgent(ui, 'cursor');
   assert.equal(box.hidden, false);
-  assert.match(box.innerHTML, /cutebrady/);
+  assert.match(box.innerHTML, /data-usage-provider="cursor"/);
   assert.doesNotMatch(box.innerHTML, /Brad\.Chang/);
   pickAgent(ui, '');
 
@@ -3633,7 +3661,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   // 5. Clicking refresh forces a refresh=1 call
   box.listeners.click({ target: { closest: sel => sel === '[data-usage-refresh]' ? {} : null } });
   await new Promise(r => setImmediate(r));
-  assert.equal(calls.at(-1), '/api/usage?providers=codex%2Cclaude&refresh=1');
+  assert.equal(calls.at(-1), '/api/usage?providers=codex%2Cclaude%2Ccursor&refresh=1');
 });
 
 

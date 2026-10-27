@@ -5,6 +5,7 @@ import argparse
 import base64
 import binascii
 import curses
+import datetime
 import fcntl
 import hashlib
 import io
@@ -20,6 +21,7 @@ import shlex
 import shutil
 import socket as socket_mod
 import sqlite3
+import ssl
 import stat
 import subprocess
 import sys
@@ -3003,12 +3005,17 @@ def codexbar_bin():
 
 def _short_usage_window_label(raw_label, window_minutes, key):
     label = clean(str(raw_label or ''))
-    if window_minutes == 300 or label.lower() == 'session':
+    low = label.lower()
+    if window_minutes == 300 or low == 'session':
         return '5h', label or 'Session'
-    if window_minutes == 10080 or label.lower() == 'weekly':
+    if window_minutes == 10080 or low == 'weekly':
         return '週', label or 'Weekly'
-    if window_minutes == 1440 or label.lower() == 'daily':
+    if window_minutes == 1440 or low == 'daily':
         return '日', label or 'Daily'
+    if low in ('included', 'monthly', 'month') or (isinstance(window_minutes, int) and 38000 <= window_minutes <= 46000):
+        return '月', label or 'Included'
+    if low in ('api', 'auto'):
+        return label, label
     if isinstance(window_minutes, int) and window_minutes > 0:
         if window_minutes % 1440 == 0:
             days = window_minutes // 1440
@@ -3104,23 +3111,260 @@ def _run_codexbar_json(cmd, timeout=_USAGE_TIMEOUT):
     return data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
 
 
+def _cursor_access_tokens(home=None):
+    tokens = []
+    env_tok = (os.environ.get('CURSOR_ACCESS_TOKEN') or '').strip()
+    if env_tok:
+        tokens.append(env_tok)
+    if sys.platform == 'darwin':
+        try:
+            proc = subprocess.run(
+                ['security', 'find-generic-password', '-s', 'cursor-access-token', '-a', 'cursor-user', '-w'],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            kc_tok = (proc.stdout or '').strip()
+            if proc.returncode == 0 and kc_tok and kc_tok not in tokens:
+                tokens.append(kc_tok)
+        except Exception:
+            pass
+    base = Path(home) if home is not None else Path.home()
+    for rel in ('.config/cursor/auth.json', '.cursor/auth.json'):
+        auth_file = base / rel
+        try:
+            if auth_file.is_file():
+                data = json.loads(auth_file.read_text(encoding='utf-8'))
+                file_tok = str((data or {}).get('accessToken') or '').strip()
+                if file_tok and file_tok not in tokens:
+                    tokens.append(file_tok)
+        except Exception:
+            pass
+    return tokens
+
+
+def _cursor_api_keys(home=None):
+    keys = []
+    env_key = (os.environ.get('CURSOR_API_KEY') or '').strip()
+    if env_key:
+        keys.append(env_key)
+    if sys.platform == 'darwin':
+        try:
+            proc = subprocess.run(
+                ['security', 'find-generic-password', '-s', 'cursor-api-key', '-a', 'cursor-user', '-w'],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            kc_key = (proc.stdout or '').strip()
+            if proc.returncode == 0 and kc_key and kc_key not in keys:
+                keys.append(kc_key)
+        except Exception:
+            pass
+    base = Path(home) if home is not None else Path.home()
+    for rel in ('.config/cursor/auth.json', '.cursor/auth.json'):
+        auth_file = base / rel
+        try:
+            if auth_file.is_file():
+                data = json.loads(auth_file.read_text(encoding='utf-8'))
+                file_key = str((data or {}).get('apiKey') or '').strip()
+                if file_key and file_key not in keys:
+                    keys.append(file_key)
+        except Exception:
+            pass
+    return keys
+
+
+def _exchange_cursor_api_key(api_key, timeout=5.0):
+    url = 'https://api2.cursor.sh/auth/exchange_user_api_key'
+    req = Request(
+        url,
+        data=b'{}',
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+    cafile = '/etc/ssl/cert.pem' if Path('/etc/ssl/cert.pem').is_file() else None
+    ctx = ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
+    with urlopen(req, timeout=timeout, context=ctx) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    tok = str((data or {}).get('accessToken') or '').strip()
+    return tok or None
+
+
+def _cursor_dashboard_rpc(token, method, timeout=5.0):
+    url = f'https://api2.cursor.sh/aiserver.v1.DashboardService/{method}'
+    req = Request(
+        url,
+        data=b'{}',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json',
+            'Connect-Protocol-Version': '1',
+        },
+        method='POST',
+    )
+    cafile = '/etc/ssl/cert.pem' if Path('/etc/ssl/cert.pem').is_file() else None
+    ctx = ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
+    with urlopen(req, timeout=timeout, context=ctx) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+
+def _cursor_window_pace(used_pct, start_ms, end_ms, now_s):
+    if not (isinstance(start_ms, int) and isinstance(end_ms, int) and end_ms > start_ms > 0):
+        return None
+    now_ms = float(now_s) * 1000.0
+    total_ms = float(end_ms - start_ms)
+    elapsed_ms = max(0.0, min(total_ms, now_ms - float(start_ms)))
+    expected_pct = max(0, min(100, round((elapsed_ms / total_ms) * 100.0)))
+    delta_pct = round(float(used_pct) - expected_pct)
+    eta_sec = None
+    will_last = True
+    if elapsed_ms > 0 and used_pct > 0:
+        elapsed_sec = elapsed_ms / 1000.0
+        rem_cycle_sec = max(0.0, (float(end_ms) - now_ms) / 1000.0)
+        rate_per_sec = float(used_pct) / elapsed_sec
+        if rate_per_sec > 0:
+            raw_eta = max(0.0, (100.0 - float(used_pct)) / rate_per_sec)
+            will_last = raw_eta >= rem_cycle_sec or delta_pct <= 5
+            if not will_last:
+                eta_sec = int(raw_eta)
+    stage = 'farAhead' if not will_last and delta_pct >= 15 else ('ahead' if delta_pct > 5 else 'behind')
+    return {
+        'stage': stage,
+        'summary': '',
+        'willLastToReset': will_last,
+        'etaSeconds': eta_sec,
+        'deltaPercent': delta_pct,
+        'expectedUsedPercent': expected_pct,
+    }
+
+
+def _build_cursor_usage_account(period_data, plan_data=None, me_data=None, now=None):
+    if not isinstance(period_data, dict):
+        return None
+    plan_usage = period_data.get('planUsage')
+    if not isinstance(plan_usage, dict):
+        return None
+    now_s = time.time() if now is None else float(now)
+    plan_info = (plan_data or {}).get('planInfo') if isinstance((plan_data or {}).get('planInfo'), dict) else {}
+    try:
+        start_ms = int(period_data.get('billingCycleStart') or 0)
+    except (TypeError, ValueError):
+        start_ms = 0
+    try:
+        end_ms = int(period_data.get('billingCycleEnd') or plan_info.get('billingCycleEnd') or 0)
+    except (TypeError, ValueError):
+        end_ms = 0
+    resets_at = ''
+    reset_desc = ''
+    if end_ms > 0:
+        dt = datetime.datetime.fromtimestamp(end_ms / 1000.0, tz=datetime.timezone.utc)
+        resets_at = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        reset_desc = dt.strftime('Resets %b ') + str(dt.day)
+    win_mins = max(1, round((end_ms - start_ms) / 60000)) if end_ms > start_ms > 0 else 43200
+    total_pct = plan_usage.get('totalPercentUsed')
+    if not isinstance(total_pct, (int, float)) or isinstance(total_pct, bool):
+        inc = plan_usage.get('includedSpend')
+        lim = plan_usage.get('limit')
+        if isinstance(inc, (int, float)) and isinstance(lim, (int, float)) and lim > 0:
+            total_pct = (float(inc) / float(lim)) * 100.0
+    windows = []
+    specs = [
+        ('primary', 'Included', '月', total_pct),
+        ('secondary', 'API', 'API', plan_usage.get('apiPercentUsed')),
+        ('tertiary', 'Auto', 'Auto', plan_usage.get('autoPercentUsed')),
+    ]
+    for key, label, short_label, raw_pct in specs:
+        if not isinstance(raw_pct, (int, float)) or isinstance(raw_pct, bool):
+            continue
+        pct = max(0, min(100, round(float(raw_pct))))
+        win = {
+            'key': key,
+            'label': label,
+            'shortLabel': short_label,
+            'usedPercent': pct,
+            'windowMinutes': win_mins,
+            'resetsAt': resets_at,
+            'resetDescription': reset_desc,
+        }
+        pace = _cursor_window_pace(pct, start_ms, end_ms, now_s)
+        if pace is not None:
+            if key != 'primary':
+                pace = {**pace, 'willLastToReset': True, 'etaSeconds': None}
+            win['pace'] = pace
+        windows.append(win)
+    if not windows:
+        return None
+    email = clean(str((me_data or {}).get('email') or '')) if isinstance(me_data, dict) else ''
+    plan_name = clean(str(plan_info.get('planName') or ''))
+    updated_iso = datetime.datetime.fromtimestamp(now_s, tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return {
+        'provider': 'cursor',
+        'account': email or 'cursor',
+        'label': _short_account_label(email, 'cursor'),
+        'plan': plan_name,
+        'windows': windows,
+        'updatedAt': updated_iso,
+    }
+
+
+def _fetch_cursor_direct_usage(rpc=_cursor_dashboard_rpc, tokens=None, now=None):
+    token_list = list(tokens) if tokens is not None else _cursor_access_tokens()
+
+    def _try_tokens(candidates):
+        for token in candidates:
+            try:
+                period_data = rpc(token, 'GetCurrentPeriodUsage')
+            except Exception:
+                continue
+            plan_data = {}
+            me_data = {}
+            try:
+                plan_data = rpc(token, 'GetPlanInfo')
+            except Exception:
+                pass
+            try:
+                me_data = rpc(token, 'GetMe')
+            except Exception:
+                pass
+            acc = _build_cursor_usage_account(period_data, plan_data, me_data, now=now)
+            if acc is not None:
+                return [acc]
+        return []
+
+    found = _try_tokens(token_list)
+    if found or tokens is not None:
+        return found
+    exchanged_tokens = []
+    for api_key in _cursor_api_keys():
+        try:
+            exchanged = _exchange_cursor_api_key(api_key)
+            if exchanged and exchanged not in token_list and exchanged not in exchanged_tokens:
+                exchanged_tokens.append(exchanged)
+        except Exception:
+            pass
+    return _try_tokens(exchanged_tokens)
+
+
 def _fetch_provider_usage(provider, binary=None, runner=_run_codexbar_json):
     if provider not in USAGE_PROVIDERS:
         return []
-    binary = binary or codexbar_bin()
-    if not binary:
-        return []
-    for args in (
-        [binary, 'usage', '--provider', provider, '--all-accounts', '--no-credits', '--format', 'json'],
-        [binary, 'usage', '--provider', provider, '--no-credits', '--format', 'json'],
-    ):
-        try:
-            items = runner(args)
-        except Exception:
-            items = []
-        accounts = [row for item in items if (row := _normalize_usage_account(item, provider)) is not None]
-        if accounts:
-            return accounts
+    if provider == 'cursor' and runner is _run_codexbar_json:
+        direct = _fetch_cursor_direct_usage()
+        if direct:
+            return direct
+    binary = binary if binary is not None else codexbar_bin()
+    if binary:
+        for args in (
+            [binary, 'usage', '--provider', provider, '--all-accounts', '--no-credits', '--format', 'json'],
+            [binary, 'usage', '--provider', provider, '--no-credits', '--format', 'json'],
+        ):
+            try:
+                items = runner(args)
+            except Exception:
+                items = []
+            accounts = [row for item in items if (row := _normalize_usage_account(item, provider)) is not None]
+            if accounts:
+                return accounts
     return []
 
 
@@ -3155,7 +3399,7 @@ def usage_payload(providers, force_refresh=False, now=None, ttl=_USAGE_TTL, stal
             to_fetch.append(provider)
     if to_fetch:
         resolved_bin = binary if binary is not None else codexbar_bin()
-        if not resolved_bin:
+        if not resolved_bin and all(p != 'cursor' for p in to_fetch):
             for provider in to_fetch:
                 results_by_provider[provider] = []
         elif len(to_fetch) == 1:
