@@ -3533,7 +3533,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
             windowMinutes: 10080,
             resetsAt: new Date(Date.now() + 6 * 86400 * 1000).toISOString(),
             resetDescription: 'Nov 2 at 3:46 PM',
-            pace: { stage: 'farAhead', deltaPercent: 56, etaSeconds: 33800, willLastToReset: false },
+            pace: { stage: 'farAhead', deltaPercent: 56, expectedUsedPercent: 12, etaSeconds: 33800, willLastToReset: false },
           },
         ],
       },
@@ -3596,7 +3596,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.equal(calls.length, 0);
   assert.equal(ui.elements.get('agent-usage').hidden, true);
 
-  // 2. Codex + Claude + Pi running -> fetches codex,claude (never pi) and renders 3 pills
+  // 2. Codex + Claude + Pi running -> fetches codex,claude (never pi); panel is default hidden behind visual mini-gauges toggle
   ui.render({
     hosts: [{ name: 'work', ok: true }],
     agents: [
@@ -3609,14 +3609,11 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.deepEqual(calls, ['/api/usage?providers=codex%2Cclaude']);
   const box = ui.elements.get('agent-usage');
   assert.equal(box.hidden, false);
-  assert.match(box.innerHTML, /cutebrady/);
-  assert.match(box.innerHTML, /週 68%/);
-  assert.match(box.innerHTML, /kaichenlin/);
-  assert.match(box.innerHTML, /5h 100% \(1h 35m\) · 週 30%/);
-  assert.match(box.innerHTML, /Brad\.Chang/);
-  assert.doesNotMatch(box.innerHTML, /id="usage-panel"/);
+  assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
+  assert.match(box.innerHTML, /class="usage-mini-gauges"/);
+  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel" hidden/);
 
-  // 3. Filtering to Pi hides usage strip; filtering to Codex shows only Codex pills
+  // 3. Filtering to Pi hides usage completely; filtering to Codex scopes cards to Codex
   pickAgent(ui, 'pi');
   assert.equal(box.hidden, true);
   pickAgent(ui, 'codex');
@@ -3625,10 +3622,11 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.doesNotMatch(box.innerHTML, /Brad\.Chang/);
   pickAgent(ui, '');
 
-  // 4. Clicking a usage pill opens the detail panel with progress bars, pace warning, and refresh button
+  // 4. Clicking the toggle expands the visual detail panel (no hidden attribute) with progress bars, expected tick, and pace warning
   box.listeners.click({ target: { closest: sel => sel === '[data-usage-toggle]' ? {} : null } });
-  assert.match(box.innerHTML, /id="usage-panel"/);
-  assert.match(box.innerHTML, /額度與重置時間/);
+  assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="true"/);
+  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel">/);
+  assert.match(box.innerHTML, /class="usage-bar-expected" style="left:12%"/);
   assert.match(box.innerHTML, /超前 56% · 預計 9h 24m 後用盡/);
   assert.match(box.innerHTML, /已達視窗上限/);
 

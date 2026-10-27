@@ -476,77 +476,78 @@
       text-align: left;
       cursor: pointer;
     }
-    .agent-filters[hidden], .other-agent-wait[hidden], .agent-usage[hidden] { display: none; }
+    .agent-filters[hidden], .other-agent-wait[hidden], .agent-usage[hidden], .usage-panel[hidden] { display: none; }
     .agent-usage {
       margin-top: 8px;
     }
-    .usage-strip {
+    .usage-bar-head {
       display: flex;
-      flex-wrap: wrap;
       align-items: center;
-      gap: 6px;
+      justify-content: space-between;
+      gap: 8px;
     }
-    .usage-label {
-      color: var(--muted);
-      font-size: 0.68rem;
-      line-height: 1.2;
-      margin-right: 2px;
-    }
-    .usage-pill {
+    .usage-toggle {
       appearance: none;
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       font-family: var(--mono);
       font-size: 0.68rem;
-      font-weight: 500;
-      padding: 4px 8px;
+      font-weight: 600;
+      padding: 4px 9px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: var(--bg-elevated);
-      color: var(--fg);
+      color: var(--muted);
       line-height: 1.2;
       cursor: pointer;
       font-variant-numeric: tabular-nums;
     }
-    .usage-pill:hover, .usage-pill:focus-visible {
+    .usage-toggle:hover, .usage-toggle:focus-visible {
+      color: var(--fg);
       border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
     }
-    .usage-pill[aria-expanded="true"] {
+    .usage-toggle[aria-expanded="true"] {
+      color: var(--fg);
       background: var(--card);
       border-color: var(--accent);
       box-shadow: 0 0 0 1px var(--accent);
     }
-    .usage-pill.tone-warn {
-      border-color: color-mix(in srgb, var(--wait) 55%, var(--line));
+    .usage-toggle.tone-warn {
+      border-color: color-mix(in srgb, var(--wait) 50%, var(--line));
     }
-    .usage-pill.tone-danger {
-      border-color: color-mix(in srgb, var(--danger) 65%, var(--line));
-      background: color-mix(in srgb, var(--danger-bg) 55%, var(--bg-elevated));
-    }
-    .usage-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--running);
-      flex: 0 0 auto;
-    }
-    .usage-pill.tone-warn .usage-dot { background: var(--wait); }
-    .usage-pill.tone-danger .usage-dot { background: var(--danger); }
-    .usage-provider {
-      color: var(--muted);
-      font-weight: 600;
-    }
-    .usage-acct {
-      font-weight: 600;
+    .usage-toggle.tone-danger {
       color: var(--fg);
+      border-color: color-mix(in srgb, var(--danger) 60%, var(--line));
     }
-    .usage-wins {
-      color: var(--muted);
+    .usage-mini-gauges {
+      display: inline-flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 12px;
+      padding: 1px 2px;
+      border-radius: 3px;
+      background: color-mix(in srgb, var(--line) 55%, transparent);
     }
-    .usage-pill.tone-danger .usage-wins {
-      color: var(--danger);
-      font-weight: 600;
+    .usage-mini-col {
+      width: 4px;
+      height: 10px;
+      border-radius: 1.5px;
+      background: color-mix(in srgb, var(--line) 90%, transparent);
+      display: flex;
+      align-items: flex-end;
+      overflow: hidden;
+    }
+    .usage-mini-fill {
+      width: 100%;
+      border-radius: 1.5px;
+      background: var(--accent);
+    }
+    .usage-mini-fill.tone-warn { background: var(--wait); }
+    .usage-mini-fill.tone-danger { background: var(--danger); }
+    .usage-chev {
+      font-size: 0.62rem;
+      opacity: 0.75;
     }
     .usage-panel {
       margin-top: 8px;
@@ -589,17 +590,17 @@
     }
     .usage-cards {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(14.5rem, 1fr));
       gap: 8px;
     }
     .usage-card {
-      padding: 8px 10px;
+      padding: 9px 10px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: var(--bg-elevated);
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 7px;
     }
     .usage-card-head {
       display: flex;
@@ -611,7 +612,7 @@
     .usage-card-id {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       min-width: 0;
       font-family: var(--mono);
       font-weight: 600;
@@ -621,7 +622,7 @@
     }
     .usage-plan {
       font-family: var(--mono);
-      font-size: 0.64rem;
+      font-size: 0.62rem;
       padding: 1px 5px;
       border-radius: 4px;
       border: 1px solid var(--line);
@@ -633,28 +634,22 @@
       flex-direction: column;
       gap: 3px;
     }
-    .usage-win-row {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 6px;
-      font-size: 0.7rem;
+    .usage-meter-row {
+      display: grid;
+      grid-template-columns: 2.2rem 1fr auto;
+      align-items: center;
+      gap: 7px;
       font-family: var(--mono);
       font-variant-numeric: tabular-nums;
     }
-    .usage-win-name {
-      color: var(--fg);
-      font-weight: 500;
-    }
-    .usage-win-meta {
-      color: var(--muted);
+    .usage-win-tag {
       font-size: 0.66rem;
-      text-align: right;
+      font-weight: 600;
+      color: var(--muted);
     }
-    .usage-win-pct.tone-warn { color: var(--wait); font-weight: 600; }
-    .usage-win-pct.tone-danger { color: var(--danger); font-weight: 600; }
     .usage-bar {
-      height: 5px;
+      position: relative;
+      height: 7px;
       border-radius: 999px;
       background: color-mix(in srgb, var(--line) 85%, transparent);
       overflow: hidden;
@@ -667,15 +662,43 @@
     }
     .usage-bar-fill.tone-warn { background: var(--wait); }
     .usage-bar-fill.tone-danger { background: var(--danger); }
+    .usage-bar-expected {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: var(--fg);
+      opacity: 0.45;
+      pointer-events: none;
+    }
+    .usage-win-stat {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
+      font-size: 0.68rem;
+      justify-content: flex-end;
+      min-width: 5.2rem;
+    }
+    .usage-win-pct {
+      font-weight: 600;
+      color: var(--fg);
+    }
+    .usage-win-pct.tone-warn { color: var(--wait); }
+    .usage-win-pct.tone-danger { color: var(--danger); }
+    .usage-win-reset {
+      color: var(--muted);
+      font-size: 0.62rem;
+    }
     .usage-pace {
-      font-size: 0.66rem;
+      font-size: 0.64rem;
       color: var(--wait);
-      line-height: 1.3;
+      line-height: 1.25;
+      padding-left: 2.65rem;
     }
     .usage-pace.tone-danger {
       color: var(--danger);
     }
-    .usage-pill:focus-visible, .usage-refresh:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .usage-toggle:focus-visible, .usage-refresh:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     @media (prefers-color-scheme: dark) {
       .host-pill.tone-0, .host-chip.tone-0 { --host-fg: #5eead4; --host-bg: #042f2e; --host-bd: #0f766e; }
       .host-pill.tone-1, .host-chip.tone-1 { --host-fg: #fdba74; --host-bg: #431407; --host-bd: #c2410c; }
@@ -2742,74 +2765,81 @@
         return;
       }
       box.hidden = false;
-      const pillsHtml = accounts.map(acc => {
+      let overallTone = 'ok';
+      const miniColsHtml = accounts.map(acc => {
         const tone = usageToneForAccount(acc);
+        if (tone === 'danger') overallTone = 'danger';
+        else if (tone === 'warn' && overallTone !== 'danger') overallTone = 'warn';
+        const maxPct = (acc.windows || []).reduce((m, w) => Math.max(m, Math.min(100, Math.max(0, Math.round(Number(w?.usedPercent) || 0)))), 0);
+        const hPct = Math.max(18, maxPct);
+        return `<span class="usage-mini-col"><span class="usage-mini-fill tone-${tone}" style="height:${hPct}%"></span></span>`;
+      }).join('');
+      const toggleHtml = `<button type="button" class="usage-toggle tone-${overallTone}" data-usage-toggle aria-expanded="${usageExpanded ? 'true' : 'false'}" aria-controls="usage-panel">` +
+        `<span class="usage-mini-gauges" aria-hidden="true">${miniColsHtml}</span>` +
+        `<span>用量</span>` +
+        `<span class="usage-chev" aria-hidden="true">${usageExpanded ? '▴' : '▾'}</span>` +
+      `</button>`;
+      const ageSec = usageUpdatedAt > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - usageUpdatedAt) : null;
+      const ageText = ageSec === null ? '' : (ageSec < 60 ? '剛剛更新' : `${Math.floor(ageSec / 60)} 分鐘前更新`);
+      const cardsHtml = accounts.map(acc => {
         const providerName = AGENT_LABELS[acc.provider] || acc.provider || '';
         const acctLabel = acc.label || acc.account || providerName;
-        const winsText = (acc.windows || []).map(formatWindowPillSummary).join(' · ');
-        const titleParts = [`${providerName} ${acc.account || acctLabel}${acc.plan ? ` (${acc.plan})` : ''}`];
-        for (const win of acc.windows || []) {
-          const detail = formatResetDetail(win.resetsAt, win.resetDescription);
-          titleParts.push(`${win.label || win.shortLabel}: 已用 ${win.usedPercent}%${detail ? ` · ${detail}` : ''}`);
-        }
-        return `<button type="button" class="usage-pill tone-${tone}" data-usage-toggle aria-expanded="${usageExpanded ? 'true' : 'false'}" title="${escapeHtml(titleParts.join(' | '))}">` +
-          `<span class="usage-dot" aria-hidden="true"></span>` +
-          `<span class="usage-provider">${escapeHtml(providerName)}</span>` +
-          `<span class="usage-acct">${escapeHtml(acctLabel)}</span>` +
-          `<span class="usage-wins">${winsText}</span>` +
-          `</button>`;
-      }).join('');
-      let panelHtml = '';
-      if (usageExpanded) {
-        const ageSec = usageUpdatedAt > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - usageUpdatedAt) : null;
-        const ageText = ageSec === null ? '' : (ageSec < 60 ? '剛剛更新' : `${Math.floor(ageSec / 60)} 分鐘前更新`);
-        const cardsHtml = accounts.map(acc => {
-          const providerName = AGENT_LABELS[acc.provider] || acc.provider || '';
-          const winsHtml = (acc.windows || []).map(win => {
-            const pct = Math.max(0, Math.min(100, Math.round(Number(win.usedPercent) || 0)));
-            const wTone = usageToneForWindow(win);
-            const resetInfo = formatResetDetail(win.resetsAt, win.resetDescription);
-            let paceHtml = '';
-            if (pct >= 100) {
-              paceHtml = `<div class="usage-pace tone-danger">⛔ 已達視窗上限${resetInfo ? ` · ${escapeHtml(resetInfo)}` : ''}</div>`;
-            } else if (win.pace && win.pace.willLastToReset === false) {
-              const delta = Number.isFinite(win.pace.deltaPercent) && win.pace.deltaPercent > 0 ? `超前 ${win.pace.deltaPercent}%` : '消耗偏快';
-              const eta = Number.isFinite(win.pace.etaSeconds) && win.pace.etaSeconds > 0
-                ? ` · 預計 ${formatUsageDurationSec(win.pace.etaSeconds)} 後用盡`
-                : '';
-              paceHtml = `<div class="usage-pace">⚡ ${escapeHtml(delta + eta)}</div>`;
-            }
-            return `<div class="usage-win">` +
-              `<div class="usage-win-row">` +
-                `<span class="usage-win-name">${escapeHtml(win.label || win.shortLabel)} · <span class="usage-win-pct tone-${wTone}">已用 ${pct}%</span></span>` +
-                `<span class="usage-win-meta">${escapeHtml(resetInfo)}</span>` +
-              `</div>` +
-              `<div class="usage-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">` +
+        const badge = cliBadge(acc.provider, true);
+        const winsHtml = (acc.windows || []).map(win => {
+          const pct = Math.max(0, Math.min(100, Math.round(Number(win.usedPercent) || 0)));
+          const wTone = usageToneForWindow(win);
+          const shortReset = formatResetCountdown(win.resetsAt) || formatLocalResetClock(win.resetsAt);
+          const resetInfo = formatResetDetail(win.resetsAt, win.resetDescription);
+          const expectedPct = Number.isFinite(win.pace?.expectedUsedPercent)
+            ? Math.max(0, Math.min(100, Math.round(win.pace.expectedUsedPercent)))
+            : null;
+          const expectedTick = expectedPct !== null && expectedPct > 0 && expectedPct < 100
+            ? `<span class="usage-bar-expected" style="left:${expectedPct}%" title="預期進度 ${expectedPct}%"></span>`
+            : '';
+          let paceHtml = '';
+          if (pct >= 100) {
+            paceHtml = `<div class="usage-pace tone-danger">⛔ 已達視窗上限${resetInfo ? ` · ${escapeHtml(resetInfo)}` : ''}</div>`;
+          } else if (win.pace && win.pace.willLastToReset === false) {
+            const delta = Number.isFinite(win.pace.deltaPercent) && win.pace.deltaPercent > 0 ? `超前 ${win.pace.deltaPercent}%` : '消耗偏快';
+            const eta = Number.isFinite(win.pace.etaSeconds) && win.pace.etaSeconds > 0
+              ? ` · 預計 ${formatUsageDurationSec(win.pace.etaSeconds)} 後用盡`
+              : '';
+            paceHtml = `<div class="usage-pace">⚡ ${escapeHtml(delta + eta)}</div>`;
+          }
+          return `<div class="usage-win">` +
+            `<div class="usage-meter-row" title="${escapeHtml(`${win.label || win.shortLabel}: 已用 ${pct}%${resetInfo ? ` · ${resetInfo}` : ''}`)}">` +
+              `<span class="usage-win-tag">${escapeHtml(win.shortLabel || win.label)}</span>` +
+              `<div class="usage-bar" role="progressbar" aria-label="${escapeHtml(win.label || win.shortLabel)}" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">` +
                 `<div class="usage-bar-fill tone-${wTone}" style="width:${pct}%"></div>` +
+                expectedTick +
               `</div>` +
-              paceHtml +
-            `</div>`;
-          }).join('');
-          return `<div class="usage-card" data-usage-provider="${escapeHtml(acc.provider)}" data-usage-account="${escapeHtml(acc.account || acc.label)}">` +
-            `<div class="usage-card-head">` +
-              `<span class="usage-card-id" title="${escapeHtml(acc.account || '')}">${escapeHtml(providerName)} · ${escapeHtml(acc.account || acc.label)}</span>` +
-              (acc.plan ? `<span class="usage-plan">${escapeHtml(acc.plan)}</span>` : '') +
+              `<span class="usage-win-stat">` +
+                `<span class="usage-win-pct tone-${wTone}">${pct}%</span>` +
+                (shortReset ? `<span class="usage-win-reset">${escapeHtml(shortReset)}</span>` : '') +
+              `</span>` +
             `</div>` +
-            winsHtml +
+            paceHtml +
           `</div>`;
         }).join('');
-        panelHtml = `<div class="usage-panel" id="usage-panel">` +
-          `<div class="usage-panel-head">` +
-            `<span class="usage-panel-title">額度與重置時間</span>` +
-            `<span class="usage-panel-actions">` +
-              (ageText ? `<span>${escapeHtml(ageText)}</span>` : '') +
-              `<button type="button" class="usage-refresh" data-usage-refresh${usageRefreshing ? ' disabled' : ''}>${usageRefreshing ? '更新中…' : '重新整理'}</button>` +
-            `</span>` +
+        return `<div class="usage-card" data-usage-provider="${escapeHtml(acc.provider)}" data-usage-account="${escapeHtml(acc.account || acc.label)}">` +
+          `<div class="usage-card-head">` +
+            `<span class="usage-card-id" title="${escapeHtml(`${providerName} · ${acc.account || acctLabel}`)}">${badge}<span>${escapeHtml(acctLabel)}</span></span>` +
+            (acc.plan ? `<span class="usage-plan">${escapeHtml(acc.plan)}</span>` : '') +
           `</div>` +
-          `<div class="usage-cards">${cardsHtml}</div>` +
+          winsHtml +
         `</div>`;
-      }
-      const nextMarkup = `<div class="usage-strip">${`<span class="usage-label" aria-hidden="true">用量</span>`}${pillsHtml}</div>${panelHtml}`;
+      }).join('');
+      const panelHtml = `<div class="usage-panel" id="usage-panel"${usageExpanded ? '' : ' hidden'}>` +
+        `<div class="usage-panel-head">` +
+          `<span class="usage-panel-title">額度與重置時間</span>` +
+          `<span class="usage-panel-actions">` +
+            (ageText ? `<span>${escapeHtml(ageText)}</span>` : '') +
+            `<button type="button" class="usage-refresh" data-usage-refresh${usageRefreshing ? ' disabled' : ''}>${usageRefreshing ? '更新中…' : '重新整理'}</button>` +
+          `</span>` +
+        `</div>` +
+        `<div class="usage-cards">${cardsHtml}</div>` +
+      `</div>`;
+      const nextMarkup = `<div class="usage-bar-head">${toggleHtml}</div>${panelHtml}`;
       if (box.innerHTML !== nextMarkup) box.innerHTML = nextMarkup;
     }
     function renderUsage(data) {
