@@ -2262,13 +2262,20 @@ def event_hints(agent, data):
     }
 
 
-def remember_hints(con, sock, pane, pid, hints):
+def remember_hints(con, sock, pane, pid, hints, session_key=''):
     """Store live title/model hints without touching the pane's attention revision."""
     if not hints:
         return
-    existing = con.execute('SELECT agent FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
+    existing = con.execute('SELECT agent, event_key FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
     if not existing or existing['agent'] != 'opencode':
-        record(con, sock, pane, pid, 'opencode', 'IDLE', 'Registered; no new work yet')
+        record(con, sock, pane, pid, 'opencode', 'IDLE', 'Registered; no new work yet', event_key=session_key)
+    elif session_key and existing['event_key'] and existing['event_key'] != session_key:
+        record(con, sock, pane, pid, 'opencode', 'IDLE', 'Registered; no new work yet',
+               event_key=session_key, replace_identity=True, clear_source=True)
+    elif session_key and not existing['event_key']:
+        with con:
+            con.execute('UPDATE panes SET event_key=? WHERE socket=? AND pane=? AND pid=?',
+                        (session_key, sock, pane, pid))
     assignments = ','.join(f'{column}=?' for column in hints)
     with con:
         con.execute(f'UPDATE panes SET {assignments} WHERE socket=? AND pane=? AND pid=?',
@@ -2312,7 +2319,7 @@ def event_command(agent, event):
                     register_codex_session(con,sock,pane,pid,data)
                 # Reattaching/restarting must not discard an unread completion.
                 existing = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock,pane,pid)).fetchone()
-                session_changed = bool(session_key and existing and existing['event_key'] != session_key)
+                session_changed = bool(session_key and existing and existing['event_key'] and existing['event_key'] != session_key)
                 recorded_revision = None
                 clear_session = (agent == 'claude' and event in ('SessionStart', 'session_start')
                                  and data.get('source') == 'clear')
@@ -2356,7 +2363,7 @@ def event_command(agent, event):
                         transcript_path=transcript or None,
                         expected_revision=recorded_revision,
                     )
-                remember_hints(con, sock, pane, pid, hints)
+                remember_hints(con, sock, pane, pid, hints, session_key)
     except Exception as exc:
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (STATE / 'hook-errors.log').open('a') as f:

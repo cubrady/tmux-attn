@@ -12,12 +12,14 @@ export default Plugin.define({
 
     let tracked = "";
     let running = false;
+    let waiting = false;
     let completion = "";
     let lastText = "";
     const subscriptions = [];
 
     const reset = () => {
       running = false;
+      waiting = false;
       completion = "";
       lastText = "";
     };
@@ -84,21 +86,13 @@ export default Plugin.define({
     };
     const started = (sid, model) => {
       running = true;
+      waiting = false;
       completion = "";
-      lastText = "";
       send("agent_start", {}, sid, model);
     };
     const busy = (sid) => {
-      if (running) return;
+      if (running && !waiting) return;
       started(sid);
-    };
-    const finish = (sid, event, data = {}) => {
-      if (completion === "failed" || completion === "interrupted") return;
-      if (event === "Stop" && completion) return;
-      completion = event === "Stop" ? "succeeded" : event === "StopFailure" ? "failed" : "interrupted";
-      running = false;
-      send(event, { ...data, last_assistant_message: lastText }, sid);
-      lastText = "";
     };
     const permissionDetail = (permission) => {
       const label = permission?.message || permission?.action || "Tool permission";
@@ -132,15 +126,28 @@ export default Plugin.define({
       }
       return "";
     };
+    const finish = (sid, event, data = {}) => {
+      if (completion === "failed" || completion === "interrupted") return;
+      if (event === "Stop" && completion) return;
+      completion = event === "Stop" ? "succeeded" : event === "StopFailure" ? "failed" : "interrupted";
+      running = false;
+      waiting = false;
+      const text = (lastText || lastAssistantText(sid) || "").trim();
+      send(event, { ...data, last_assistant_message: text }, sid);
+      lastText = "";
+    };
+    const meta = (sid, data = {}, model) => {
+      if (!accept(sid)) return;
+      send("opencode_meta", data, sid, model);
+    };
     // Bring the pane in line with the session the user is currently viewing.
     const syncActive = (sid) => {
-      if (tracked === sid && running) return;
       tracked = sid;
       reset();
-      const waiting = permissions(sid);
-      if (waiting.length) {
-        running = true;
-        send("PermissionRequest", { tool_input: { description: permissionDetail(waiting[0]) } }, sid);
+      const waitingList = permissions(sid);
+      if (waitingList.length) {
+        waiting = true;
+        send("PermissionRequest", { tool_input: { description: permissionDetail(waitingList[0]) } }, sid);
         return;
       }
       if (sessionStatus(sid) === "running") {
@@ -161,27 +168,37 @@ export default Plugin.define({
     };
 
     subscribe("session.step.started", (event) => {
-      if (!accept(event.data.sessionID)) return;
-      started(event.data.sessionID, event.data.model);
+      const sid = event.data.sessionID;
+      if (!accept(sid)) return;
+      if (!running || waiting) {
+        started(sid, event.data.model);
+      } else if (event.data.model) {
+        meta(sid, {}, event.data.model);
+      }
     });
     subscribe("session.inbox.enqueued", (event) => {
       const sid = event.data.sessionID;
       if (!accept(sid) || event.data.item?.type !== "user") return;
       running = true;
+      waiting = false;
       completion = "";
       lastText = "";
       send("UserPromptSubmit", { prompt: event.data.item.payload?.text || "" }, sid);
     });
     subscribe("session.execution.started", (event) => {
-      if (!accept(event.data.sessionID)) return;
-      started(event.data.sessionID);
+      const sid = event.data.sessionID;
+      if (!accept(sid)) return;
+      if (!running || waiting) {
+        lastText = "";
+        started(sid);
+      }
     });
     subscribe("session.status", (event) => {
       const sid = event.data.sessionID;
       if (!accept(sid)) return;
       const status = event.data.status?.type;
       if (status === "busy" || status === "retry") busy(sid);
-      else if (status === "idle" && running) finish(sid, "Stop");
+      else if (status === "idle" && (running || waiting)) finish(sid, "Stop");
     });
     subscribe("session.text.ended", (event) => {
       const sid = event.data.sessionID;
@@ -198,7 +215,7 @@ export default Plugin.define({
     });
     subscribe("session.idle", (event) => {
       const sid = event.data.sessionID;
-      if (!accept(sid) || !running) return;
+      if (!accept(sid) || (!running && !waiting)) return;
       finish(sid, "Stop");
     });
     subscribe("session.execution.failed", (event) => {
@@ -216,33 +233,31 @@ export default Plugin.define({
       if (sid !== tracked) return;
       send("SessionEnd", {}, sid);
       tracked = "";
-      running = false;
-      completion = "";
-      lastText = "";
+      reset();
     });
     subscribe("permission.asked", (event) => {
       const sid = event.data.sessionID;
       if (!accept(sid)) return;
-      running = true;
+      waiting = true;
+      running = false;
       completion = "";
       send("PermissionRequest", { tool_input: { description: permissionDetail(event.data) } }, sid);
     });
     subscribe("permission.replied", (event) => {
       const sid = event.data.sessionID;
       if (!accept(sid)) return;
-      running = true;
       completion = "";
-      const waiting = permissions(sid);
-      if (waiting.length) {
-        send("PermissionRequest", { tool_input: { description: permissionDetail(waiting[0]) } }, sid);
+      const remaining = permissions(sid);
+      if (remaining.length) {
+        waiting = true;
+        running = false;
+        send("PermissionRequest", { tool_input: { description: permissionDetail(remaining[0]) } }, sid);
       } else {
+        waiting = false;
+        running = true;
         send("PostToolUse", {}, sid);
       }
     });
-    const meta = (sid, data = {}, model) => {
-      if (!accept(sid)) return;
-      send("opencode_meta", data, sid, model);
-    };
     subscribe("session.created", (event) => {
       meta(event.data.sessionID, event.data.title ? { title: event.data.title } : {}, event.data.model);
     });
