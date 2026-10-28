@@ -62,8 +62,17 @@ darwin_plist_path() {
   echo "${HOME}/Library/LaunchAgents/${LABEL}.plist"
 }
 
+darwin_domain_root() {
+  if launchctl print "gui/${uid}" >/dev/null 2>&1; then
+    echo "gui/${uid}"
+  else
+    # SSH and headless sessions may have a user domain without an Aqua GUI domain.
+    echo "user/${uid}"
+  fi
+}
+
 darwin_domain() {
-  echo "gui/${uid}/${LABEL}"
+  echo "$(darwin_domain_root)/${LABEL}"
 }
 
 linux_unit_path() {
@@ -104,7 +113,7 @@ case "$(uname -s)" in
             -e "s|7788|${PORT}|g" \
             "$script_dir/contrib/launchd/ai.tmux-attn.web.plist" > "$plist"
         launchctl bootout "$(darwin_domain)" 2>/dev/null || true
-        launchctl bootstrap "gui/${uid}" "$plist"
+        launchctl bootstrap "$(darwin_domain_root)" "$plist"
         launchctl enable "$(darwin_domain)" 2>/dev/null || true
         launchctl kickstart -k "$(darwin_domain)"
         sleep 0.6
