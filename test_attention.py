@@ -2046,6 +2046,26 @@ class ClaudeSessionResetTests(unittest.TestCase):
         self.assertEqual(summary['items'][0]['blocked_by'], [])
         self.assertEqual(summary['items'][1]['blocked_by'], [3])
 
+    def test_shell_pane_preview_captures_and_sanitizes_tail_lines(self):
+        raw_screen = '\n'.join(
+            ['']
+            + [f'\x1b[32mline {i}\x1b[0m   ' for i in range(1, 16)]
+            + ['   ', 'final ' + ('x' * 300)]
+        )
+        with patch.object(a, 'tmux', return_value=raw_screen):
+            preview = a.shell_pane_preview('%10', sock='/tmp/fake-sock')
+        self.assertEqual(len(preview['lines']), a.SHELL_PREVIEW_EXPANDED_LINES)
+        self.assertEqual(preview['lines'][0], 'line 5')
+        self.assertEqual(preview['lines'][-2], 'line 15')
+        self.assertEqual(len(preview['lines'][-1]), a.SHELL_PREVIEW_LINE_CHARS)
+        self.assertTrue(preview['lines'][-1].endswith('…'))
+        # tag_host sanitizes peer shell lines and strips invalid entries.
+        tagged, _ = a.tag_host({'agents': [{
+            'pane': '%10', 'pid': '41440', 'tracked': False, 'state': 'SHELL',
+            'preview': {'users': [], 'agent': '', 'lines': ['  \x1b[31malert\x1b[0m ', '', 123, 'ok']},
+        }]}, 'peer')
+        self.assertEqual(tagged[0]['preview'], {'users': [], 'agent': '', 'lines': ['  alert', 'ok']})
+
 
 class OpenCodePluginTests(unittest.TestCase):
     def test_tui_plugin_reports_the_expected_events_with_installer_placeholders(self):

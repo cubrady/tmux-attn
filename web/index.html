@@ -846,6 +846,7 @@
       cursor: pointer;
     }
     .card.shell { cursor: default; }
+    .card.shell.expandable { cursor: pointer; }
     /* The whole card is one button; the trash sits above it so the two never nest.
        The button does not take pointer events: otherwise it covers the window-number
        tooltip (and the host and repo titles). Clicks pass through to the card and
@@ -868,7 +869,7 @@
     .card-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
     @media (prefers-reduced-motion: no-preference) {
       .card { transition: border-color 160ms var(--ease), background 160ms var(--ease), transform 140ms var(--ease); }
-      .card:active { transform: scale(0.985); }
+      .card:not(.shell):active, .card.shell.expandable:active { transform: scale(0.985); }
     }
     .card.selected {
       border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
@@ -889,6 +890,41 @@
       border-left-color: color-mix(in srgb, var(--muted) 40%, var(--line));
       background: color-mix(in srgb, var(--card) 70%, var(--bg));
     }
+    .shell-preview {
+      margin-top: 8px;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+      background: color-mix(in srgb, var(--bg) 62%, var(--card));
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .shell-preview-lines {
+      margin: 0;
+      font: 0.75rem/1.45 var(--mono);
+      font-variant-numeric: tabular-nums;
+      color: color-mix(in srgb, var(--fg) 84%, var(--muted));
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .shell-preview-toggle {
+      align-self: flex-end;
+      padding: 1px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--card) 82%, var(--bg));
+      color: var(--muted);
+      font: 500 0.66rem/1.35 var(--mono);
+      cursor: pointer;
+      transition: color 140ms var(--ease), border-color 140ms var(--ease), transform 120ms var(--ease);
+    }
+    .shell-preview-toggle:hover {
+      color: var(--fg);
+      border-color: color-mix(in srgb, var(--fg) 28%, var(--line));
+    }
+    .shell-preview-toggle:active { transform: scale(0.97); }
+    .shell-preview-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .card.error {
       border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
       border-left-color: var(--danger);
@@ -3241,6 +3277,32 @@
       }
     }
     // A card is a glance: the result you came for first, then only the latest prompt for context.
+    const SHELL_PREVIEW_COLLAPSED = 3;
+    const SHELL_PREVIEW_EXPANDED = 12;
+    const expandedShellKeys = new Set();
+    function shellLines(a) {
+      const raw = a?.preview?.lines;
+      if (!Array.isArray(raw)) return [];
+      return raw
+        .filter(line => typeof line === 'string' && line.trim())
+        .slice(-SHELL_PREVIEW_EXPANDED);
+    }
+    function shellPreviewHtml(a) {
+      const lines = shellLines(a);
+      if (!lines.length) return '';
+      const key = agentKey(a);
+      const expandable = lines.length > SHELL_PREVIEW_COLLAPSED;
+      const expanded = expandable && expandedShellKeys.has(key);
+      const shown = expanded ? lines : lines.slice(-SHELL_PREVIEW_COLLAPSED);
+      const toggle = expandable
+        ? `<button type="button" class="shell-preview-toggle" data-shell-toggle aria-expanded="${expanded}">${
+            expanded ? '收合' : `展開 ${lines.length} 行`}</button>`
+        : '';
+      return `<div class="shell-preview${expanded ? ' expanded' : ''}">` +
+        `<pre class="shell-preview-lines">${shown.map(line => escapeHtml(line)).join('\n')}</pre>` +
+        toggle +
+      `</div>`;
+    }
     function cardPreviewHtml(preview) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
       const lastUser = users[users.length - 1] || '';
@@ -3431,6 +3493,7 @@
       const openLabel = machine ? `開啟 ${name}，${machine}` : `開啟 ${name}`;
       const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
       const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
+      const shellExpandable = cat === 'shell' && shellLines(a).length > SHELL_PREVIEW_COLLAPSED ? ' expandable' : '';
       const killNote = killState.key === key && killState.note
         ? `<div class="kill-note">${escapeHtml(killState.note)}</div>` : '';
       const agentMeta = titleAgentHtml(a);
@@ -3438,7 +3501,7 @@
       // Section headings + left rail already show wait/review/idle/running; only ⏳ adds new info.
       const statusMark = cat === 'running' && a.background_wait
         ? `<span class="emoji" aria-hidden="true">⏳</span>` : '';
-      return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}${killClass}${laterClass}" data-key="${escapeHtml(key)}">
+      return `<article class="card ${cat}${reviewClass}${newestClass}${errorClass}${selected}${killClass}${laterClass}${shellExpandable}" data-key="${escapeHtml(key)}">
         ${a.tracked ? `<button type="button" class="card-open" aria-label="${escapeHtml(openLabel)}"></button>` : ''}
         <div class="row1">
           <div class="title">
@@ -3455,7 +3518,7 @@
         ${killNote}
         ${GENERIC_REASONS.has(reason) ? '' : `<div class="reason">${escapeHtml(reason)}</div>`}
         ${cardTasksHtml(a.tasks)}
-        ${cardPreviewHtml(a.preview)}
+        ${cat === 'shell' ? shellPreviewHtml(a) : cardPreviewHtml(a.preview)}
       </article>`;
     }
     // Closing a pane is destructive, so a card's trash needs two taps. The state lives here rather than in the
@@ -3486,7 +3549,10 @@
       // Swapping the markup drops focus, so hand it back to the control the user was on.
       const active = document.activeElement;
       const refocus = active && el.contains(active)
-        ? (active.closest('[data-kill]') ? '[data-kill]' : active.closest('[data-later]') ? '[data-later]' : '.card-open') : '';
+        ? (active.closest('[data-kill]') ? '[data-kill]'
+          : active.closest('[data-later]') ? '[data-later]'
+          : active.closest('[data-shell-toggle]') ? '[data-shell-toggle]'
+          : '.card-open') : '';
       el.outerHTML = cardHtml(agent, { newest: el.classList.contains('newest') });
       const target = refocus && (document.querySelector(selector) || { querySelector: () => null }).querySelector(refocus);
       if (target) target.focus();
@@ -4357,6 +4423,9 @@
         }
       }
       latestAgents = mergedAgents;
+      for (const k of [...expandedShellKeys]) {
+        if (!mergedAgents.some(a => agentKey(a) === k)) expandedShellKeys.delete(k);
+      }
       if (killState.busy && !mergedAgents.some(a => agentKey(a) === killState.key)) killState = KILL_IDLE;
       if (!routeSettled) {
         routeSettled = true;
@@ -4544,7 +4613,17 @@
       if (!card) return;
       if (event.target.closest('[data-kill]')) return onCardKill(card.dataset.key);
       const agent = latestAgents.find(a => agentKey(a) === card.dataset.key);
-      if (!agent || !agent.tracked) return;
+      if (!agent) return;
+      if (!agent.tracked || category(agent) === 'shell') {
+        if (shellLines(agent).length <= SHELL_PREVIEW_COLLAPSED) return;
+        const picked = typeof window.getSelection === 'function' ? String(window.getSelection()) : '';
+        if (picked && !event.target.closest('[data-shell-toggle]')) return;
+        const key = agentKey(agent);
+        if (expandedShellKeys.has(key)) expandedShellKeys.delete(key);
+        else expandedShellKeys.add(key);
+        replaceCard(key);
+        return;
+      }
       if (event.target.closest('[data-later]')) return onLater(agent);
       openSheet(agent);
     });

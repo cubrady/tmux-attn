@@ -3703,4 +3703,71 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.match(box.innerHTML, /id="usage-panel"[^>]*hidden/);
 });
 
+test('untracked shell cards show last 3 lines and toggle inline up to 12 lines without opening the sheet', () => {
+  const lines12 = Array.from({ length: 12 }, (_, i) => `2026-10-28T21:00:${String(i + 1).padStart(2, '0')} #<${i + 1}>`);
+  const shell12 = {
+    ...agent('lab', 'SHELL', false),
+    pane: '%10',
+    pid: '41440',
+    project: 'jkbb',
+    preview: { users: [], agent: '', lines: lines12 },
+  };
+  const shell2 = {
+    ...agent('lab', 'SHELL', false),
+    pane: '%11',
+    pid: '41441',
+    project: 'short-shell',
+    preview: { users: [], agent: '', lines: ['prompt $ ls', 'README.md'] },
+  };
+  let latestHtml = '';
+  const cardNode = {
+    dataset: { key: 'lab|%10|41440' },
+    classList: { contains: () => false },
+    contains: () => true,
+    set outerHTML(html) { latestHtml = html; },
+    get outerHTML() { return latestHtml; },
+  };
+  const ui = dashboard({
+    document: {
+      querySelector: sel => sel.includes('lab|%10|41440') ? cardNode : null,
+    },
+  });
+  ui.render({ hosts: [{ name: 'lab', ok: true }], agents: [shell12, shell2] });
+  const list = ui.elements.get('list');
+  // Short shell (<= 3 lines) renders lines with no toggle button and no expandable class.
+  assert.match(list.innerHTML, /prompt \$ ls\nREADME\.md/);
+  assert.equal((list.innerHTML.match(/data-shell-toggle/g) || []).length, 1);
+  // 12-line shell starts collapsed showing only the last 3 lines (#10, #11, #12) with HTML escaped.
+  assert.match(list.innerHTML, /class="card shell expandable" data-key="lab\|%10\|41440"/);
+  assert.doesNotMatch(list.innerHTML, /#&lt;9&gt;/);
+  assert.match(list.innerHTML, /#&lt;10&gt;\n.*#&lt;11&gt;\n.*#&lt;12&gt;/);
+  assert.match(list.innerHTML, /data-shell-toggle aria-expanded="false">展開 12 行<\/button>/);
+
+  // Clicking the shell card expands inline to all 12 lines and never opens the reply sheet.
+  list.listeners.click({
+    target: {
+      closest: sel => sel === '.card[data-key]' ? cardNode : sel === '[data-shell-toggle]' ? {} : null,
+    },
+  });
+  assert.equal(ui.elements.get('sheet-title').textContent, '');
+  assert.match(latestHtml, /class="shell-preview expanded"/);
+  assert.match(latestHtml, /#&lt;1&gt;[\s\S]*#&lt;12&gt;/);
+  assert.match(latestHtml, /data-shell-toggle aria-expanded="true">收合<\/button>/);
+
+  // Subsequent poll renders preserve the expanded state.
+  ui.render({ hosts: [{ name: 'lab', ok: true }], agents: [shell12, shell2] });
+  assert.match(list.innerHTML, /class="shell-preview expanded"/);
+
+  // Clicking again collapses back to 3 lines.
+  list.listeners.click({
+    target: {
+      closest: sel => sel === '.card[data-key]' ? cardNode : null,
+    },
+  });
+  assert.doesNotMatch(latestHtml, /class="shell-preview expanded"/);
+  assert.doesNotMatch(latestHtml, /#&lt;9&gt;/);
+  assert.match(latestHtml, /data-shell-toggle aria-expanded="false">展開 12 行<\/button>/);
+});
+
+
 

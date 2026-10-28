@@ -972,6 +972,57 @@ def pane_tasks(con, row):
     return transcript_tasks(resolve_transcript_path(con, row, row), row.get('agent') or '')
 
 
+SHELL_PREVIEW_COLLAPSED_LINES = 3
+SHELL_PREVIEW_EXPANDED_LINES = 12
+SHELL_PREVIEW_LINE_CHARS = 240
+_DEFAULT_TMUX = tmux
+
+
+def _normalize_shell_lines(raw_lines, max_lines=SHELL_PREVIEW_EXPANDED_LINES, line_limit=SHELL_PREVIEW_LINE_CHARS):
+    if not isinstance(raw_lines, list):
+        return []
+    lines = []
+    for raw in raw_lines:
+        if not isinstance(raw, str):
+            continue
+        cleaned = _ANSI_ESCAPE_RE.sub('', raw).replace('\r', '').rstrip()
+        if not cleaned.strip():
+            continue
+        cleaned = ''.join(ch if ch == '\t' or ord(ch) >= 32 else ' ' for ch in cleaned).rstrip()
+        if not cleaned:
+            continue
+        if len(cleaned) > line_limit:
+            cleaned = cleaned[:line_limit - 1].rstrip() + '…'
+        lines.append(cleaned)
+    return lines[-max_lines:]
+
+
+def shell_pane_preview(pane, sock=None, max_lines=SHELL_PREVIEW_EXPANDED_LINES):
+    """Capture recent non-empty terminal lines for an untracked shell/utility pane."""
+    empty = {'users': [], 'agent': ''}
+    if not pane:
+        return empty
+    if sock and tmux is _DEFAULT_TMUX and not Path(sock).exists():
+        return empty
+    raw = tmux('capture-pane', '-p', '-J', '-t', pane, '-S', '-40', check=False, sock=sock)
+    if not raw:
+        return empty
+    lines = _normalize_shell_lines(str(raw).splitlines(), max_lines=max_lines)
+    if not lines:
+        return empty
+    return {'users': [], 'agent': '', 'lines': lines}
+
+
+def sanitized_shell_preview(preview):
+    """Validate optional terminal tail lines on untracked shell pane previews."""
+    if not isinstance(preview, dict):
+        return {'users': [], 'agent': ''}
+    lines = _normalize_shell_lines(preview.get('lines'))
+    if not lines:
+        return {'users': [], 'agent': ''}
+    return {'users': [], 'agent': '', 'lines': lines}
+
+
 def sanitized_tasks(agent):
     """Validate optional task list summaries on local or peer /api/agents payloads."""
     if not isinstance(agent, dict) or not agent.get('tracked'):
@@ -3100,6 +3151,8 @@ def tag_host(payload, host):
         item.pop('tasks', None)
         if safe_tasks is not None:
             item['tasks'] = safe_tasks
+        if not item.get('tracked', True) or item.get('state') == 'SHELL':
+            item['preview'] = sanitized_shell_preview(item.get('preview'))
         agents.append(item)
     # Reclassify older peers too; their summary may still count viewed results as review.
     return agents, attention_summary(agents)
@@ -4247,7 +4300,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'severity': '',
             'source': 'shell',
             'reason': f'未追蹤 · 前景 {command or "shell"}',
-            'preview': {'users': [], 'agent': ''},
+            'preview': shell_pane_preview(meta['pane'], sock=sock),
             'updated': 0,
             'age': '',
         })
