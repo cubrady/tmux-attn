@@ -168,6 +168,18 @@ test('agent chips show only live tracked types, combine Cursor aliases and exclu
   assert.doesNotMatch(html.match(/\.agent-filter\s*\{[^}]*\}/s)[0], /min-height/);
 });
 
+test('OpenCode has its own filter label and CLI icon', () => {
+  const ui = dashboard();
+  ui.render({ agents: [filterSession('opencode')] });
+  assert.match(ui.elements.get('agent-filters').innerHTML,
+    /data-agent-filter="opencode"[^>]*>OpenCode/);
+  assert.match(ui.elements.get('list').innerHTML,
+    /class="cli sm opencode"[^>]*>.*?src="\/icons\/opencode\.svg"/);
+  pickAgent(ui, 'opencode');
+  assert.match(ui.elements.get('list').innerHTML, /work-opencode/);
+  assert.match(ui.elements.get('meta').textContent, /Agent OpenCode/);
+});
+
 test('agent selection switches directly and filters status, later counts and bare panes', () => {
   const ui = dashboard();
   ui.render({ agents: [filterSession('codex', 'work', 'WAIT'), filterSession('claude'),
@@ -372,7 +384,7 @@ test('review cards show the agent icon without restoring host chips or sheet tar
 
 test('cards map every supported coding agent to its icon and skip non-agent panes', () => {
   const ui = dashboard(() => new Promise(() => {}));
-  const expected = { claude: 'claude', codex: 'codex', pi: 'pi', agent: 'agent', cursor: 'agent' };
+  const expected = { claude: 'claude', codex: 'codex', pi: 'pi', agent: 'agent', cursor: 'agent', opencode: 'opencode' };
   for (const [cli, icon] of Object.entries(expected)) {
     ui.render({ agents: [{ ...agent('', 'RUNNING'), cli }] });
     assert.match(ui.elements.get('list').innerHTML, new RegExp(`class="cli sm ${icon}"[^>]*>.*?src="/icons/${icon}\\.svg"`), cli);

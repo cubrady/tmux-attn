@@ -46,6 +46,24 @@
 - WAIT：`ui_prompt_start` / `ui_prompt_end`（專為 host/status 區分「等使用者」）
 - `ui_prompt_*` 包住 `ctx.ui.select|confirm|input|editor|custom`；非此路徑需 observer 備援
 
+### OpenCode
+
+- 文件：https://opencode.ai/v2/docs/plugins/ （V2 plugin / TUI plugin API）
+- OpenCode V2 的 TUI plugin 由 TUI 程序載入，因此是唯一能可靠知道「這個 TUI 在哪個 tmux pane」的位置；
+  安裝器寫入全域 `~/.config/opencode/plugins/tmux-attention/tui.ts`。
+- 使用者輸入：`session.inbox.enqueued`（`item.type == "user"`）→ `UserPromptSubmit`（附 prompt）
+- RUNNING：`session.execution.started`、`session.step.started`、`session.status`（`busy` / `retry`）
+- WAIT：`permission.asked` → `PermissionRequest`；`permission.replied` → `PostToolUse`
+- 完成／錯誤：`session.execution.succeeded` / `session.idle` / `session.status`（`idle`）→ `Stop`；
+  `session.execution.failed` → `StopFailure`；`session.execution.interrupted` → `Interrupt`
+- 結束：`session.deleted` → `SessionEnd`
+- 標題／模型：`session.created`、`session.renamed`、`session.model.selected`、`session.step.started`
+  以 `opencode_meta` 寫入 `hint_title` / `hint_model` / `hint_effort`；只更新顯示，不改變 attention revision。
+- OpenCode 的儲存格式不是可沿用的 transcript；`resolve_transcript_path` 對 OpenCode 一律回空，
+  不借用同專案的 Claude / Codex / Cursor / Pi 對話。
+- 限制：`opencode run` 與其他無 TUI 的模式沒有 pane，不納入；同一個 TUI 同時開多個 session 時，
+  以目前顯示的 session 為 pane 狀態，背景 session 不覆寫。
+
 ## 缺口與修復對照（P0–P2）
 
 | ID | 嚴重度 | 問題 | 修復方向 |

@@ -25,6 +25,10 @@ class InstallTmuxCompatibilityTests(unittest.TestCase):
             profile.mkdir()
             default = home / '.codex'
             default.mkdir()
+            opencode_plugin = home / '.config/opencode/plugins/tmux-attention/tui.ts'
+            opencode_plugin.parent.mkdir(parents=True)
+            prior_opencode_plugin = 'export default "prior plugin"\n'
+            opencode_plugin.write_text(prior_opencode_plugin)
             # Invalid TOML proves the default profile is never read for this installation.
             default_config = 'default profile must not be read\n'
             (default / 'config.toml').write_text(default_config)
@@ -64,10 +68,16 @@ class InstallTmuxCompatibilityTests(unittest.TestCase):
                 self.assertIn('Stop', installed['codex_hooks_untrusted'])
                 self.assertEqual((default / 'config.toml').read_text(), default_config)
                 self.assertFalse((default / 'hooks.json').exists())
+                installed_plugin = opencode_plugin.read_text()
+                self.assertIn('event", "opencode"', installed_plugin)
+                self.assertIn(str(Path(sys.executable)), installed_plugin)
+                self.assertNotIn('__PYTHON__', installed_plugin)
+                self.assertNotIn('__ATTENTION__', installed_plugin)
                 manifest = json.loads((Path(installed['backup']) / 'manifest.json').read_text())
                 backed_up = {entry['path'] for entry in manifest}
                 self.assertIn(str(profile / 'config.toml'), backed_up)
                 self.assertIn(str(profile / 'hooks.json'), backed_up)
+                self.assertIn(str(opencode_plugin), backed_up)
                 self.assertNotIn(str(default / 'config.toml'), backed_up)
                 # Rollback follows its manifest even when the invoking profile has changed.
                 subprocess.run(
@@ -77,6 +87,7 @@ class InstallTmuxCompatibilityTests(unittest.TestCase):
                 )
                 self.assertEqual((profile / 'config.toml').read_text(), original_config)
                 self.assertEqual((profile / 'hooks.json').read_text(), original_hooks)
+                self.assertEqual(opencode_plugin.read_text(), prior_opencode_plugin)
                 self.assertEqual((default / 'config.toml').read_text(), default_config)
                 self.assertFalse((base / 'another profile').exists())
             finally:

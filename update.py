@@ -37,7 +37,7 @@ RUNTIME_FILES = (
 )
 RUNTIME_DIRS = ('web/icons',)
 # Changing these means tmux or agent hooks may need re-installing, which update never does silently.
-INSTALLER_INPUTS = ('install.py', 'bootstrap.sh', 'pi-attention.ts')
+INSTALLER_INPUTS = ('install.py', 'bootstrap.sh', 'pi-attention.ts', 'opencode-attention.ts')
 WEB_LABEL = 'ai.tmux-attn.web'
 WEB_UNIT = 'tmux-attn-web'
 HEALTH_WAIT_S = 20.0

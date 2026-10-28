@@ -93,10 +93,12 @@ python = sys.executable
 app = DEST / 'attention.py'
 config = HOME / '.config/tmux-attn/sidebar.conf'
 web_index = DEST / 'web' / 'index.html'
+opencode_plugin = HOME / '.config/opencode/plugins/tmux-attention/tui.ts'
 paths = [HOME/'.tmux.conf', HOME/'.claude/settings.json', codex_hooks_path, codex_path, HOME/'.pi/agent/extensions/tmux-attention.ts', config, HOME/'.local/bin/tmux-attn', app, DEST/'codex_observer.py']
 paths.append(alias_config)
 paths.append(HOME/'.cursor/hooks.json')
 paths.append(web_index)
+paths.append(opencode_plugin)
 paths.extend([
     DEST/'web/icons', DEST/'install_web_service.sh',
     DEST/'contrib/systemd/tmux-attn-web.service',
@@ -180,6 +182,9 @@ paths[6].chmod(0o755)
 pi = (ROOT/'pi-attention.ts').read_text().replace('__PYTHON__', python).replace('__ATTENTION__', str(app))
 paths[4].parent.mkdir(parents=True, exist_ok=True)
 paths[4].write_text(pi)
+opencode = (ROOT/'opencode-attention.ts').read_text().replace('__PYTHON__', python).replace('__ATTENTION__', str(app))
+opencode_plugin.parent.mkdir(parents=True, exist_ok=True)
+opencode_plugin.write_text(opencode)
 
 def snake_event(name):
     out = []
@@ -351,4 +356,5 @@ print(json.dumps({
     'web_service': str(web_service),
     'codex_home': str(codex_root),
     'codex_hooks_untrusted': codex_trust_missing,
+    'opencode_plugin': str(opencode_plugin),
 }, indent=2))

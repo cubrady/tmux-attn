@@ -2487,7 +2487,7 @@
     let hostFilters = new Set(); // empty = show all hosts
     const refreshPendingHosts = new Set();
     const AGENT_FILTER_STORE = 'tmux-attn:agent-filter';
-    const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor' };
+    const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode' };
     const USAGE_PROVIDERS = ['codex', 'claude', 'cursor'];
     const USAGE_POLL_MS = 60_000;
     let usageByProvider = new Map();
@@ -3085,7 +3085,7 @@
         if (sheetOpen && selectedKey === key) updateSheetLater(agent);
       }
     }
-    const CLI_ICONS = { claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi' };
+    const CLI_ICONS = { claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi', opencode: 'opencode' };
     function cliBadge(cli, small = false) {
       const name = String(cli || '').toLowerCase();
       if (!Object.hasOwn(CLI_ICONS, name)) return '';
