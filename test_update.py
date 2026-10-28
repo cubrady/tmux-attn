@@ -547,6 +547,15 @@ class SystemServicesTests(unittest.TestCase):
             self.assertEqual(self.svc.web_endpoint(), ('0.0.0.0', 7788))
             self.svc.restart_web()
         self.assertEqual(self.calls[-1][:4], ['launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/ai.tmux-attn.web'])
+        wrapper_text = '''gui/502/ai.tmux-attn.web = {
+\targuments = {
+\t\t/bin/bash
+\t\t/Users/example/.local/share/tmux-attn/contrib/launchd/web-run.sh
+\t\t0.0.0.0
+\t\t7788
+\t}
+}'''
+        self.assertEqual(update.parse_web_endpoint(wrapper_text), ('0.0.0.0', 7788))
 
     def test_a_failing_restart_is_reported(self):
         with self.linux():

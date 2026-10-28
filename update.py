@@ -238,10 +238,10 @@ def backup_current(runtime, state, plan):
 # ---------------------------------------------------------------- services
 
 def parse_web_endpoint(text):
-    """`... web <host> <port>` as launchd or systemd print it -> (host, port) or None."""
+    """`... web <host> <port>` or `.../web-run.sh <host> <port>` as launchd/systemd print it -> (host, port) or None."""
     tokens = [t for t in re.split(r'[\s;{}=]+', text) if t]
     for i, token in enumerate(tokens[:-2]):
-        if token == 'web' and tokens[i + 2].isdigit():
+        if (token == 'web' or token.endswith('/web-run.sh')) and tokens[i + 2].isdigit():
             return tokens[i + 1], int(tokens[i + 2])
     return None
 
