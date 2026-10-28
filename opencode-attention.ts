@@ -15,6 +15,7 @@ export default Plugin.define({
     let waiting = false;
     let completion = "";
     let lastText = "";
+    let stepFresh = false;
     const subscriptions = [];
 
     const reset = () => {
@@ -22,6 +23,7 @@ export default Plugin.define({
       waiting = false;
       completion = "";
       lastText = "";
+      stepFresh = false;
     };
     const subscribe = (type, handler) => {
       subscriptions.push(context.data.on(type, handler));
@@ -170,6 +172,7 @@ export default Plugin.define({
     subscribe("session.step.started", (event) => {
       const sid = event.data.sessionID;
       if (!accept(sid)) return;
+      stepFresh = true;
       if (!running || waiting) {
         started(sid, event.data.model);
       } else if (event.data.model) {
@@ -183,6 +186,7 @@ export default Plugin.define({
       waiting = false;
       completion = "";
       lastText = "";
+      stepFresh = false;
       send("UserPromptSubmit", { prompt: event.data.item.payload?.text || "" }, sid);
     });
     subscribe("session.execution.started", (event) => {
@@ -190,6 +194,7 @@ export default Plugin.define({
       if (!accept(sid)) return;
       if (!running || waiting) {
         lastText = "";
+        stepFresh = false;
         started(sid);
       }
     });
@@ -205,7 +210,8 @@ export default Plugin.define({
       if (!accept(sid)) return;
       const text = String(event.data.text || "").trim();
       if (!text) return;
-      lastText = (lastText ? `${lastText}\n\n` : "") + text;
+      lastText = !stepFresh && lastText ? `${lastText}\n\n${text}` : text;
+      stepFresh = false;
       if (lastText.length > 20000) lastText = lastText.slice(-12000);
     });
     subscribe("session.execution.succeeded", (event) => {

@@ -21,6 +21,16 @@ export default function (pi: ExtensionAPI) {
     }
   };
   let lastPrompt = "";
+  const isChildSession = (ctx?: any): boolean => {
+    try {
+      if (process.argv.some((arg) => arg === "-p" || arg === "--print" || arg === "--mode")) {
+        return true;
+      }
+      return Boolean(ctx?.sessionManager?.getHeader?.()?.parentSession);
+    } catch {
+      return false;
+    }
+  };
   const sessionPath = (ctx: any): string => {
     try {
       return ctx?.sessionManager?.getSessionFile?.() || "";
@@ -29,7 +39,7 @@ export default function (pi: ExtensionAPI) {
     }
   };
   const report = (event: string, data: object = {}, ctx?: any) => {
-    if (!process.env.TMUX || !process.env.TMUX_PANE) return;
+    if (!process.env.TMUX || !process.env.TMUX_PANE || isChildSession(ctx)) return;
     beat();
     const transcript_path = sessionPath(ctx);
     const payload = transcript_path ? { transcript_path, ...data } : data;

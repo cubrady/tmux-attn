@@ -356,11 +356,34 @@ def pi_project_dir(cwd):
     return base / 'sessions' / f'--{slug}--'
 
 
+def pi_transcript_meta(path):
+    try:
+        with Path(path).open(errors='replace') as source:
+            header = json.loads(source.readline(1024 * 1024))
+        return header if isinstance(header, dict) and header.get('type') == 'session' else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def pi_child_transcript(path):
+    meta = pi_transcript_meta(path) if path else None
+    return bool(meta and meta.get('parentSession'))
+
+
+def pi_child_hook(data):
+    if not isinstance(data, dict):
+        return False
+    if data.get('parent_session'):
+        return True
+    path = data.get('transcript_path') or ''
+    return bool(path and pi_child_transcript(path))
+
+
 def latest_pi_transcript(cwd):
     directory = pi_project_dir(cwd)
     if not directory or not directory.is_dir():
         return ''
-    files = [p for p in directory.glob('*.jsonl') if p.is_file()]
+    files = [p for p in directory.glob('*.jsonl') if p.is_file() and not pi_child_transcript(p)]
     if not files:
         return ''
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -734,7 +757,7 @@ def _build_tasks_summary(raw_items):
     }
 
 
-def _extract_task_list_from_line(line):
+def _extract_raw_tasks_from_line(line):
     if '"todo"' not in line and '"TodoWrite"' not in line:
         return False, None
     try:
@@ -747,27 +770,63 @@ def _extract_task_list_from_line(line):
     if row.get('type') == 'message' and message.get('role') == 'toolResult' and message.get('toolName') == 'todo':
         details = message.get('details')
         if isinstance(details, dict) and isinstance(details.get('tasks'), list):
-            return True, _build_tasks_summary(details['tasks'])
+            return True, _normalize_task_items(details['tasks'])
     content = message.get('content')
     if isinstance(content, list):
         for part in reversed(content):
             if isinstance(part, dict) and part.get('type') == 'tool_use' and part.get('name') == 'TodoWrite':
                 inp = part.get('input')
                 if isinstance(inp, dict) and isinstance(inp.get('todos'), list):
-                    return True, _build_tasks_summary(inp['todos'])
+                    return True, _normalize_task_items(inp['todos'])
     return False, None
 
 
+def _extract_task_list_from_line(line):
+    found, items = _extract_raw_tasks_from_line(line)
+    return (True, _build_tasks_summary(items)) if found else (False, None)
+
+
+def _is_transcript_user_turn_line(raw_line):
+    if b'"user"' not in raw_line:
+        return False
+    try:
+        row = json.loads(raw_line.decode('utf-8', errors='replace'))
+    except ValueError:
+        return False
+    if not isinstance(row, dict) or row.get('isSidechain') or row.get('isMeta'):
+        return False
+    if row.get('type') == 'user':
+        message = row.get('message')
+        content = message.get('content') if isinstance(message, dict) else message
+        text = content_to_text(content).strip()
+        return bool(text and not user_text_is_noise(text))
+    if row.get('type') == 'message':
+        message = row.get('message') if isinstance(row.get('message'), dict) else {}
+        if message.get('role') == 'user':
+            text = content_to_text(message.get('content')).strip()
+            return bool(text and not user_text_is_noise(text))
+    return False
+
+
 def _scan_transcript_tasks_reverse(path, min_offset=0):
-    """Scan backwards from EOF to min_offset for the latest todo snapshot."""
+    """Scan backwards from EOF for the current turn's active task list.
+
+    Tasks that were already completed before the latest user prompt belong to an
+    earlier finished turn and are excluded so Web matches the live TUI widget.
+    """
     path = Path(path)
+    saw_user_before_latest = False
+    latest_items = None
+    saw_user_after_latest = False
+    prior_items = None
     try:
         with path.open('rb') as f:
             size = f.seek(0, 2)
             floor = max(0, min_offset, size - TASK_SCAN_MAX_BYTES)
             pos = size
             carry = b''
-            while pos > floor:
+            done = False
+            while pos > floor and not done:
                 read_start = max(floor, pos - TASK_CHUNK_BYTES)
                 f.seek(read_start)
                 chunk = f.read(pos - read_start) + carry
@@ -783,15 +842,37 @@ def _scan_transcript_tasks_reverse(path, min_offset=0):
                     carry = b''
                     body = chunk
                 for raw_line in reversed(body.splitlines()):
-                    if b'"todo"' not in raw_line and b'"TodoWrite"' not in raw_line:
-                        continue
-                    found, summary = _extract_task_list_from_line(raw_line.decode('utf-8', errors='replace'))
-                    if found:
-                        return True, summary
+                    if b'"todo"' in raw_line or b'"TodoWrite"' in raw_line:
+                        found, items = _extract_raw_tasks_from_line(raw_line.decode('utf-8', errors='replace'))
+                        if found:
+                            if latest_items is None:
+                                latest_items = items
+                                if saw_user_before_latest:
+                                    prior_items = items
+                                    done = True
+                                    break
+                            elif saw_user_after_latest:
+                                prior_items = items
+                                done = True
+                                break
+                            continue
+                    if _is_transcript_user_turn_line(raw_line):
+                        if latest_items is None:
+                            saw_user_before_latest = True
+                        else:
+                            saw_user_after_latest = True
                 pos = read_start
     except OSError:
         return False, None
-    return False, None
+    if latest_items is None:
+        return False, None
+    pre_completed = {item['id'] for item in (prior_items or []) if item['status'] == 'completed'}
+    active_items = [
+        {**item, 'blocked_by': [dep for dep in item.get('blocked_by', ()) if dep not in pre_completed]}
+        for item in latest_items
+        if item['id'] not in pre_completed
+    ]
+    return True, _build_tasks_summary(active_items)
 
 
 def transcript_tasks(path, agent=''):
@@ -811,13 +892,7 @@ def transcript_tasks(path, agent=''):
     cached = _TASK_CACHE.get(key)
     if cached and cached[0] == signature:
         return cached[1]
-    if cached and stat_result.st_size > cached[0][1]:
-        min_offset = max(0, cached[0][1] - TASK_OVERLAP_BYTES)
-        found, result = _scan_transcript_tasks_reverse(key, min_offset=min_offset)
-        if not found:
-            result = cached[1]
-    else:
-        _, result = _scan_transcript_tasks_reverse(key, min_offset=0)
+    _, result = _scan_transcript_tasks_reverse(key, min_offset=0)
     if len(_TASK_CACHE) >= _TASK_CACHE_LIMIT:
         _TASK_CACHE.clear()
     _TASK_CACHE[key] = (signature, result)
@@ -922,39 +997,64 @@ def remember_preview(con, sock, pane, pid, *, user=None, agent=None, transcript_
     row = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
     if not row or (expected_revision is not None and row['revision'] != expected_revision):
         return
+    old_path = (row['transcript_path'] if 'transcript_path' in row.keys() else '') or ''
+    incoming_path = clean(transcript_path or '', 500) if transcript_path else ''
+    switched_transcript = bool(old_path and incoming_path and incoming_path != old_path)
     users = []
-    try:
-        users = list(json.loads(row['preview_users'] if 'preview_users' in row.keys() else '[]') or [])
-    except (TypeError, ValueError):
-        users = []
+    if not switched_transcript:
+        try:
+            users = list(json.loads(row['preview_users'] if 'preview_users' in row.keys() else '[]') or [])
+        except (TypeError, ValueError):
+            users = []
     if user and not user_text_is_noise(user):
         clipped = clip_preview(user, PREVIEW_CHARS_FULL)
         if not users or users[-1] != clipped:
             users = (users + [clipped])[-PREVIEW_USERS:]
+    prior_agent = '' if switched_transcript else (row['preview_agent'] if 'preview_agent' in row.keys() else '')
     agent_text = (
         clip_preview(agent, PREVIEW_CHARS_FULL) if agent and str(agent).strip()
-        else (row['preview_agent'] if 'preview_agent' in row.keys() else '')
+        else prior_agent
     )
-    path = clean(transcript_path or '', 500) if transcript_path else (row['transcript_path'] if 'transcript_path' in row.keys() else '')
-    baseline_mtime = row['preview_mtime']
+    path = incoming_path or old_path
+    baseline_mtime = 0 if switched_transcript else row['preview_mtime']
     if (user or agent) and path:
         try:
             baseline_mtime = Path(path).stat().st_mtime
         except OSError:
             pass
+    prior_preview_revision = 0 if switched_transcript else row['preview_revision']
     with con:
         con.execute(
             '''UPDATE panes SET preview_users=?, preview_agent=?, preview_revision=?, preview_mtime=?, transcript_path=CASE
                 WHEN ?<>'' THEN ? ELSE transcript_path END
                WHERE socket=? AND pane=? AND pid=? AND revision=?''',
             (json.dumps(users, ensure_ascii=False), agent_text or '',
-             row['revision'] if agent and str(agent).strip() else row['preview_revision'],
+             row['revision'] if agent and str(agent).strip() else prior_preview_revision,
              baseline_mtime, path, path, sock, pane, pid, row['revision']),
         )
         if agent and isinstance(agent, str) and agent.strip():
             con.execute('''UPDATE panes SET handoff_response=?,handoff_revision=?
                            WHERE socket=? AND pane=? AND pid=? AND revision=?''',
                         (agent[:INBOX_SCAN_CHARS + 1], row['revision'], sock, pane, pid, row['revision']))
+        elif switched_transcript:
+            con.execute('''UPDATE panes SET handoff_response='',handoff_revision=0
+                           WHERE socket=? AND pane=? AND pid=? AND revision=?''',
+                        (sock, pane, pid, row['revision']))
+
+
+def _select_unclaimed_transcript(candidates, claimed, cached_agent='', agent=''):
+    unclaimed = [str(p) for p in candidates if str(p) not in claimed]
+    if not unclaimed:
+        return ''
+    if cached_agent:
+        for candidate in unclaimed[:8]:
+            _, cand_agent = read_transcript(candidate, agent)
+            if cand_agent and (
+                clip_preview(cand_agent, len(cached_agent)) == cached_agent
+                or clip_preview(cached_agent, len(cand_agent)) == cand_agent
+            ):
+                return candidate
+    return unclaimed[0]
 
 
 def resolve_transcript_path(con, row, meta):
@@ -967,8 +1067,12 @@ def resolve_transcript_path(con, row, meta):
     # could win the existence check below.
     if agent == 'opencode':
         return ''
-    # A new Claude session can bind its transcript before the file is created.
-    if path and (row.get('agent') == 'claude' or Path(path).is_file()):
+    if agent == 'pi' and path and Path(path).is_file() and pi_child_transcript(path):
+        header = pi_transcript_meta(path) or {}
+        parent = header.get('parentSession') or ''
+        path = parent if parent and not pi_child_transcript(parent) else ''
+    # A new Claude, Pi, or Cursor session can bind its transcript before the file is created.
+    if path and (agent in ('claude', 'pi', 'cursor') or Path(path).is_file()):
         return path
     mapping = con.execute(
         'SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
@@ -980,17 +1084,64 @@ def resolve_transcript_path(con, row, meta):
     if agent == 'codex':
         return ''
     cwd = (meta or {}).get('path') or ''
+    claimed = set()
+    if con is not None and row.get('socket'):
+        try:
+            claimed = {
+                r['transcript_path']
+                for r in con.execute(
+                    "SELECT pane, pid, transcript_path FROM panes WHERE socket=? AND transcript_path<>''",
+                    (row['socket'],),
+                )
+                if (r['pane'], r['pid']) != (row.get('pane'), row.get('pid'))
+            }
+        except sqlite3.Error:
+            claimed = set()
+    cached_agent = (row.get('preview_agent') if 'preview_agent' in row.keys() else '') or ''
     if agent == 'pi':
         found = latest_pi_transcript(cwd)
+        if found and (found in claimed or cached_agent):
+            directory = pi_project_dir(cwd)
+            if directory and directory.is_dir():
+                files = sorted(
+                    (p for p in directory.glob('*.jsonl') if p.is_file() and not pi_child_transcript(p)),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                picked = _select_unclaimed_transcript(files, claimed, cached_agent, 'pi')
+                if picked or found in claimed:
+                    found = picked
         if found:
             return found
         return path if path and Path(path).is_file() else ''
     if agent == 'cursor':
         found = latest_cursor_transcript(cwd)
+        if found and (found in claimed or cached_agent):
+            directory = cursor_project_dir(cwd)
+            if directory and directory.is_dir():
+                files = sorted(
+                    (p for p in directory.rglob('*.jsonl') if p.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                picked = _select_unclaimed_transcript(files, claimed, cached_agent, 'cursor')
+                if picked or found in claimed:
+                    found = picked
         if found:
             return found
     if agent in ('claude', 'cursor') or cwd:
         found = latest_claude_transcript(cwd)
+        if found and (found in claimed or cached_agent):
+            directory = claude_project_dir(cwd)
+            if directory and directory.is_dir():
+                files = sorted(
+                    (p for p in directory.glob('*.jsonl') if p.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                picked = _select_unclaimed_transcript(files, claimed, cached_agent, 'claude')
+                if picked or found in claimed:
+                    found = picked
         if found:
             return found
     return path if path and Path(path).is_file() else ''
@@ -1099,10 +1250,34 @@ def pane_conversation_preview(con, row, meta=None, limit=PREVIEW_CHARS, snapshot
     # A hook's current result is authoritative; a lagging transcript must not replace it.
     hook_authoritative = (row['state'] == 'IDLE' and row['needs_review']
                           and preview_revision == row['revision'] and bool(agent_text))
-    if path and hook_authoritative and not users:
+    if path and hook_authoritative and (not users or not (row.get('transcript_path') or '')):
         parsed = conversation_preview(path, row.get('agent') or '', limit=PREVIEW_CHARS_FULL)
-        if parsed['users']:
+        same_agent = bool(parsed['agent']) and (
+            clip_preview(parsed['agent'], len(agent_text)) == agent_text
+            or clip_preview(agent_text, len(parsed['agent'])) == parsed['agent']
+        )
+        if parsed['users'] and (not users or same_agent):
             users = parsed['users']
+            if same_agent and len(parsed['agent']) > len(agent_text):
+                agent_text = parsed['agent']
+            if con is not None and same_agent:
+                try:
+                    con.execute('PRAGMA busy_timeout = 50')
+                    with con:
+                        con.execute(
+                            '''UPDATE panes SET preview_users=?, preview_agent=?, transcript_path=CASE
+                                WHEN transcript_path='' THEN ? ELSE transcript_path END
+                               WHERE socket=? AND pane=? AND pid=? AND revision=?''',
+                            (json.dumps(users, ensure_ascii=False), agent_text, path,
+                             row['socket'], row['pane'], row['pid'], row['revision']),
+                        )
+                except sqlite3.OperationalError:
+                    pass
+                finally:
+                    try:
+                        con.execute('PRAGMA busy_timeout = 3000')
+                    except sqlite3.OperationalError:
+                        pass
     elif path and not hook_authoritative:
         try:
             mtime = Path(path).stat().st_mtime
@@ -2289,9 +2464,9 @@ def event_command(agent, event):
         # Cursor imports Claude hooks; retain the identity of the actual caller.
         if agent == 'claude' and (os.environ.get('CURSOR_VERSION') or data.get('cursor_version')):
             agent = 'cursor'
-        # Child transcripts share the parent's session_id but have their own id.
+        # Child transcripts share the parent's session_id/pane but have their own id.
         # Their completion/tool hooks must never replace the visible parent's state.
-        if agent == 'codex' and codex_child_hook(data):
+        if (agent == 'codex' and codex_child_hook(data)) or (agent == 'pi' and pi_child_hook(data)):
             print('{}')
             return
         hints = event_hints(agent, data)
@@ -2321,21 +2496,31 @@ def event_command(agent, event):
                 existing = con.execute('SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock,pane,pid)).fetchone()
                 session_changed = bool(session_key and existing and existing['event_key'] and existing['event_key'] != session_key)
                 recorded_revision = None
+                transcript = data.get('transcript_path') or ''
+                is_start_event = event in ('SessionStart', 'session_start', 'sessionStart')
                 clear_session = (agent == 'claude' and event in ('SessionStart', 'session_start')
                                  and data.get('source') == 'clear')
+                existing_unread = bool(existing and is_unread(dict(existing)))
+                reset_session = clear_session or bool(
+                    is_start_event and existing and not existing_unread
+                    and existing['state'] not in ('RUNNING', 'WAIT')
+                    and ((transcript and clean(transcript, 500) != (existing['transcript_path'] or ''))
+                         or existing['agent'] != agent
+                         or existing['reason'] == 'Agent exited')
+                )
                 if event in ('SessionEnd','session_shutdown','sessionEnd') and existing:
-                    if existing['needs_review']:
+                    if existing_unread:
                         # Keep an unread completed response after the agent exits.
                         state = None
                     if existing['state'] in ('RUNNING','WAIT'):
                         state = ('IDLE', 'Agent exited; review current work', True)
-                if clear_session or event not in ('SessionStart','session_start','sessionStart') or not existing:
+                if reset_session or not is_start_event or not existing:
                     if state:
                         recorded_revision = record(con, sock, pane, pid, agent, *state,
                                                    event_key=(data.get('generation_id','') if agent == 'cursor'
                                                               else session_key if agent == 'opencode'
                                                               else data.get('turn_id','')),
-                                                   replace_identity=session_changed,
+                                                   replace_identity=session_changed or reset_session,
                                                    clear_source=session_changed)
                 user_text = hook_user_text(data) if event in (
                     'UserPromptSubmit', 'beforeSubmitPrompt', 'agent_start',
@@ -2343,17 +2528,16 @@ def event_command(agent, event):
                 agent_text = str(data.get('last_assistant_message') or '').strip() if event in (
                     'Stop', 'stop', 'agent_settled', 'StopFailure',
                 ) else ''
-                transcript = data.get('transcript_path') or ''
-                if clear_session and recorded_revision is not None:
-                    # Clearing starts a new conversation, even if its transcript is still empty.
+                if reset_session and recorded_revision is not None:
+                    # Starting a new conversation resets stale previews/tasks from the prior session.
                     with con:
                         # record() leaves the revision alone when the state did not change, so bump it here:
                         # a poll that read the row before the reset must not be able to write the old cache back.
                         con.execute('''UPDATE panes SET preview_users='[]',preview_agent='',preview_mtime=0,
-                            preview_revision=0,transcript_path=?,revision=revision+1
+                            preview_revision=0,handoff_response='',handoff_revision=0,transcript_path=?,revision=revision+1
                             WHERE socket=? AND pane=? AND pid=? AND revision=?''',
                             (clean(transcript, 500), sock, pane, pid, recorded_revision))
-                elif user_text or agent_text or transcript:
+                elif user_text or agent_text or (transcript and not (is_start_event and existing_unread and (existing['transcript_path'] or ''))):
                     if not con.execute('SELECT 1 FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone():
                         record(con, sock, pane, pid, agent, 'IDLE', 'Registered; no new work yet')
                     remember_preview(

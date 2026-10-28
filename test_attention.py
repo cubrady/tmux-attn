@@ -1934,6 +1934,118 @@ class ClaudeSessionResetTests(unittest.TestCase):
         self.assertEqual((row['preview_users'], row['preview_agent']), ('[]', ''))
         self.assertGreater(row['revision'], stale['revision'])
 
+    def test_reviewed_pane_resets_when_new_session_starts_in_same_pane(self):
+        self.seed('IDLE', agent='pi')
+        a.acknowledge(self.con, self.row())
+        before = self.row()
+        new_path = Path(self.tmp.name) / 'new-pi.jsonl'
+        # Even before new_path is flushed to disk, starting a new session on an already
+        # reviewed pane clears the old session's preview and binds the new transcript_path.
+        self.hook('session_start', agent='pi', transcript_path=str(new_path))
+        row = self.row()
+        self.assertEqual((row['state'], row['needs_review']), ('IDLE', 0))
+        self.assertGreater(row['revision'], before['revision'])
+        self.assertEqual((row['preview_users'], row['preview_agent'], row['transcript_path']),
+                         ('[]', '', str(new_path)))
+        with patch.object(a, 'latest_pi_transcript', return_value=str(self.old_path)) as discover:
+            self.assertEqual(a.pane_conversation_preview(self.con, row, {'path': '/project'}),
+                             {'users': [], 'agent': ''})
+            discover.assert_not_called()
+
+    def test_unread_pane_preserves_old_transcript_until_new_turn_starts(self):
+        self.seed('IDLE', agent='pi')
+        new_path = Path(self.tmp.name) / 'switched.jsonl'
+        self.hook('session_start', agent='pi', transcript_path=str(new_path))
+        row = self.row()
+        self.assertEqual(row['transcript_path'], str(self.old_path))
+        self.assertEqual(json.loads(row['preview_users']), ['Old task'])
+        # Starting a turn on the new transcript discards the prior session's preview history.
+        self.hook('agent_start', agent='pi', prompt='Fresh session task', transcript_path=str(new_path))
+        row = self.row()
+        self.assertEqual(row['transcript_path'], str(new_path))
+        self.assertEqual(json.loads(row['preview_users']), ['Fresh session task'])
+        self.assertEqual(row['preview_agent'], '')
+
+    def test_pi_child_hook_and_claimed_cwd_transcripts_never_contaminate_other_panes(self):
+        cwd = '/Volumes/work/proj/example-org/sample-clients'
+        pi_dir = Path(self.tmp.name) / 'sessions' / '--Volumes-work-proj-example-org-sample-clients--'
+        pi_dir.mkdir(parents=True)
+        sess_0 = pi_dir / 'session-0.jsonl'
+        sess_5 = pi_dir / 'session-5.jsonl'
+        child = pi_dir / 'session-child.jsonl'
+        sess_5.write_text('\n'.join(json.dumps(r) for r in [
+            {'type': 'session', 'version': 3, 'id': 's5', 'cwd': cwd},
+            {'type': 'message', 'message': {'role': 'user', 'content': 'Optimize History switching'}},
+            {'type': 'message', 'message': {'role': 'assistant', 'content': 'Committed 7121ec3'}},
+        ]) + '\n')
+        sess_0.write_text('\n'.join(json.dumps(r) for r in [
+            {'type': 'session', 'version': 3, 'id': 's0', 'cwd': cwd},
+            {'type': 'message', 'message': {'role': 'user', 'content': 'How to deploy to CF Worker?'}},
+            {'type': 'message', 'message': {'role': 'assistant', 'content': 'Committed a408622'}},
+        ]) + '\n')
+        child.write_text('\n'.join(json.dumps(r) for r in [
+            {'type': 'session', 'version': 3, 'id': 'sc', 'cwd': cwd, 'parentSession': str(sess_0)},
+            {'type': 'message', 'message': {'role': 'user', 'content': 'Subagent internal prompt'}},
+            {'type': 'message', 'message': {'role': 'assistant', 'content': 'Subagent internal reply'}},
+        ]) + '\n')
+        os.utime(sess_5, (1000, 1000))
+        os.utime(sess_0, (2000, 2000))
+        os.utime(child, (3000, 3000))
+        with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': self.tmp.name}):
+            # Child transcript is ignored by latest_pi_transcript and event_command.
+            self.assertEqual(a.latest_pi_transcript(cwd), str(sess_0))
+            self.seed('RUNNING', agent='pi')
+            before = self.row()
+            self.hook('agent_settled', agent='pi', last_assistant_message='Subagent internal reply',
+                      transcript_path=str(child))
+            self.assertEqual(self.row(), before)
+            # Pane %1 claims sess_0; unbound pane %2 in the same cwd resolves to sess_5 and heals its users.
+            a.record(self.con, 'socket', '%1', '100', 'pi', 'IDLE', 'Response finished; review needed', True)
+            a.remember_preview(self.con, 'socket', '%1', '100', user='How to deploy to CF Worker?',
+                               agent='Committed a408622', transcript_path=str(sess_0))
+            a.record(self.con, 'socket', '%2', '200', 'pi', 'IDLE', 'Response finished; review needed', True)
+            a.remember_preview(self.con, 'socket', '%2', '200', user='How to deploy to CF Worker?',
+                               agent='Committed 7121ec3')
+            row2 = dict(self.con.execute("SELECT * FROM panes WHERE pane='%2'").fetchone())
+            meta2 = {'pane': '%2', 'pid': '200', 'path': cwd}
+            self.assertEqual(a.resolve_transcript_path(self.con, row2, meta2), str(sess_5))
+            preview2 = a.pane_conversation_preview(self.con, row2, meta2)
+            self.assertEqual(preview2, {'users': ['Optimize History switching'], 'agent': 'Committed 7121ec3'})
+
+    def test_transcript_tasks_retires_prior_turn_completed_tasks(self):
+        path = Path(self.tmp.name) / 'tasks-turns.jsonl'
+        lines = [
+            {'type': 'session', 'version': 3, 'id': 's1', 'cwd': '/proj'},
+            {'type': 'message', 'message': {'role': 'user', 'content': 'Turn 1: redesign UI'}},
+            {'type': 'message', 'message': {'role': 'toolResult', 'toolName': 'todo', 'details': {'tasks': [
+                {'id': 1, 'subject': 'Audit UI', 'status': 'completed'},
+                {'id': 2, 'subject': 'Implement redesign', 'status': 'completed', 'blockedBy': [1]},
+            ]}}},
+            {'type': 'message', 'message': {'role': 'assistant', 'content': 'Done turn 1'}},
+            {'type': 'message', 'message': {'role': 'user', 'content': 'Turn 2: how to deploy?'}},
+            {'type': 'message', 'message': {'role': 'assistant', 'content': 'Deploy guide'}},
+        ]
+        path.write_text('\n'.join(json.dumps(r) for r in lines) + '\n')
+        # Turn 2 had no tasks and Turn 1's tasks were already completed before Turn 2 started.
+        self.assertIsNone(a.transcript_tasks(path, 'pi'))
+        # Turn 3 adds tasks #3 and #4 without clearing #1 and #2; only #3 and #4 are active for Turn 3.
+        lines.extend([
+            {'type': 'message', 'message': {'role': 'user', 'content': 'Turn 3: add CI workflow'}},
+            {'type': 'message', 'message': {'role': 'toolResult', 'toolName': 'todo', 'details': {'tasks': [
+                {'id': 1, 'subject': 'Audit UI', 'status': 'completed'},
+                {'id': 2, 'subject': 'Implement redesign', 'status': 'completed', 'blockedBy': [1]},
+                {'id': 3, 'subject': 'Write workflow', 'status': 'completed', 'blockedBy': [2]},
+                {'id': 4, 'subject': 'Verify release gate', 'status': 'in_progress', 'blockedBy': [2, 3]},
+            ]}}},
+        ])
+        path.write_text('\n'.join(json.dumps(r) for r in lines) + '\n')
+        os.utime(path, (2000, 2000))
+        summary = a.transcript_tasks(path, 'pi')
+        self.assertEqual((summary['total'], summary['completed'], summary['in_progress']), (2, 1, 1))
+        self.assertEqual([item['id'] for item in summary['items']], [3, 4])
+        self.assertEqual(summary['items'][0]['blocked_by'], [])
+        self.assertEqual(summary['items'][1]['blocked_by'], [3])
+
 
 class OpenCodePluginTests(unittest.TestCase):
     def test_tui_plugin_reports_the_expected_events_with_installer_placeholders(self):

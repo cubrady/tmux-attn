@@ -766,5 +766,14 @@ class CodexProfileTests(unittest.TestCase):
     rollout.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
     self.assertIsNone(parked_codex_terminals(footer_1_ps, rollout))
 
+    # Late SubagentStop after the root turn already settled to IDLE recovers to IDLE once prompt is quiet.
+    a.record(con, 'sock', '%46', '482294', 'codex', 'RUNNING', 'Subagent finished; parent may continue',
+             event_time=a.time.time() - 5)
+    idle_screen = '• Completed `/root/terra_gemma_audit`\n\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/proj · Main\n'
+    self.assertTrue(sync_attention_overlay(con, 'sock', '%46', '482294', key, idle_screen, previous2, overlays))
+    row = con.execute('SELECT state, reason, needs_review FROM panes').fetchone()
+    self.assertEqual((row['state'], row['reason'], row['needs_review']),
+                     ('IDLE', 'Response finished; review needed', 1))
+
 
 if __name__=='__main__':unittest.main(verbosity=2)

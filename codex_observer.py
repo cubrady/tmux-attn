@@ -901,13 +901,24 @@ def sync_attention_overlay(con, sock, pane, pid, key, screen, previous, overlays
     old = overlays.pop(key,None)
     if isinstance(old, str):
         old = ('WAIT', old)
-    current = con.execute('SELECT state,reason FROM panes WHERE socket=? AND pane=? AND pid=?',(sock,pane,pid)).fetchone()
+    current = con.execute(
+        'SELECT state,reason,updated,last_event_time FROM panes WHERE socket=? AND pane=? AND pid=?',
+        (sock,pane,pid),
+    ).fetchone()
     # Recover our persisted screen state after an observer restart, too.
     if not old and current:
         cur_reason = current['reason'] or ''
         if current['state'] == 'WAIT' and (cur_reason == 'Approval dialog visible' or cur_reason.startswith('Queued follow-up questions: ')):
             old = ('WAIT', cur_reason)
         elif current['state'] == 'RUNNING' and re.match(r'^Background work: waiting on \d+ terminals?$', cur_reason):
+            old = ('RUNNING', cur_reason)
+        elif (current['state'] == 'RUNNING'
+              and cur_reason in ('Subagent finished; parent may continue', 'Background work: waiting on subagent')
+              and previous and previous[0][0] == 'IDLE'
+              and re.search(r'^\s*›(?:\s|$)', screen, re.M)
+              and not re.search(r'(?:• Working \(|esc to interrupt)', screen)
+              and time.time() - max(float(current['updated'] if 'updated' in current.keys() else 0),
+                                    float(current['last_event_time'] if 'last_event_time' in current.keys() else 0)) >= 2):
             old = ('RUNNING', cur_reason)
     if previous and current and old and (current['state'], current['reason']) == old:
         state,_,turn = previous
