@@ -309,6 +309,34 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([item['next_step'] for item in handoff['items']],
                          ['Please approve the deployment.'])
 
+    def test_opencode_meta_first_event_persists_session_key_and_preserves_hints_on_next_prompt(self):
+        self.hook('opencode','opencode_meta',{'session_id':'ses-1','title':'OAuth Title','model':'gpt-6','effort':'high'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual(row['event_key'],'ses-1')
+        self.assertEqual((row['hint_title'],row['hint_model'],row['hint_effort']),
+                         ('OAuth Title','gpt-6','high'))
+        # Subsequent state event for the same session must not treat session as changed or wipe hints
+        self.hook('opencode','UserPromptSubmit',{'session_id':'ses-1','prompt':'Implement PKCE'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual(row['event_key'],'ses-1')
+        self.assertEqual((row['hint_title'],row['hint_model'],row['hint_effort']),
+                         ('OAuth Title','gpt-6','high'))
+
+    def test_opencode_meta_for_new_session_clears_old_session_previews(self):
+        self.hook('opencode','UserPromptSubmit',{'session_id':'ses-1','prompt':'Old prompt'})
+        self.hook('opencode','Stop',{'session_id':'ses-1','last_assistant_message':'Old answer'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual(row['event_key'],'ses-1')
+        self.assertEqual(row['preview_agent'],'Old answer')
+        # opencode_meta arrives for ses-2 (state is None)
+        self.hook('opencode','opencode_meta',{'session_id':'ses-2','title':'New session title','model':'gpt-6.1'})
+        row=dict(self.con.execute('SELECT * FROM panes').fetchone())
+        self.assertEqual(row['event_key'],'ses-2')
+        self.assertEqual(row['hint_title'],'New session title')
+        self.assertEqual(row['preview_agent'],'')
+        self.assertEqual(row['preview_users'],'[]')
+        self.assertEqual(row['handoff_response'],'')
+
     def test_opencode_session_switch_clears_previous_preview_and_bumps_revision(self):
         self.hook('opencode','UserPromptSubmit',{'session_id':'open-a','prompt':'A prompt'})
         self.hook('opencode','Stop',{'session_id':'open-a','last_assistant_message':'A answer'})
@@ -1933,6 +1961,8 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertIn('if (sid === routed) return;',source)
         self.assertIn('lastAssistantText',source)
         self.assertIn('info.outcome === "failed"',source)
+        self.assertIn('waiting = false',source)
+        self.assertIn('lastAssistantText(sid)',source)
         self.assertNotIn('tui.session.select',source)
         self.assertNotIn('transcript_path',source)
 
