@@ -2413,6 +2413,7 @@
       margin-top: 8px;
     }
     .skel-host { height: 1.45rem; width: 4.5rem; border-radius: 6px; }
+    .skel-usage-toggle { height: 1.45rem; width: 4.8rem; border-radius: 6px; }
     .skel-list {
       display: flex;
       flex-direction: column;
@@ -2685,12 +2686,30 @@
     const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode' };
     const USAGE_PROVIDERS = ['codex', 'claude', 'cursor'];
     const USAGE_POLL_MS = 60_000;
+    const USAGE_CACHE_STORE = 'tmux-attn:usage-cache';
+    function readUsageCache() {
+      try {
+        const raw = sessionStorage.getItem(USAGE_CACHE_STORE);
+        return raw ? JSON.parse(raw) : null;
+      } catch (_) { return null; }
+    }
+    function saveUsageCache(data) {
+      try {
+        if (data && Array.isArray(data.accounts)) {
+          sessionStorage.setItem(USAGE_CACHE_STORE, JSON.stringify(data));
+        }
+      } catch (_) { /* storage unavailable */ }
+    }
     let usageByProvider = new Map();
     let usageFetchedAt = new Map();
     let usageUpdatedAt = 0;
     let usageExpanded = false;
     let usageRefreshing = false;
     let usageReqSeq = 0;
+    const cachedUsage = readUsageCache();
+    if (cachedUsage) {
+      renderUsage(cachedUsage, { persist: false });
+    }
     let agentFilter = readAgentFilter();
     const NOTIFY_STORE = 'tmux-attn:notify';
     const FAVICON_CALM_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="tmux Attention"><rect width="32" height="32" rx="8" fill="#0f766e"/><rect x="5" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="5" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/></svg>';
@@ -2999,6 +3018,11 @@
       const box = document.getElementById('agent-usage');
       if (!box) return;
       const providers = activeUsageProviders();
+      if (!providers.length) {
+        box.hidden = true;
+        box.innerHTML = '';
+        return;
+      }
       const accounts = [];
       for (const p of providers) {
         const rows = usageByProvider.get(p) || [];
@@ -3006,7 +3030,25 @@
           if (row && Array.isArray(row.windows) && row.windows.length) accounts.push(row);
         }
       }
-      if (!providers.length || !accounts.length) {
+      if (!accounts.length) {
+        if (usageRefreshing || !usageFetchedAt.size) {
+          box.hidden = false;
+          let skelPanelHtml = '';
+          if (usageExpanded) {
+            skelPanelHtml = `<div class="usage-panel" id="usage-panel">` +
+              `<div class="usage-panel-head">` +
+                `<div class="skel" style="height:0.75rem;width:8rem;"></div>` +
+              `</div>` +
+              `<div class="usage-cards">` +
+                `<div class="skel" style="height:4.8rem;border-radius:6px;"></div>` +
+                `<div class="skel" style="height:4.8rem;border-radius:6px;"></div>` +
+              `</div>` +
+            `</div>`;
+          }
+          const skelMarkup = `<div class="usage-bar-head"><div class="skel skel-usage-toggle" aria-label="載入用量中…"></div></div>${skelPanelHtml}`;
+          if (box.innerHTML !== skelMarkup) box.innerHTML = skelMarkup;
+          return;
+        }
         box.hidden = true;
         box.innerHTML = '';
         return;
@@ -3090,7 +3132,7 @@
       const nextMarkup = `<div class="usage-bar-head">${toggleHtml}</div>${panelHtml}`;
       if (box.innerHTML !== nextMarkup) box.innerHTML = nextMarkup;
     }
-    function renderUsage(data) {
+    function renderUsage(data, { persist = true } = {}) {
       if (!data || !Array.isArray(data.accounts)) return;
       const providers = Array.isArray(data.providers) && data.providers.length
         ? data.providers
@@ -3111,6 +3153,7 @@
       } else {
         usageUpdatedAt = Math.floor(now / 1000);
       }
+      if (persist) saveUsageCache(data);
       renderAgentUsage();
     }
     async function syncAgentUsage({ force = false } = {}) {
@@ -3123,7 +3166,7 @@
       if (!needed.length || (usageRefreshing && !force)) return;
       const seq = ++usageReqSeq;
       usageRefreshing = true;
-      if (usageExpanded) renderAgentUsage();
+      renderAgentUsage();
       const url = `/api/usage?providers=${encodeURIComponent(needed.join(','))}${force ? '&refresh=1' : ''}`;
       try {
         const res = await fetch(url, { cache: 'no-store' });

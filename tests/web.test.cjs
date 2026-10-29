@@ -3709,7 +3709,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.equal(ui.elements.get('agent-usage').hidden, true);
   pickAgent(ui, '');
 
-  // 2. With no filter (All), fetches all supported providers (codex, claude, cursor; never pi); panel is default hidden
+  // 2. With no filter (All), shows skeleton toggle while in-flight, then renders toggle with mini-gauges
   ui.render({
     hosts: [{ name: 'work', ok: true }],
     agents: [
@@ -3719,13 +3719,16 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
       filterSession('pi', 'work', 'RUNNING'),
     ],
   });
+  const box = ui.elements.get('agent-usage');
+  assert.equal(box.hidden, false);
+  assert.match(box.innerHTML, /class="skel skel-usage-toggle"/);
   await new Promise(r => setImmediate(r));
   assert.deepEqual(calls, ['/api/usage?providers=codex%2Cclaude%2Ccursor']);
-  const box = ui.elements.get('agent-usage');
   assert.equal(box.hidden, false);
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
   assert.match(box.innerHTML, /class="usage-mini-gauges"/);
   assert.match(box.innerHTML, /class="usage-panel" id="usage-panel"[^>]*hidden/);
+  assert.doesNotMatch(box.innerHTML, /skel-usage-toggle/);
 
   // 3. Filtering to Pi hides usage completely; filtering to Cursor scopes cards to Cursor
   pickAgent(ui, 'pi');
