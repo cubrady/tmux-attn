@@ -3140,6 +3140,10 @@ test('two or more hosts label each card and the reply sheet, including while fil
   const filtered = ui.elements.get('list').innerHTML;
   assert.match(filtered, /title="workstation">workstation/);
   assert.doesNotMatch(filtered, /client-2/);
+  const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /\.env > \.host-chip \{[^}]*display: inline-flex;[^}]*var\(--host-fg[\s\S]*?var\(--host-bg[\s\S]*?var\(--host-bd/,
+    'card host chip keeps toned pill styling correlated with header host-pill');
+  assert.match(html, /\.env > \.host-chip::before \{ content: none; \}/);
 });
 
 test('a single host leaves cards and the reply sheet unlabeled', () => {

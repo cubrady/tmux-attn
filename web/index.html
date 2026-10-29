@@ -1090,7 +1090,7 @@
     /* The agent icon leads the row like a bullet; a "·" pseudo inside its 14px flex box would squeeze the img. */
     .env > .cli { margin-right: 0.5em; }
     .env > .cli::before, .env > .cli + span::before { content: none; }
-    /* Reply sheet keeps the colored host chip; on cards, machine trails as muted secondary text. */
+    /* Reply sheet uses full-strength host chip; on cards, keep the same pill shape and host tone at a softer weight. */
     .host-chip {
       display: inline-flex;
       align-items: center;
@@ -1108,18 +1108,22 @@
       white-space: nowrap;
     }
     .env > .host-chip {
-      display: inline;
+      display: inline-flex;
       flex: 0 0 auto;
       max-width: none;
       overflow: visible;
       text-overflow: clip;
-      padding: 0;
-      border: 0;
-      border-radius: 0;
-      background: transparent;
-      color: color-mix(in srgb, var(--muted) 85%, transparent);
-      font-weight: 400;
+      font-size: 0.64rem;
+      font-weight: 500;
+      line-height: 1.35;
+      padding: 0 5px;
+      border-radius: 5px;
+      color: color-mix(in srgb, var(--host-fg, var(--muted)) 82%, var(--muted));
+      background: color-mix(in srgb, var(--host-bg, var(--bg-elevated)) 55%, transparent);
+      border-color: color-mix(in srgb, var(--host-bd, var(--line)) 48%, transparent);
     }
+    .env > .host-chip::before { content: none; }
+    .env > span + .host-chip { margin-left: 0.45em; }
     .sheet-host { margin-bottom: 4px; }
     .sheet-host[hidden] { display: none; }
     .env .model { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
