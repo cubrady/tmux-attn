@@ -41,6 +41,7 @@
       --font: "Outfit", "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
       --mono: "JetBrains Mono", ui-monospace, monospace;
       --max: 42rem;
+      --sheet-max: 44rem;
       --ease: cubic-bezier(0.16, 1, 0.3, 1);
       --header-bg: color-mix(in srgb, var(--bg) 86%, transparent);
       --sheet-bg: #ffffff;
@@ -844,6 +845,7 @@
       border-left: 3px solid var(--idle);
       transition: border-color 160ms var(--ease), background 160ms var(--ease);
       cursor: pointer;
+      min-width: 0;
     }
     .card.shell { cursor: default; }
     .card.shell.expandable { cursor: pointer; }
@@ -1623,7 +1625,7 @@
     .sheet {
       position: relative;
       z-index: 1;
-      width: min(100%, var(--max));
+      width: min(100%, var(--sheet-max));
       max-height: min(88%, 720px);
       display: flex;
       flex-direction: column;
@@ -2375,6 +2377,82 @@
     .skel-card .age { height: 0.7rem; width: 2.4rem; }
     .skel-card .sub { height: 0.7rem; width: 58%; }
     .skel-card .reason { height: 0.75rem; width: 78%; }
+
+    /* Responsive grid & layout enhancements */
+    @media (min-width: 768px) {
+      :root {
+        --max: 72rem;
+      }
+      body {
+        padding: 20px 24px calc(24px + env(safe-area-inset-bottom));
+      }
+      header {
+        margin: -8px -12px 0;
+        padding: 10px 12px 12px;
+      }
+      main.list,
+      .skel-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        align-items: start;
+      }
+      .section,
+      .skel-section,
+      .later-group {
+        grid-column: 1 / -1;
+      }
+      .section {
+        margin: 20px 0 6px;
+        scroll-margin-top: 8.5rem;
+      }
+      .section:first-child {
+        margin-top: 4px;
+      }
+      .later-group[open] {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        align-items: start;
+      }
+      .later-group summary {
+        grid-column: 1 / -1;
+      }
+      .later-group .card {
+        margin-top: 0;
+      }
+    }
+
+    @media (min-width: 1200px) {
+      :root {
+        --max: 96rem;
+      }
+      main.list,
+      .skel-list {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+      .later-group[open] {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+    }
+
+    @media (min-width: 1600px) {
+      :root {
+        --max: 118rem;
+      }
+      main.list,
+      .skel-list {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .later-group[open] {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 16px;
+      }
+    }
+
     body.is-loading .live-content { display: none; }
     body.is-loading .skel-page { display: block; }
     body:not(.is-loading) .skel-page { display: none; }

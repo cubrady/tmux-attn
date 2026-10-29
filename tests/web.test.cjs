@@ -3825,5 +3825,35 @@ test('untracked shell cards show last 3 lines and toggle inline up to 12 lines w
   assert.match(latestHtml, /data-shell-toggle aria-expanded="false">展開 12 行<\/button>/);
 });
 
+test('desktop and tablet layouts use adaptive responsive multi-column grid with measure boundaries', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.html'), 'utf8');
+
+  // Multi-column grid rules are defined at clean breakpoints
+  assert.match(html, /@media \(min-width: 768px\)/);
+  assert.match(html, /@media \(min-width: 1200px\)/);
+  assert.match(html, /@media \(min-width: 1600px\)/);
+
+  // List and skeleton list switch to grid with 2, 3, and 4 columns
+  assert.match(html, /main\.list,\s*\.skel-list \{[^}]*display: grid;\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+  assert.match(html, /main\.list,\s*\.skel-list \{[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\);/);
+  assert.match(html, /main\.list,\s*\.skel-list \{[^}]*grid-template-columns: repeat\(4, minmax\(0, 1fr\)\);/);
+
+  // Section titles, skeleton section, and later groups span full width
+  assert.match(html, /\.section,\s*\.skel-section,\s*\.later-group \{[^}]*grid-column: 1 \/ -1;/);
+
+  // Expanded later groups also lay out cards in multi-column grid
+  assert.match(html, /\.later-group\[open\] \{[^}]*display: grid;\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+  assert.match(html, /\.later-group summary \{[^}]*grid-column: 1 \/ -1;/);
+
+  // Sheet dialog has an independent max width so it does not overstretch on wide monitors
+  assert.match(html, /--sheet-max: 44rem;/);
+  assert.match(html, /\.sheet \{[^}]*width: min\(100%, var\(--sheet-max\)\);/);
+
+  // Cards specify min-width: 0 to prevent content overflows inside CSS grid items
+  assert.match(html, /\.card \{[^}]*min-width: 0;/);
+});
+
 
 
