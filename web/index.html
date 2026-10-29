@@ -2926,14 +2926,10 @@
       syncAgentUsage();
     }
     function activeUsageProviders() {
-      const agents = hostVisibleAgents().filter(a => category(a) !== 'shell');
-      const scoped = agentFilter ? agents.filter(a => agentKind(a) === agentFilter) : agents;
-      const present = new Set();
-      for (const a of scoped) {
-        const kind = agentKind(a);
-        if (USAGE_PROVIDERS.includes(kind)) present.add(kind);
+      if (agentFilter) {
+        return USAGE_PROVIDERS.filter(p => p === agentFilter);
       }
-      return USAGE_PROVIDERS.filter(p => present.has(p));
+      return USAGE_PROVIDERS.slice();
     }
     function usageToneForWindow(win) {
       const pct = Number(win?.usedPercent) || 0;

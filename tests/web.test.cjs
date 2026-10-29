@@ -3702,12 +3702,14 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
     },
   });
 
-  // 1. Only Pi running -> no usage fetch and box stays hidden
+  // 1. Filtering to Pi hides usage completely; clearing filter fetches codex,claude,cursor (never pi)
+  pickAgent(ui, 'pi');
   ui.render({ hosts: [{ name: 'work', ok: true }], agents: [filterSession('pi', 'work', 'RUNNING')] });
   assert.equal(calls.length, 0);
   assert.equal(ui.elements.get('agent-usage').hidden, true);
+  pickAgent(ui, '');
 
-  // 2. Codex + Claude + Cursor ('agent') + Pi running -> fetches codex,claude,cursor (never pi); panel is default hidden
+  // 2. With no filter (All), fetches all supported providers (codex, claude, cursor; never pi); panel is default hidden
   ui.render({
     hosts: [{ name: 'work', ok: true }],
     agents: [
