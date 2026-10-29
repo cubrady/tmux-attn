@@ -499,7 +499,6 @@
       margin-left: 0.15em;
     }
     .filter-bar {
-      position: relative;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
@@ -621,19 +620,31 @@
       opacity: 0.75;
     }
     .usage-panel {
-      position: absolute;
-      top: calc(100% + 6px);
-      left: 0;
-      right: 0;
-      z-index: 30;
+      flex: 0 0 100%;
+      width: 100%;
+      margin-top: 4px;
       padding: 10px 12px;
-      border: 1px solid color-mix(in srgb, var(--fg) 14%, var(--line));
+      border: 1px solid var(--line);
       border-radius: var(--radius);
-      background: var(--sheet-bg);
-      box-shadow: 0 14px 34px -6px rgb(0 0 0 / 0.24), 0 4px 12px -2px rgb(0 0 0 / 0.12);
-      max-height: min(72dvh, 28rem);
-      overflow-y: auto;
-      overscroll-behavior: contain;
+      background: var(--card);
+    }
+    .usage-panel:not([hidden]) {
+      animation: usage-expand 180ms var(--ease);
+    }
+    @keyframes usage-expand {
+      from {
+        opacity: 0;
+        transform: translateY(-4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .usage-panel:not([hidden]) {
+        animation: none;
+      }
     }
     .usage-panel-head {
       display: flex;
@@ -669,17 +680,20 @@
     }
     .usage-close {
       appearance: none;
-      font: 600 0.72rem/1 var(--mono);
-      padding: 3px 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font: 600 0.68rem/1 var(--font);
+      padding: 2px 6px;
       border-radius: 5px;
-      border: 1px solid transparent;
-      background: transparent;
+      border: 1px solid var(--line);
+      background: var(--bg-elevated);
       color: var(--muted);
       cursor: pointer;
     }
     .usage-close:hover, .usage-close:focus-visible {
       color: var(--fg);
-      border-color: var(--line);
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
     }
     .usage-cards {
       display: grid;
@@ -3066,13 +3080,13 @@
           winsHtml +
         `</div>`;
       }).join('');
-      const panelHtml = `<div class="usage-panel" id="usage-panel" role="dialog" aria-label="Coding agent 剩餘額度與重置時間"${usageExpanded ? '' : ' hidden'}>` +
+      const panelHtml = `<div class="usage-panel" id="usage-panel"${usageExpanded ? '' : ' hidden'}>` +
         `<div class="usage-panel-head">` +
           `<span class="usage-panel-title">剩餘額度與重置時間</span>` +
           `<span class="usage-panel-actions">` +
             (ageText ? `<span>${escapeHtml(ageText)}</span>` : '') +
             `<button type="button" class="usage-refresh" data-usage-refresh${usageRefreshing ? ' disabled' : ''}>${usageRefreshing ? '更新中…' : '重新整理'}</button>` +
-            `<button type="button" class="usage-close" data-usage-close aria-label="關閉用量視窗">✕</button>` +
+            `<button type="button" class="usage-close" data-usage-close aria-label="收合用量面板" title="收合">收合</button>` +
           `</span>` +
         `</div>` +
         `<div class="usage-cards">${cardsHtml}</div>` +
@@ -4740,7 +4754,6 @@
       if (latestPayload) render(latestPayload);
     });
     document.getElementById('agent-usage').addEventListener('click', (event) => {
-      if (typeof event.stopPropagation === 'function') event.stopPropagation();
       if (event.target.closest('[data-usage-refresh]')) {
         syncAgentUsage({ force: true });
         return;
@@ -4754,13 +4767,6 @@
         usageExpanded = !usageExpanded;
         renderAgentUsage();
       }
-    });
-    document.addEventListener('click', (event) => {
-      if (!usageExpanded) return;
-      const box = document.getElementById('agent-usage');
-      if (event.target?.closest?.('#agent-usage') || (box && typeof event.composedPath === 'function' && event.composedPath().includes(box))) return;
-      usageExpanded = false;
-      renderAgentUsage();
     });
     document.getElementById('other-agent-wait').addEventListener('click', () => {
       setAgentFilter('');
@@ -4806,10 +4812,6 @@
       if (event.key !== 'Escape') return;
       if (readerOpen) closeReader();
       else if (sheetOpen) closeSheet();
-      else if (usageExpanded) {
-        usageExpanded = false;
-        renderAgentUsage();
-      }
     });
     window.addEventListener('hashchange', applyRoute);
     // Line wraps change when the web font arrives or the window resizes, so the clipped marks must follow.

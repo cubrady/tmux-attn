@@ -3734,25 +3734,10 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.doesNotMatch(box.innerHTML, /carol/);
   pickAgent(ui, '');
 
-  // 4. Clicking the toggle expands the floating detail popover even when innerHTML replacement detaches target before bubbling to document
-  const dispatchUsageClick = (selector) => {
-    let stopped = false;
-    const htmlBefore = box.innerHTML;
-    const evt = {
-      stopPropagation() { stopped = true; },
-      target: {
-        closest: sel => {
-          if (sel === '#agent-usage') return box.innerHTML === htmlBefore ? box : null;
-          return sel === selector ? {} : null;
-        },
-      },
-    };
-    box.listeners.click(evt);
-    if (!stopped && ui.document.listeners.click) ui.document.listeners.click(evt);
-  };
-  dispatchUsageClick('[data-usage-toggle]');
+  // 4. Clicking the toggle expands the inline detail panel (no hidden attribute) with progress bars, expected tick, and pace warning
+  box.listeners.click({ target: { closest: sel => sel === '[data-usage-toggle]' ? {} : null } });
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="true"/);
-  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel" role="dialog"[^>]*>/);
+  assert.match(box.innerHTML, /class="usage-panel" id="usage-panel">/);
   assert.doesNotMatch(box.innerHTML, /id="usage-panel"[^>]*hidden/);
   assert.match(box.innerHTML, /剩 32%/);
   assert.match(box.innerHTML, /剩 0%/);
@@ -3760,19 +3745,22 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.match(box.innerHTML, /超前 56% · 預計 9h 24m 後用盡/);
   assert.match(box.innerHTML, /已用盡/);
 
-  // 5. Clicking refresh forces a refresh=1 call and keeps popover open
-  dispatchUsageClick('[data-usage-refresh]');
+  // 5. Clicking refresh forces a refresh=1 call and keeps panel open
+  box.listeners.click({ target: { closest: sel => sel === '[data-usage-refresh]' ? {} : null } });
   await new Promise(r => setImmediate(r));
   assert.equal(calls.at(-1), '/api/usage?providers=codex%2Cclaude%2Ccursor&refresh=1');
   assert.doesNotMatch(box.innerHTML, /id="usage-panel"[^>]*hidden/);
 
-  // 6. Pressing Escape or clicking outside closes the floating popover
-  ui.document.listeners.click({ target: { closest: () => null } });
+  // 6. Clicking close button or toggling collapses the inline panel
+  box.listeners.click({ target: { closest: sel => sel === '[data-usage-close]' ? {} : null } });
   assert.match(box.innerHTML, /id="usage-panel"[^>]*hidden/);
-  dispatchUsageClick('[data-usage-toggle]');
+  assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
+  box.listeners.click({ target: { closest: sel => sel === '[data-usage-toggle]' ? {} : null } });
   assert.doesNotMatch(box.innerHTML, /id="usage-panel"[^>]*hidden/);
-  ui.document.listeners.keydown({ key: 'Escape' });
+  assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="true"/);
+  box.listeners.click({ target: { closest: sel => sel === '[data-usage-toggle]' ? {} : null } });
   assert.match(box.innerHTML, /id="usage-panel"[^>]*hidden/);
+  assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
 });
 
 test('untracked shell cards show last 3 lines and toggle inline up to 12 lines without opening the sheet', () => {
