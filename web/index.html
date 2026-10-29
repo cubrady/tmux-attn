@@ -22,6 +22,7 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.5/dist/purify.min.js"></script>
   <style>
     :root {
+      --font-scale: 1;
       --bg: #f4f5f7;
       --bg-elevated: #ffffff;
       --fg: #18181b;
@@ -70,11 +71,14 @@
       }
     }
     * { box-sizing: border-box; }
-    html { color-scheme: light dark; }
+    html {
+      color-scheme: light dark;
+      font-size: calc(16px * var(--font-scale, 1));
+    }
     body {
       margin: 0;
       min-height: 100dvh;
-      font: 15px/1.45 var(--font);
+      font: 0.9375rem/1.45 var(--font);
       color: var(--fg);
       background: var(--bg);
       padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
@@ -217,6 +221,55 @@
       box-shadow: 0 0 0 2px var(--bg);
     }
     .notify-dot[hidden] { display: none; }
+    .font-size-ctrl {
+      display: inline-flex;
+      align-items: center;
+      background: color-mix(in srgb, var(--line) 35%, var(--card));
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 1px;
+      gap: 1px;
+    }
+    .font-btn {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 22px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      font: 600 0.8rem/1 var(--font);
+      cursor: pointer;
+      transition: color 140ms var(--ease), background 140ms var(--ease);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    @media (hover: hover) {
+      .font-btn:hover:not(:disabled) {
+        color: var(--fg);
+        background: color-mix(in srgb, var(--fg) 10%, transparent);
+      }
+    }
+    .font-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+    .font-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .font-reset {
+      font-size: 0.72rem;
+      font-weight: 700;
+      min-width: 20px;
+    }
+    .font-reset.is-scaled {
+      color: var(--accent);
+    }
     h1 {
       margin: 0;
       font-size: 1.12rem;
@@ -2464,6 +2517,11 @@
       <div class="brand">
         <h1>Attention</h1>
         <div class="brand-actions">
+          <div class="font-size-ctrl" id="font-size-ctrl" role="group" aria-label="調整字型大小">
+            <button type="button" class="font-btn" id="font-dec" aria-label="縮小字型" title="縮小字型">−</button>
+            <button type="button" class="font-btn font-reset" id="font-reset" aria-label="重設字型大小" title="重設字型大小 (100%)">A</button>
+            <button type="button" class="font-btn" id="font-inc" aria-label="放大字型" title="放大字型">+</button>
+          </div>
           <button type="button" class="notify-btn" id="notify-toggle" aria-pressed="false" hidden>
             <span class="notify-icon" id="notify-icon" aria-hidden="true"></span>
             <span id="notify-label">通知</span>
@@ -3565,6 +3623,9 @@
       const reason = reviewed ? String(a.reason || '').replace('尚未查看', '已查看') : a.reason;
       return { cat, reviewed, emoji, reason };
     }
+    function canKill(a) {
+      return Boolean(a && a.pane && a.pid);
+    }
     function cardHtml(a, opts = {}) {
       const { cat, reason } = attentionDisplay(a);
       const errorClass = a.severity === 'error' ? ' error' : '';
@@ -3578,7 +3639,7 @@
       const name = label || projectName(a);
       const machine = showHostChips() ? agentHostName(a) : '';
       const openLabel = machine ? `開啟 ${name}，${machine}` : `開啟 ${name}`;
-      const killClass = a.tracked && killPhase(key) ? ' kill-armed' : '';
+      const killClass = canKill(a) && killPhase(key) ? ' kill-armed' : '';
       const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
       const shellExpandable = cat === 'shell' && shellLines(a).length > SHELL_PREVIEW_COLLAPSED ? ' expandable' : '';
       const killNote = killState.key === key && killState.note
@@ -3599,7 +3660,7 @@
             ${sentTag ? `<div class="session-flags">${sentTag}</div>` : ''}
             <div class="age">${escapeHtml(a.age)}</div>
             ${a.later || canMoveLater(a) ? laterButtonHtml(a) : ''}
-            ${a.tracked ? killButtonHtml(key, name) : ''}
+            ${canKill(a) ? killButtonHtml(key, name) : ''}
           </div>
         </div>
         ${killNote}
@@ -3664,7 +3725,7 @@
       return `<button type="button" class="card-kill${phase ? ' ' + phase : ''}" data-kill aria-label="${escapeHtml(aria)}" title="${tip}"${phase === 'busy' ? ' aria-disabled="true"' : ''}>${TRASH_SVG}${label ? `<span class="card-kill-label">${label}</span>` : ''}</button>`;
     }
     async function onCardKill(key) {
-      const agent = latestAgents.find(a => agentKey(a) === key && a.tracked);
+      const agent = latestAgents.find(a => agentKey(a) === key && canKill(a));
       if (!agent || killState.busy) return;
       if (killPhase(key) !== 'armed') {
         setKillState({ key, until: Date.now() + KILL_ARM_MS, busy: false, note: '' }, KILL_ARM_MS);
@@ -4968,6 +5029,15 @@
         renderAttachments();
       }
     });
+    document.getElementById('font-dec').addEventListener('click', () => {
+      setFontScale(fontScale - FONT_SCALE_STEP);
+    });
+    document.getElementById('font-inc').addEventListener('click', () => {
+      setFontScale(fontScale + FONT_SCALE_STEP);
+    });
+    document.getElementById('font-reset').addEventListener('click', () => {
+      setFontScale(FONT_SCALE_DEFAULT);
+    });
     document.getElementById('notify-toggle').addEventListener('click', async () => {
       const Api = notificationApi();
       if (!Api) return;
@@ -4994,6 +5064,68 @@
       }
       paintNotifyButton();
     });
+    const FONT_SCALE_KEY = 'tmux-attn-font-scale';
+    const FONT_SCALE_MIN = 0.8;
+    const FONT_SCALE_MAX = 1.4;
+    const FONT_SCALE_DEFAULT = 1.0;
+    const FONT_SCALE_STEP = 0.1;
+    let fontScale = FONT_SCALE_DEFAULT;
+
+    function applyFontScale(scale) {
+      const target = document.documentElement || document.body;
+      if (!target?.style?.setProperty) return;
+      if (Math.abs(scale - FONT_SCALE_DEFAULT) <= 0.01) {
+        target.style.removeProperty('--font-scale');
+      } else {
+        target.style.setProperty('--font-scale', String(scale));
+      }
+    }
+
+    function updateFontControls() {
+      const dec = document.getElementById('font-dec');
+      const inc = document.getElementById('font-inc');
+      const reset = document.getElementById('font-reset');
+      if (dec) dec.disabled = fontScale <= FONT_SCALE_MIN + 0.01;
+      if (inc) inc.disabled = fontScale >= FONT_SCALE_MAX - 0.01;
+      if (reset) {
+        const pct = Math.round(fontScale * 100);
+        const isScaled = Math.abs(fontScale - FONT_SCALE_DEFAULT) > 0.01;
+        reset.classList.toggle('is-scaled', isScaled);
+        reset.title = isScaled ? `重設字型大小 (目前 ${pct}%)` : '重設字型大小 (100%)';
+        reset.setAttribute('aria-label', isScaled ? `重設字型大小，目前 ${pct}%` : '重設字型大小');
+      }
+    }
+
+    function setFontScale(nextScale) {
+      const clamped = Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, nextScale));
+      fontScale = Math.round(clamped * 10) / 10;
+      applyFontScale(fontScale);
+      updateFontControls();
+      try {
+        if (typeof localStorage !== 'undefined') {
+          if (Math.abs(fontScale - FONT_SCALE_DEFAULT) <= 0.01) {
+            localStorage.removeItem(FONT_SCALE_KEY);
+          } else {
+            localStorage.setItem(FONT_SCALE_KEY, String(fontScale));
+          }
+        }
+      } catch (_) {}
+      markClippedPreviews();
+    }
+
+    function initFontScale() {
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const saved = parseFloat(localStorage.getItem(FONT_SCALE_KEY));
+          if (Number.isFinite(saved) && saved >= FONT_SCALE_MIN && saved <= FONT_SCALE_MAX) {
+            fontScale = Math.round(saved * 10) / 10;
+          }
+        }
+      } catch (_) {}
+      applyFontScale(fontScale);
+      updateFontControls();
+    }
+
     const POLL_MS = 20000;
     let refreshInFlight = false;
     let hasLoaded = false;
@@ -5220,6 +5352,7 @@
         }
       }
     }
+    initFontScale();
     paintNotifyButton();
     refresh();
     setInterval(refresh, POLL_MS);

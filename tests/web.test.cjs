@@ -2246,17 +2246,33 @@ function killSetup({ kill, names = ['demo'] } = {}) {
   return { ui, calls, replaced, refocused, agents, tap, list, advance, killCalls, live, lastHtml, focusTrash };
 }
 
-test('tracked cards carry a trash button beside the age; the card itself is not a button', () => {
+test('cards including untracked shells carry a trash button beside the age; the card itself is not a button', () => {
   const ui = dashboard();
   ui.render({ agents: [{ ...agent('lab', 'WAIT'), project: 'demo' },
     { ...agent('lab', 'SHELL', false), pane: '%9', pid: '9', project: 'plain-shell' }] });
   const list = ui.elements.get('list').innerHTML;
-  assert.equal((list.match(/class="card-kill"/g) || []).length, 1);
+  assert.equal((list.match(/class="card-kill"/g) || []).length, 2);
   assert.match(list, /class="row1-side">\s*<div class="age">[^<]*<\/div>\s*<button type="button" class="card-kill" data-kill aria-label="關閉 demo"/);
+  assert.match(list, /data-key="lab\|%9\|9"[\s\S]*?<button type="button" class="card-kill" data-kill aria-label="關閉 plain-shell"/);
   assert.doesNotMatch(list, /card-kill-label/);
   // Nested interactive controls hide the trash from screen readers, so the open action is its own button.
   assert.doesNotMatch(list, /role="button"/);
   assert.equal((list.match(/class="card-open" aria-label="開啟 demo"/g) || []).length, 1);
+});
+
+test('untracked shell cards can be closed with two taps of the trash button', async () => {
+  const t = killSetup();
+  const shellAgent = { ...agent('lab', 'SHELL', false), pane: '%9', pid: '9', project: 'plain-shell' };
+  t.agents[0] = shellAgent;
+  t.ui.render({ agents: [shellAgent] });
+  await t.tap(0);
+  await settle();
+  assert.equal(t.killCalls().length, 0);
+  assert.match(t.lastHtml(0), /class="card-kill armed" data-kill aria-label="再按一次確認關閉 plain-shell"/);
+  assert.equal(t.live(), '再按一次確認關閉 plain-shell');
+  await t.tap(0);
+  await settle();
+  assert.deepEqual(t.killCalls().map(call => call.body), [{ host: 'lab', pane: '%9', pid: '9' }]);
 });
 
 test('the first tap arms the trash on that card only, announces it and never opens the sheet', async () => {
@@ -3854,6 +3870,70 @@ test('desktop and tablet layouts use adaptive responsive multi-column grid with 
   // Cards specify min-width: 0 to prevent content overflows inside CSS grid items
   assert.match(html, /\.card \{[^}]*min-width: 0;/);
 });
+
+test('font size controls increase, decrease, reset and persist scale', () => {
+  const stored = new Map();
+  const localStorage = {
+    getItem: key => (stored.has(key) ? stored.get(key) : null),
+    setItem: (key, val) => stored.set(key, String(val)),
+    removeItem: key => stored.delete(key),
+  };
+  let appliedScale = '';
+  const doc = {
+    documentElement: {
+      style: {
+        setProperty: (prop, val) => { if (prop === '--font-scale') appliedScale = val; },
+        removeProperty: prop => { if (prop === '--font-scale') appliedScale = ''; },
+      },
+    },
+  };
+  const ui = dashboard({ document: doc, globals: { localStorage } });
+  const dec = ui.elements.get('font-dec');
+  const inc = ui.elements.get('font-inc');
+  const reset = ui.elements.get('font-reset');
+
+  assert.equal(dec.disabled, false);
+  assert.equal(inc.disabled, false);
+  assert.equal(appliedScale, '');
+
+  // Increase font size: 1.0 -> 1.1
+  inc.listeners.click();
+  assert.equal(appliedScale, '1.1');
+  assert.equal(stored.get('tmux-attn-font-scale'), '1.1');
+  assert.match(reset.title, /110%/);
+
+  // Increase again: 1.1 -> 1.2
+  inc.listeners.click();
+  assert.equal(appliedScale, '1.2');
+
+  // Reset font size
+  reset.listeners.click();
+  assert.equal(appliedScale, '');
+  assert.equal(stored.has('tmux-attn-font-scale'), false);
+  assert.match(reset.title, /100%/);
+
+  // Decrease font size: 1.0 -> 0.9 -> 0.8 (min)
+  dec.listeners.click();
+  assert.equal(appliedScale, '0.9');
+  dec.listeners.click();
+  assert.equal(appliedScale, '0.8');
+  assert.equal(dec.disabled, true);
+
+  // Reload restores saved scale
+  stored.set('tmux-attn-font-scale', '1.3');
+  let restoredScale = '';
+  const doc2 = {
+    documentElement: {
+      style: {
+        setProperty: (prop, val) => { if (prop === '--font-scale') restoredScale = val; },
+        removeProperty: prop => { if (prop === '--font-scale') restoredScale = ''; },
+      },
+    },
+  };
+  dashboard({ document: doc2, globals: { localStorage } });
+  assert.equal(restoredScale, '1.3');
+});
+
 
 
 
