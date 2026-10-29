@@ -1134,6 +1134,58 @@ test('attached images upload to the pane host and their ids ride along with the 
   assert.deepEqual(t.revoked.sort(), ['blob:a.jpg', 'blob:b.png']);
 });
 
+test('dragging and dropping files onto the composer uploads them and ignores plain text drags', async () => {
+  const t = uploader();
+  const form = t.ui.elements.get('sheet-form');
+  const classes = new Set();
+  form.classList = {
+    add: cls => classes.add(cls),
+    remove: cls => classes.delete(cls),
+    toggle: (cls, on) => (on ? classes.add(cls) : classes.delete(cls)),
+  };
+
+  let textPrevented = false;
+  form.listeners.dragover({
+    dataTransfer: { types: ['text/plain'], files: [] },
+    preventDefault() { textPrevented = true; },
+  });
+  assert.equal(textPrevented, false);
+  assert.equal(classes.has('drag-over'), false);
+
+  let enterPrevented = false;
+  const dt = { types: ['Files'], files: [], dropEffect: 'none' };
+  form.listeners.dragenter({ dataTransfer: dt, preventDefault() { enterPrevented = true; } });
+  form.listeners.dragenter({ dataTransfer: dt, preventDefault() {} }); // nested child enter
+  form.listeners.dragleave({ dataTransfer: dt }); // leave outer into child
+  assert.equal(enterPrevented, true);
+  assert.equal(classes.has('drag-over'), true, 'drag-over persists across nested composer children');
+
+  form.listeners.dragover({ dataTransfer: dt, preventDefault() {} });
+  assert.equal(dt.dropEffect, 'copy');
+
+  form.listeners.dragleave({ dataTransfer: dt });
+  assert.equal(classes.has('drag-over'), false);
+
+  let dropPrevented = false;
+  form.listeners.dragenter({ dataTransfer: dt, preventDefault() {} });
+  assert.equal(classes.has('drag-over'), true);
+  form.listeners.drop({
+    dataTransfer: {
+      types: ['Files'],
+      files: [imageFile('drop.png', 'image/png'), { name: 'notes.md', type: 'text/markdown', size: 120 }],
+    },
+    preventDefault() { dropPrevented = true; },
+  });
+  await flush();
+  assert.equal(dropPrevented, true);
+  assert.equal(classes.has('drag-over'), false);
+  assert.equal(t.chipKeys().length, 2);
+  assert.deepEqual(t.uploads().map(call => call.body), [
+    { host: 'lab', pane: '%1', pid: '123', data: 'b64-notes.md', filename: 'notes.md' },
+    { host: 'lab', pane: '%1', pid: '123', data: 'b64-drop.png' },
+  ]);
+});
+
 test('an image alone is a valid message', async () => {
   const t = uploader();
   await t.pick([imageFile('only.jpg')]);

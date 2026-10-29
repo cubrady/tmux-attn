@@ -1856,9 +1856,14 @@
       background: var(--bg-elevated);
       transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease);
     }
-    .composer:focus-within {
+    .composer:focus-within,
+    .sheet-compose.drag-over .composer {
       border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
       box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+    }
+    .sheet-compose.drag-over .composer {
+      border-style: dashed;
+      background: color-mix(in srgb, var(--accent) 6%, var(--bg-elevated));
     }
     .composer textarea {
       display: block;
@@ -3616,6 +3621,7 @@
       setSheetLoading(false);
       clearViewport();
       resetDrag();
+      resetComposerDrag();
       selectedKey = '';
       sheetPreviewKey = '';
       sheetPreviewFull = false;
@@ -3734,6 +3740,17 @@
     function attachmentKind(file) {
       if (/\./.test(file.name || '') && DOCUMENT_EXTENSIONS.has(String(file.name).split('.').pop().toLowerCase())) return 'file';
       return String(file.type).startsWith('image/') ? 'image' : '';
+    }
+    let composerDragDepth = 0;
+    function hasDraggedFiles(event) {
+      const dt = event && event.dataTransfer;
+      if (!dt) return false;
+      if (dt.types && Array.from(dt.types).includes('Files')) return true;
+      return Boolean(dt.files && dt.files.length);
+    }
+    function resetComposerDrag() {
+      composerDragDepth = 0;
+      document.getElementById('sheet-form').classList.remove('drag-over');
     }
     function addAttachments(fileList) {
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
@@ -4794,7 +4811,31 @@
       const chip = event.target.closest('.attachment[data-key]');
       if (chip) removeAttachment(chip.dataset.key);
     });
-    document.getElementById('sheet-form').addEventListener('submit', async (event) => {
+    const sheetForm = document.getElementById('sheet-form');
+    sheetForm.addEventListener('dragenter', (event) => {
+      if (!hasDraggedFiles(event)) return;
+      event.preventDefault();
+      composerDragDepth += 1;
+      if (!document.getElementById('sheet-attach').disabled) sheetForm.classList.add('drag-over');
+    });
+    sheetForm.addEventListener('dragover', (event) => {
+      if (!hasDraggedFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      if (!document.getElementById('sheet-attach').disabled) sheetForm.classList.add('drag-over');
+    });
+    sheetForm.addEventListener('dragleave', (event) => {
+      if (!hasDraggedFiles(event) && composerDragDepth === 0) return;
+      composerDragDepth = Math.max(0, composerDragDepth - 1);
+      if (composerDragDepth === 0) sheetForm.classList.remove('drag-over');
+    });
+    sheetForm.addEventListener('drop', (event) => {
+      if (!hasDraggedFiles(event)) return;
+      event.preventDefault();
+      resetComposerDrag();
+      addAttachments(event.dataTransfer && event.dataTransfer.files);
+    });
+    sheetForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
       const status = document.getElementById('sheet-status');
