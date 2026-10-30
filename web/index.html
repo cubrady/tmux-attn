@@ -5655,7 +5655,7 @@
     }
     function joinCommand(name, url) {
       // Expanded by the client's own shell, so each machine reports its own Tailscale address. Nothing is guessed here.
-      return `PEER_NAME='${name}' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='${url}' sh install.sh`;
+      return `curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='${name}' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='${url}' sh`;
     }
     function renderJoin() {
       const url = serverUrl(serverInfo || {});

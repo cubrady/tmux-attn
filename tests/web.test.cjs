@@ -3239,15 +3239,15 @@ test('two or more hosts label each card and the reply sheet, including while fil
     { name: 'workstation', ok: true },
     { name: 'client-2', ok: true },
   ];
-  const brian = { ...agent('workstation', 'WAIT'), cli: 'codex', project: 'sampleapp', title: 'Fix login', pane: '%1', pid: '1' };
-  const cicd = { ...agent('client-2', 'RUNNING'), cli: 'claude', project: 'sampleapp', title: 'Fix login', pane: '%2', pid: '2' };
+  const workstation = { ...agent('workstation', 'WAIT'), cli: 'codex', project: 'project-alpha', title: 'Fix login', pane: '%1', pid: '1' };
+  const cicd = { ...agent('client-2', 'RUNNING'), cli: 'claude', project: 'project-alpha', title: 'Fix login', pane: '%2', pid: '2' };
   const weird = { ...agent(hostile, 'IDLE', true, true), project: 'other', pane: '%3', pid: '3' };
   const wide = { ...agent(long, 'IDLE', true, true), project: 'wide', pane: '%4', pid: '4' };
-  ui.render({ hosts, agents: [brian, cicd, weird, wide] });
+  ui.render({ hosts, agents: [workstation, cicd, weird, wide] });
   const list = ui.elements.get('list').innerHTML;
   const tone = ui.context.hostTone('workstation');
   assert.match(list, new RegExp(`<div class="title-line"><span class="card-title">Fix login</span><span class="title-agent"><span class="cli sm codex"`));
-  assert.match(list, new RegExp(`<div class="env"><span class="project">sampleapp</span><span class="host-chip tone-${tone}" title="workstation">workstation</span></div>`));
+  assert.match(list, new RegExp(`<div class="env"><span class="project">project-alpha</span><span class="host-chip tone-${tone}" title="workstation">workstation</span></div>`));
   assert.match(ui.elements.get('hosts').innerHTML, new RegExp(`host-pill tone-${tone}`));
   assert.match(list, /title="client-2">client-2<\/span>/);
   assert.match(list, /aria-label="開啟 Fix login，workstation"/);
@@ -3255,7 +3255,7 @@ test('two or more hosts label each card and the reply sheet, including while fil
   assert.doesNotMatch(list, /<b>/);
   const clipped = long.slice(0, 15) + '…';
   assert.match(list, new RegExp(`title="${long}">${clipped}</span>`));
-  ui.open(brian);
+  ui.open(workstation);
   const sheetHost = ui.elements.get('sheet-host');
   assert.equal(sheetHost.hidden, false);
   assert.match(sheetHost.innerHTML, new RegExp(`class="host-chip tone-${tone}" title="workstation">workstation`));
@@ -3273,7 +3273,7 @@ test('two or more hosts label each card and the reply sheet, including while fil
 
 test('a single host leaves cards and the reply sheet unlabeled', () => {
   const ui = dashboard();
-  const current = { ...agent('only', 'WAIT'), cli: 'codex', project: 'sampleapp', title: 'Fix login' };
+  const current = { ...agent('only', 'WAIT'), cli: 'codex', project: 'project-alpha', title: 'Fix login' };
   ui.render({ hosts: [{ name: 'only', ok: true }], agents: [current] });
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /host-chip/);
   assert.match(ui.elements.get('list').innerHTML, /aria-label="開啟 Fix login"/);
@@ -3315,7 +3315,7 @@ test('card meta shows the tmux window index', () => {
 
 test('card title and meta fit long English and CJK text', () => {
   const ui = dashboard();
-  const project = 'sample專案'.repeat(12);
+  const project = 'demo專案'.repeat(12);
   const title = 'tmux工作流'.repeat(11);
   const prompt = '我貼了 latest prompt';
   const a = handoffAgent(project, [], { title, preview: { users: [prompt], agent: '' } });
@@ -4100,7 +4100,7 @@ test('connect command points the client at this server and at its own Tailscale 
   await openInfo(ui);
   assert.equal(ui.elements.get('info-url').textContent, 'http://100.64.0.10:7788');
   const cmd = ui.elements.get('info-cmd').textContent;
-  assert.equal(cmd, `PEER_NAME='<name>' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://100.64.0.10:7788' sh install.sh`);
+  assert.equal(cmd, `curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='<name>' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://100.64.0.10:7788' sh`);
   assert.equal(ui.elements.get('info-cmd-copy').disabled, true, 'no copy until the client has a name');
   assert.equal(ui.elements.get('info-url-copy').disabled, false);
 });
@@ -4118,7 +4118,7 @@ test('copy unlocks only for a shell-safe client name and copies the exact comman
   assert.equal(copy.disabled, false);
   ui.elements.get('info-panel').listeners.click({ target: { closest: () => copy } });
   for (let i = 0; i < 4; i++) await settle();
-  assert.deepEqual(copied, ["PEER_NAME='工作機-1.mac' LOCAL_FEED_URL=\"http://$(tailscale ip -4):7788\" SERVER_URL='http://100.64.0.10:7788' sh install.sh"]);
+  assert.deepEqual(copied, ["curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='工作機-1.mac' LOCAL_FEED_URL=\"http://$(tailscale ip -4):7788\" SERVER_URL='http://100.64.0.10:7788' sh"]);
   assert.equal(copy.textContent, '已複製');
 });
 

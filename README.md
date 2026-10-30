@@ -28,7 +28,7 @@ tmux Attention 讓你一眼知道：誰在問你、誰做完還沒看、誰還�
 ## 30 秒印象
 
 ```text
-tmux 底列    sampleapp 🏃 · wallet 👀 · lending 🙋
+tmux 底列    project-alpha 🏃 · wallet 👀 · lending 🙋
 網頁面板     最新完成置頂 · Markdown 預覽 · 一鍵回覆 / 關 pane · 右上 ? 看連線指令與 server 資訊
 ```
 
@@ -99,6 +99,15 @@ sh install.sh --solo          # 單機
 
 sh install_web_service.sh     # 建議：常駐 web（macOS launchd / Linux systemd）
 ```
+
+也可以在沒有 checkout 的 client 使用 GitHub 託管的安裝腳本（需要 `curl`、`git`，並已登入 Tailscale）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | \
+  PEER_NAME='client-1' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://<server>:7788' sh
+```
+
+腳本會 clone repo 到目前目錄下的 `tmux-attn`，再執行安裝與加入 server。執行前可先開啟上述 raw 網址檢視腳本；`main` 會隨更新改變。
 
 然後重開／resume agent session（或 Codex `/hooks`、Pi `/reload`；OpenCode 首次安裝後重開 TUI），讓 hooks 掛上。
 

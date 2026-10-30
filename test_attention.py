@@ -731,7 +731,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual((untracked['model'], untracked['model_label'], untracked['effort']), ('', '', ''))
 
     def test_pi_transcript_model_tasks_and_no_claude_fallback(self):
-        cwd = '/Volumes/work/proj/example-provider/sample-coaching-project'
+        cwd = '/Volumes/work/proj/example/sample-coaching-project'
         self.live = {
             ('%6', '69499'): {
                 'pane': '%6', 'pid': '69499', 'session': '0', 'window': 'pi-bin',
@@ -739,7 +739,7 @@ class StoreTests(unittest.TestCase):
                 'path': cwd, 'command': 'pi-bin', 'pane_title': 'Pi-Bolt - sample-coaching-project',
             },
         }
-        pi_dir = Path(self.tmp.name) / 'sessions' / '--Volumes-work-proj-example-provider-sample-coaching-project--'
+        pi_dir = Path(self.tmp.name) / 'sessions' / '--Volumes-work-proj-example-sample-coaching-project--'
         pi_dir.mkdir(parents=True)
         pi_session = pi_dir / 'session.jsonl'
         lines = [

@@ -6,8 +6,8 @@
 #   python3 join_peer.py --solo
 #
 # Multi client:
-#   PEER_NAME=client-2 LOCAL_FEED_URL=http://100.x:7788 \
-#     SERVER_URL=http://100.64.0.11:7788 sh install.sh
+#   PEER_NAME=client-1 LOCAL_FEED_URL=http://100.x:7788 \
+#     SERVER_URL=http://server:7788 sh install.sh
 #
 # Env: SETUP=solo|multi
 #      PEER_NAME, LOCAL_FEED_URL, SERVER_URL (preferred), SERVER_SSH (optional fallback)
