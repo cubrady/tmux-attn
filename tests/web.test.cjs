@@ -2230,7 +2230,7 @@ function killSetup({ kill, names = ['demo'] } = {}) {
   const keyOf = i => ui.context.agentKey(agents[i]);
   const tap = (i = 0, onKill = true) => ui.elements.get('list').listeners.click({
     target: { closest: selector => (selector === '[data-kill]' ? (onKill ? {} : null)
-      : selector === '[data-later]' ? null : { dataset: { key: keyOf(i) } }) },
+      : selector === '[data-later]' || selector === '[data-shell-input]' ? null : { dataset: { key: keyOf(i) } }) },
   });
   const list = () => { ui.render({ agents }); return ui.elements.get('list').innerHTML; };
   const advance = ms => {
@@ -3927,6 +3927,68 @@ test('font size controls increase, decrease, reset and persist scale', () => {
   assert.equal(restoredScale, '1.3');
 });
 
+test('untracked shell cards take a one-line input that posts to /api/send and keeps its draft across polls', async () => {
+  const shellAgent = { ...agent('lab', 'SHELL', false), pane: '%9', pid: '9', project: 'plain-shell',
+    preview: { users: [], agent: '', lines: ['$ ls'] } };
+  const requests = [];
+  const ui = dashboard({ fetchRequest: async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, json: async () => ({ ok: true }) };
+  } });
+  ui.render({ hosts: [{ name: 'lab', ok: true }], agents: [shellAgent] });
+  const list = ui.elements.get('list');
+  assert.match(list.innerHTML, /<form class="shell-input" data-shell-input>[\s\S]*data-shell-field[\s\S]*placeholder="輸入指令/);
 
+  const key = 'lab|%9|9';
+  const field = { value: 'echo hi', closest: sel => sel === '[data-shell-field]' ? field : { dataset: { key } } };
+  list.listeners.input({ target: field });
+  ui.render({ hosts: [{ name: 'lab', ok: true }], agents: [shellAgent] });
+  assert.match(list.innerHTML, /value="echo hi"/);
 
+  // Submitting the form posts the draft to the pane's own host.
+  let prevented = false;
+  const card = { dataset: { key } };
+  const form = { closest: () => card };
+  await list.listeners.submit({
+    preventDefault() { prevented = true; },
+    target: { closest: sel => sel === '[data-shell-input]' ? form : null },
+  });
+  assert.ok(prevented);
+  assert.deepEqual(requests, [{ url: '/api/send',
+    body: { host: 'lab', pane: '%9', pid: '9', text: 'echo hi', submit: true, images: [] } }]);
+  ui.render({ hosts: [{ name: 'lab', ok: true }], agents: [shellAgent] });
+  assert.doesNotMatch(list.innerHTML, /value="echo hi"/);
+});
 
+function serverInfo(overrides = {}) {
+  return {
+    ok: true, host: 'workstation', version: '1b3a8a0d2e8d', started_version: '1b3a8a0d2e8d', fleet_only: false,
+    bind: '0.0.0.0', port: 7788, peers: [], peers_path: '/home/dev/.config/tmux-attn/peers.json',
+    tailscale_url: 'http://100.64.0.10:7788', ...overrides,
+  };
+}
+
+function infoDashboard(info, { location, navigator, fetchRequest } = {}) {
+  const calls = [];
+  const ui = dashboard({
+    allowInfoFetch: true,
+    window: { location: location || { hash: '', hostname: '100.64.0.10', origin: 'http://100.64.0.10:7788' } },
+    navigator,
+    fetchRequest: fetchRequest || (async (url) => { calls.push(url); return response(info); }),
+  });
+  // The fake DOM does not read the HTML `hidden` attribute, so start in the state index.html declares.
+  ui.elements.get('info-panel').hidden = true;
+  ui.elements.get('info-toggle').setAttribute('aria-expanded', 'false');
+  return { ui, calls };
+}
+
+async function openInfo(ui) {
+  ui.elements.get('info-toggle').listeners.click();
+  for (let i = 0; i < 8; i++) await settle();
+}
+
+function typeName(ui, value) {
+  const input = ui.elements.get('info-peer-name');
+  input.value = value;
+  input.listeners.input();
+}

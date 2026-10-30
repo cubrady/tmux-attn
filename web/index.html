@@ -994,6 +994,37 @@
     }
     .shell-preview-toggle:active { transform: scale(0.97); }
     .shell-preview-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .shell-input {
+      margin-top: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .shell-input input {
+      flex: 1 1 0;
+      min-width: 0;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--bg) 62%, var(--card));
+      color: var(--fg);
+      font: 0.8rem/1.4 var(--mono);
+    }
+    .shell-input input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .shell-send {
+      padding: 0 12px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      font: 600 0.75rem/1 var(--mono);
+      cursor: pointer;
+      transition: transform 120ms var(--ease), opacity 140ms var(--ease);
+    }
+    .shell-send:active:not(:disabled) { transform: scale(0.96); }
+    .shell-send:disabled, .shell-input input:disabled { opacity: 0.5; cursor: default; }
+    .shell-send:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .shell-input-error { flex: 1 0 100%; color: var(--danger); font-size: 0.72rem; }
     .card.error {
       border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
       border-left-color: var(--danger);
@@ -3478,6 +3509,9 @@
     const SHELL_PREVIEW_COLLAPSED = 3;
     const SHELL_PREVIEW_EXPANDED = 12;
     const expandedShellKeys = new Set();
+    // Drafts and send state live here because the poll re-renders every card and would drop what was typed.
+    const shellDrafts = new Map();
+    const shellSend = new Map();
     function shellLines(a) {
       const raw = a?.preview?.lines;
       if (!Array.isArray(raw)) return [];
@@ -3500,6 +3534,19 @@
         `<pre class="shell-preview-lines">${shown.map(line => escapeHtml(line)).join('\n')}</pre>` +
         toggle +
       `</div>`;
+    }
+    // A plain pane has no transcript sheet, so it takes a one-line input on the card itself.
+    function shellInputHtml(a) {
+      if (!canKill(a)) return '';
+      const key = agentKey(a);
+      const state = shellSend.get(key) || {};
+      const name = sessionLabel(a) || projectName(a);
+      return `<form class="shell-input" data-shell-input>` +
+        `<input type="text" data-shell-field autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" ` +
+          `placeholder="輸入指令，Enter 送出" aria-label="送到 ${escapeHtml(name)}" value="${escapeHtml(shellDrafts.get(key) || '')}"${state.busy ? ' disabled' : ''}>` +
+        `<button type="submit" class="shell-send" aria-label="送出到 ${escapeHtml(name)}"${state.busy ? ' disabled' : ''}>送出</button>` +
+        (state.error ? `<div class="shell-input-error" role="alert">${escapeHtml(state.error)}</div>` : '') +
+      `</form>`;
     }
     function cardPreviewHtml(preview) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
@@ -3719,7 +3766,7 @@
         ${killNote}
         ${GENERIC_REASONS.has(reason) ? '' : `<div class="reason">${escapeHtml(reason)}</div>`}
         ${cardTasksHtml(a.tasks)}
-        ${cat === 'shell' ? shellPreviewHtml(a) : cardPreviewHtml(a.preview)}
+        ${cat === 'shell' ? shellPreviewHtml(a) + shellInputHtml(a) : cardPreviewHtml(a.preview)}
       </article>`;
     }
     // Closing a pane is destructive, so a card's trash needs two taps. The state lives here rather than in the
@@ -3753,6 +3800,7 @@
         ? (active.closest('[data-kill]') ? '[data-kill]'
           : active.closest('[data-later]') ? '[data-later]'
           : active.closest('[data-shell-toggle]') ? '[data-shell-toggle]'
+          : active.closest('[data-shell-field]') ? '[data-shell-field]'
           : '.card-open') : '';
       el.outerHTML = cardHtml(agent, { newest: el.classList.contains('newest') });
       const target = refocus && (document.querySelector(selector) || { querySelector: () => null }).querySelector(refocus);
@@ -4719,6 +4767,10 @@
       for (const key of Object.keys(grouped)) {
         grouped[key].sort((a, b) => (b.updated || 0) - (a.updated || 0));
       }
+      const typing = document.activeElement && document.activeElement.closest
+        ? document.activeElement.closest('[data-shell-field]') : null;
+      const typingKey = typing ? typing.closest('.card[data-key]')?.dataset.key : '';
+      const typingAt = typing ? [typing.selectionStart, typing.selectionEnd] : null;
       list.innerHTML = SECTIONS.map(([key, title]) => {
         const rows = grouped[key];
         if (!rows.length) return '';
@@ -4727,6 +4779,12 @@
       }).join('') + (later.length ? `<details class="later-group" id="group-later"${laterExpanded ? ' open' : ''}>` +
         `<summary>🗃️ 稍後 <span class="count">${later.length}</span></summary>` +
         later.map(a => cardHtml(a)).join('') + '</details>' : '');
+      const resumed = typingKey && list.querySelector
+        ? list.querySelector(`.card[data-key="${CSS.escape(typingKey)}"] [data-shell-field]`) : null;
+      if (resumed) {
+        resumed.focus();
+        if (typingAt && typingAt[0] != null) resumed.setSelectionRange(typingAt[0], typingAt[1]);
+      }
       markClippedPreviews();
       syncSheetFromData();
     }
@@ -4817,6 +4875,7 @@
       const card = event.target.closest('.card[data-key]');
       if (!card) return;
       if (event.target.closest('[data-kill]')) return onCardKill(card.dataset.key);
+      if (event.target.closest('[data-shell-input]')) return;
       const agent = latestAgents.find(a => agentKey(a) === card.dataset.key);
       if (!agent) return;
       if (!agent.tracked || category(agent) === 'shell') {
@@ -4831,6 +4890,38 @@
       }
       if (event.target.closest('[data-later]')) return onLater(agent);
       openSheet(agent);
+    });
+    document.getElementById('list').addEventListener('input', (event) => {
+      const field = event.target.closest && event.target.closest('[data-shell-field]');
+      const key = field && field.closest('.card[data-key]')?.dataset.key;
+      if (key) shellDrafts.set(key, field.value);
+    });
+    document.getElementById('list').addEventListener('submit', async (event) => {
+      const form = event.target.closest && event.target.closest('[data-shell-input]');
+      if (!form) return;
+      event.preventDefault();
+      const key = form.closest('.card[data-key]')?.dataset.key;
+      const agent = latestAgents.find(a => agentKey(a) === key);
+      const text = (shellDrafts.get(key) || '').trim();
+      if (!agent || !canKill(agent) || !text || shellSend.get(key)?.busy) return;
+      shellSend.set(key, { busy: true });
+      replaceCard(key);
+      try {
+        const res = await fetch('/api/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: agent.host || '', pane: agent.pane, pid: agent.pid, text, submit: true, images: [] }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        if (shellDrafts.get(key) === text) shellDrafts.delete(key);
+        shellSend.delete(key);
+        refresh();
+        setTimeout(refresh, 1500);
+      } catch (e) {
+        shellSend.set(key, { error: e.message });
+      }
+      replaceCard(key);
     });
     document.getElementById('list').addEventListener('toggle', (event) => {
       if (event.target.id === 'group-later') laterExpanded = event.target.open;
