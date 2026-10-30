@@ -10,7 +10,7 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
   const overrides = isFn ? {} : (firstArg || {});
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, {
-    innerHTML: '', textContent: '', value: '', hidden: false, disabled: false, title: '', dataset: {}, listeners: {},
+    innerHTML: '', textContent: '', value: '', hidden: false, disabled: false, title: '', dataset: {}, attrs: {}, listeners: {},
     classList: { add() {}, remove() {}, toggle() {} },
     children: [],
     style: { setProperty() {}, removeProperty() {} },
@@ -21,7 +21,11 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
       return child;
     },
     addEventListener(type, listener) { this.listeners[type] = listener; },
-    setAttribute() {}, removeAttribute() {}, focus() {},
+    contains(node) { return node === this; },
+    setAttribute(name, value) { this.attrs[name] = String(value); },
+    getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; },
+    removeAttribute(name) { delete this.attrs[name]; },
+    focus() {},
   }]));
   elements.get('sheet-panel').appendChild(elements.get('sheet-form'));
   const document = {
@@ -46,7 +50,9 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
     fetch: (url, options) => {
       const fleetPoll = typeof url === 'string' && (url === '/api/fleet' || url.startsWith('/api/fleet/'));
       const usagePoll = typeof url === 'string' && url.startsWith('/api/usage');
-      if (!fetchRequest || (fleetPoll && !overrides.allowFleetFetch) || (usagePoll && !overrides.allowUsageFetch)) {
+      const infoPoll = url === '/api/info';
+      if (!fetchRequest || (fleetPoll && !overrides.allowFleetFetch) || (usagePoll && !overrides.allowUsageFetch)
+        || (infoPoll && !overrides.allowInfoFetch)) {
         return new Promise(() => {});
       }
       return fetchRequest(url, options);
@@ -3992,3 +3998,126 @@ function typeName(ui, value) {
   input.value = value;
   input.listeners.input();
 }
+
+test('? popover starts closed, reads server facts on boot, and lists peers', async () => {
+  const { ui, calls } = infoDashboard(serverInfo({
+    peers: [{ name: 'work-mac', url: 'http://100.1.2.3:7788' }],
+  }));
+  for (let i = 0; i < 8; i++) await settle();
+  const toggle = ui.elements.get('info-toggle');
+  assert.equal(ui.elements.get('info-panel').hidden, true);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.deepEqual(calls, ['/api/info']);
+  assert.equal(ui.elements.get('info-host').textContent, 'workstation');
+  assert.equal(ui.elements.get('info-version').textContent, '1b3a8a0');
+  assert.equal(ui.elements.get('info-mode').textContent, '多機 server');
+  assert.equal(ui.elements.get('info-peers-count').textContent, '1 台');
+  assert.match(ui.elements.get('info-peers').innerHTML, /work-mac<\/strong><span>http:\/\/100\.1\.2\.3:7788/);
+  assert.equal(ui.elements.get('info-bind').textContent, '0.0.0.0:7788');
+});
+
+test('hover previews the popover for a mouse, click pins it, and a second click closes it', async () => {
+  const { ui } = infoDashboard(serverInfo());
+  const wrap = ui.elements.get('info-wrap');
+  const panel = ui.elements.get('info-panel');
+  const toggle = ui.elements.get('info-toggle');
+
+  wrap.listeners.pointerenter({ pointerType: 'mouse' });
+  assert.equal(panel.hidden, false);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  wrap.listeners.pointerleave({ pointerType: 'mouse' });
+  assert.equal(panel.hidden, true, 'a hover preview closes when the pointer leaves');
+
+  toggle.listeners.click();
+  wrap.listeners.pointerleave({ pointerType: 'mouse' });
+  assert.equal(panel.hidden, false, 'a click pins the card so moving away keeps it open');
+  toggle.listeners.click();
+  assert.equal(panel.hidden, true);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+});
+
+test('touch has no hover preview, so only a tap opens the popover', () => {
+  const { ui } = infoDashboard(serverInfo());
+  ui.elements.get('info-wrap').listeners.pointerenter({ pointerType: 'touch' });
+  assert.equal(ui.elements.get('info-panel').hidden, true);
+  ui.elements.get('info-toggle').listeners.click();
+  assert.equal(ui.elements.get('info-panel').hidden, false);
+});
+
+test('connect command points the client at this server and at its own Tailscale address', async () => {
+  const { ui } = infoDashboard(serverInfo());
+  await openInfo(ui);
+  assert.equal(ui.elements.get('info-url').textContent, 'http://100.64.0.10:7788');
+  const cmd = ui.elements.get('info-cmd').textContent;
+  assert.equal(cmd, `PEER_NAME='<name>' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://100.64.0.10:7788' sh install.sh`);
+  assert.equal(ui.elements.get('info-cmd-copy').disabled, true, 'no copy until the client has a name');
+  assert.equal(ui.elements.get('info-url-copy').disabled, false);
+});
+
+test('copy unlocks only for a shell-safe client name and copies the exact command', async () => {
+  const copied = [];
+  const { ui } = infoDashboard(serverInfo(), { navigator: { clipboard: { writeText: async (text) => { copied.push(text); } } } });
+  await openInfo(ui);
+  const copy = ui.elements.get('info-cmd-copy');
+  for (const bad of ["work mac", "a'b", 'x$(id)', '']) {
+    typeName(ui, bad);
+    assert.equal(copy.disabled, true, `rejects ${JSON.stringify(bad)}`);
+  }
+  typeName(ui, '工作機-1.mac');
+  assert.equal(copy.disabled, false);
+  ui.elements.get('info-panel').listeners.click({ target: { closest: () => copy } });
+  for (let i = 0; i < 4; i++) await settle();
+  assert.deepEqual(copied, ["PEER_NAME='工作機-1.mac' LOCAL_FEED_URL=\"http://$(tailscale ip -4):7788\" SERVER_URL='http://100.64.0.10:7788' sh install.sh"]);
+  assert.equal(copy.textContent, '已複製');
+});
+
+test('on loopback the address comes from the server, and nothing is copyable without one', async () => {
+  const loopback = { hash: '', hostname: 'localhost', origin: 'http://localhost:7788' };
+  const { ui } = infoDashboard(serverInfo({ tailscale_url: '' }), { location: loopback });
+  await openInfo(ui);
+  assert.equal(ui.elements.get('info-url').textContent, '找不到 Tailscale 位址');
+  assert.equal(ui.elements.get('info-url-copy').disabled, true);
+  typeName(ui, 'laptop');
+  assert.equal(ui.elements.get('info-cmd-copy').disabled, true);
+  assert.match(ui.elements.get('info-cmd').textContent, /SERVER_URL='http:\/\/<server>:7788'/);
+
+  const withTs = infoDashboard(serverInfo({ tailscale_url: 'http://100.5.6.7:7788' }), { location: loopback });
+  await openInfo(withTs.ui);
+  assert.equal(withTs.ui.elements.get('info-url').textContent, 'http://100.5.6.7:7788');
+});
+
+test('a failed first load says so instead of showing a made-up address', async () => {
+  const loopback = { hash: '', hostname: 'localhost', origin: 'http://localhost:7788' };
+  const { ui } = infoDashboard(null, { location: loopback, fetchRequest: async () => { throw new TypeError('offline'); } });
+  for (let i = 0; i < 8; i++) await settle();
+  assert.equal(ui.elements.get('info-url').textContent, '無法取得 server 資訊');
+  assert.equal(ui.elements.get('info-host').textContent, '');
+});
+
+test('a version changed on disk but not in the running process raises the dot and the restart note', async () => {
+  const stale = infoDashboard(serverInfo({ version: 'aaaaaaaaaaaa', started_version: 'bbbbbbbbbbbb' }));
+  for (let i = 0; i < 8; i++) await settle();
+  assert.equal(stale.ui.elements.get('info-dot').hidden, false);
+  assert.equal(stale.ui.elements.get('info-stale').hidden, false);
+  assert.match(stale.ui.elements.get('info-toggle').getAttribute('aria-label'), /需要重啟/);
+
+  const fresh = infoDashboard(serverInfo());
+  for (let i = 0; i < 8; i++) await settle();
+  assert.equal(fresh.ui.elements.get('info-dot').hidden, true);
+  assert.equal(fresh.ui.elements.get('info-stale').hidden, true);
+});
+
+test('Escape and an outside pointer close the popover', async () => {
+  const { ui } = infoDashboard(serverInfo());
+  await openInfo(ui);
+  ui.document.listeners.keydown({ key: 'Escape' });
+  assert.equal(ui.elements.get('info-panel').hidden, true);
+
+  await openInfo(ui);
+  ui.document.listeners.pointerdown({ target: {} });
+  assert.equal(ui.elements.get('info-panel').hidden, true);
+
+  await openInfo(ui);
+  ui.document.listeners.pointerdown({ target: ui.elements.get('info-wrap') });
+  assert.equal(ui.elements.get('info-panel').hidden, false, 'pointer inside the popover keeps it open');
+});

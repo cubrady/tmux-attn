@@ -29,7 +29,7 @@ tmux Attention 讓你一眼知道：誰在問你、誰做完還沒看、誰還�
 
 ```text
 tmux 底列    sampleapp 🏃 · wallet 👀 · lending 🙋
-網頁面板     最新完成置頂 · Markdown 預覽 · 一鍵回覆 / 關 pane
+網頁面板     最新完成置頂 · Markdown 預覽 · 一鍵回覆 / 關 pane · 右上 ? 看連線指令與 server 資訊
 ```
 
 - **看**：底列計數、popup 清單、fleet 卡片（含對話預覽與 git 環境）
@@ -94,7 +94,7 @@ git clone https://github.com/cubrady/tmux-attn.git
 cd tmux-attn
 sh install.sh --solo          # 單機
 # 多機 client：
-# PEER_NAME='…' LOCAL_FEED_URL='http://$(tailscale ip -4):7788' \
+# PEER_NAME='…' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" \
 #   SERVER_URL='http://<server>:7788' sh install.sh
 
 sh install_web_service.sh     # 建議：常駐 web（macOS launchd / Linux systemd）

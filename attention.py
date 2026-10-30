@@ -4905,7 +4905,58 @@ def dispatch_answer(payload):
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local}
 
 
-def make_web_handler(fleet_only=False):
+TAILSCALE_BINARIES = (
+    'tailscale',
+    '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+    '/usr/local/bin/tailscale',
+    '/opt/homebrew/bin/tailscale',
+)
+_TAILSCALE_CACHE = {'at': None, 'ip': ''}
+
+
+def tailscale_ipv4():
+    """Best-effort Tailscale IPv4 of this machine. launchd's PATH may omit the CLI, so try known locations too.
+
+    Cached for 60s: the info popover is opened from the page and must not spawn a process per request.
+    """
+    now = time.monotonic()
+    if _TAILSCALE_CACHE['at'] is not None and now - _TAILSCALE_CACHE['at'] < 60:
+        return _TAILSCALE_CACHE['ip']
+    ip = ''
+    for binary in TAILSCALE_BINARIES:
+        try:
+            proc = subprocess.run([binary, 'ip', '-4'], capture_output=True, text=True, timeout=2)
+        except subprocess.TimeoutExpired:
+            break  # a hung daemon hangs every CLI location; do not stack 2s timeouts on a page poll
+        except OSError:
+            continue
+        lines = [line.strip() for line in proc.stdout.splitlines()]
+        found = next((line for line in lines if re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', line)), '')
+        if proc.returncode == 0 and found:
+            ip = found
+            break
+    _TAILSCALE_CACHE.update(at=now, ip=ip)
+    return ip
+
+
+def server_info_payload(bind='0.0.0.0', port=7788, fleet_only=False):
+    """What the header's ? popover shows: enough to connect a client and to spot a stale process."""
+    ts_ip = tailscale_ipv4()
+    return {
+        'ok': True,
+        'host': local_host_name(),
+        'version': install_version(),
+        'started_version': STARTED_VERSION,
+        'fleet_only': bool(fleet_only),
+        'bind': bind,
+        'port': port,
+        'peers': load_peers(),
+        'peers_path': str(peers_config_path()),
+        'tailscale_url': f'http://{ts_ip}:{port}' if ts_ip else '',
+    }
+
+
+def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
     index = web_index_path()
     if not index.is_file():
         raise SystemExit(f'Missing web UI: {index}')
@@ -4941,6 +4992,15 @@ def make_web_handler(fleet_only=False):
                     'version': install_version(),
                     'started_version': STARTED_VERSION,
                 }), 'application/json; charset=utf-8')
+                return
+            if path == '/api/info':
+                try:
+                    payload = server_info_payload(bind=bind, port=port, fleet_only=fleet_only)
+                    self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/info: {type(exc).__name__}: {exc}\n')
+                    self._send(500, json.dumps({'ok': False, 'error': 'failed to load server info'}),
+                               'application/json; charset=utf-8')
                 return
             if path == '/api/agents':
                 # Machine-local feed only — peer scrapers must use this path.
@@ -5068,7 +5128,7 @@ def make_web_handler(fleet_only=False):
 
 def serve_web(host='0.0.0.0', port=7788, fleet_only=False):
     prune_uploads()
-    server = ThreadingHTTPServer((host, port), make_web_handler(fleet_only=fleet_only))
+    server = ThreadingHTTPServer((host, port), make_web_handler(fleet_only=fleet_only, bind=host, port=port))
     print(json.dumps({
         'web': f'http://{host}:{port}/',
         'bind': host,

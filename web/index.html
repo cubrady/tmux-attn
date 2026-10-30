@@ -221,6 +221,98 @@
       box-shadow: 0 0 0 2px var(--bg);
     }
     .notify-dot[hidden] { display: none; }
+    .info-wrap { position: relative; display: inline-flex; flex-shrink: 0; }
+    .info-btn {
+      appearance: none;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--line) 35%, var(--card));
+      color: var(--muted);
+      font: 700 0.78rem/1 var(--font);
+      cursor: pointer;
+      transition: color 140ms var(--ease), background 140ms var(--ease), border-color 140ms var(--ease);
+    }
+    @media (hover: hover) {
+      .info-btn:hover { color: var(--fg); }
+    }
+    .info-btn[aria-expanded="true"] {
+      color: var(--fg);
+      background: var(--card);
+      border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+    }
+    .info-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .info-dot {
+      position: absolute;
+      top: -2px;
+      right: -2px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--wait);
+      box-shadow: 0 0 0 2px var(--bg);
+    }
+    .info-dot[hidden] { display: none; }
+    /* The padding bridges the gap to the button, so moving the pointer down onto the card keeps it open. */
+    .info-pop { position: absolute; top: 100%; right: 0; z-index: 30; padding-top: 8px; }
+    .info-pop[hidden] { display: none; }
+    .info-card {
+      width: min(340px, calc(100vw - 32px));
+      max-height: min(70vh, 520px);
+      overflow: auto;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      color: var(--fg);
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+      text-align: left;
+      font-size: 0.8rem;
+    }
+    .info-section + .info-section { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+    .info-heading { margin: 0 0 6px; color: var(--muted); font: 700 0.72rem/1.2 var(--font); }
+    .info-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+    .info-label { flex: 0 0 auto; min-width: 2.5em; color: var(--muted); font-size: 0.72rem; }
+    .info-field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+    .info-field input {
+      min-width: 0;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--fg);
+      font: 0.8rem var(--font);
+    }
+    .info-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .info-value,
+    .info-cmd {
+      flex: 1 1 auto;
+      min-width: 0;
+      margin: 0;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--bg);
+      font: 0.72rem/1.4 var(--mono);
+      overflow-wrap: anywhere;
+      user-select: all;
+    }
+    .info-hint,
+    .info-note { margin: 6px 0 0; color: var(--muted); font-size: 0.72rem; line-height: 1.45; }
+    .info-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 10px; margin: 6px 0 0; font-size: 0.76rem; }
+    .info-grid dt { color: var(--muted); }
+    .info-grid dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .info-peers { margin: 6px 0 0; padding: 0; list-style: none; font-size: 0.74rem; }
+    .info-peers li { padding: 2px 0; overflow-wrap: anywhere; }
+    .info-peers li span { margin-left: 6px; color: var(--muted); font-family: var(--mono); }
+    .info-advanced summary { cursor: pointer; color: var(--muted); font: 700 0.72rem/1.2 var(--font); }
+    .info-advanced[open] summary { margin-bottom: 6px; }
+    .info-card .copy-cmd:disabled { opacity: 0.45; cursor: not-allowed; }
     .font-size-ctrl {
       display: inline-flex;
       align-items: center;
@@ -2574,6 +2666,51 @@
             <span class="notify-dot" id="notify-dot" hidden aria-hidden="true"></span>
           </button>
           <div class="live" id="clock" data-state="loading">…</div>
+          <div class="info-wrap" id="info-wrap">
+            <button type="button" class="info-btn" id="info-toggle" aria-label="伺服器連線資訊" aria-expanded="false" aria-controls="info-panel">
+              ?
+              <span class="info-dot" id="info-dot" hidden aria-hidden="true"></span>
+            </button>
+            <div class="info-pop" id="info-panel" role="dialog" aria-label="連線到這台 server" hidden>
+              <div class="info-card">
+                <section class="info-section">
+                  <h2 class="info-heading">連線到這台 server</h2>
+                  <div class="info-row">
+                    <span class="info-label">網址</span>
+                    <code class="info-value" id="info-url"></code>
+                    <button type="button" class="copy-cmd" id="info-url-copy" disabled>複製</button>
+                  </div>
+                  <label class="info-field">
+                    <span class="info-label">這台 client 的名稱</span>
+                    <input type="text" id="info-peer-name" placeholder="例如 work-mac" maxlength="64" autocomplete="off" spellcheck="false">
+                  </label>
+                  <div class="info-row">
+                    <code class="info-cmd" id="info-cmd"></code>
+                    <button type="button" class="copy-cmd" id="info-cmd-copy" disabled>複製</button>
+                  </div>
+                  <p class="info-hint" id="info-hint"></p>
+                </section>
+                <section class="info-section">
+                  <h2 class="info-heading">Server</h2>
+                  <dl class="info-grid">
+                    <dt>主機</dt><dd id="info-host"></dd>
+                    <dt>版本</dt><dd id="info-version"></dd>
+                    <dt>模式</dt><dd id="info-mode"></dd>
+                    <dt>Peers</dt><dd id="info-peers-count"></dd>
+                  </dl>
+                  <ul class="info-peers" id="info-peers"></ul>
+                  <p class="info-note" id="info-stale" hidden>程式已更新，web 服務尚未重啟；重啟後生效。</p>
+                </section>
+                <details class="info-section info-advanced">
+                  <summary>進階</summary>
+                  <dl class="info-grid">
+                    <dt>監聽</dt><dd id="info-bind"></dd>
+                    <dt>Peers 檔</dt><dd id="info-peers-path"></dd>
+                  </dl>
+                </details>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="live-content">
@@ -4940,7 +5077,8 @@
     });
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
-      if (readerOpen) closeReader();
+      if (infoOpen) closeInfo({ focusToggle: true });
+      else if (readerOpen) closeReader();
       else if (sheetOpen) closeSheet();
     });
     window.addEventListener('hashchange', applyRoute);
@@ -5484,6 +5622,128 @@
         }
       }
     }
+    // ? popover: how a client joins this server, plus the facts that explain this server's state.
+    const INFO_POLL_MS = 60000;
+    // Shell-safe on purpose: the name ends up inside single quotes in a command the user pastes.
+    const PEER_NAME_RE = /^[\p{L}\p{N}._-]{1,64}$/u;
+    const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+    const infoWrap = document.getElementById('info-wrap');
+    const infoToggle = document.getElementById('info-toggle');
+    const infoPanel = document.getElementById('info-panel');
+    const infoPeerName = document.getElementById('info-peer-name');
+    let serverInfo = null;
+    let infoFailed = false;
+    let infoOpen = false;
+    let infoPinned = false;
+    function setText(el, text) {
+      // Rewriting identical text would drop the selection the user is copying from.
+      if (el.textContent !== text) el.textContent = text;
+    }
+    function serverUrl(info) {
+      // A remote viewer already reached this server at this origin. On loopback the server must supply its Tailscale address.
+      if (!LOOPBACK_HOSTS.has(location.hostname)) return location.origin || '';
+      return info.tailscale_url || '';
+    }
+    function joinCommand(name, url) {
+      // Expanded by the client's own shell, so each machine reports its own Tailscale address. Nothing is guessed here.
+      return `PEER_NAME='${name}' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='${url}' sh install.sh`;
+    }
+    function renderJoin() {
+      const url = serverUrl(serverInfo || {});
+      const urlReady = /^https?:\/\//.test(url);
+      const name = infoPeerName.value.trim();
+      const nameReady = PEER_NAME_RE.test(name);
+      const urlEl = document.getElementById('info-url');
+      const urlCopy = document.getElementById('info-url-copy');
+      const cmdEl = document.getElementById('info-cmd');
+      const cmdCopy = document.getElementById('info-cmd-copy');
+      const missing = !serverInfo ? (infoFailed ? '無法取得 server 資訊' : '載入中…') : '找不到 Tailscale 位址';
+      setText(urlEl, urlReady ? url : missing);
+      urlCopy.disabled = !urlReady;
+      urlCopy.dataset.copy = urlReady ? url : '';
+      const cmd = joinCommand(nameReady ? name : '<name>', urlReady ? url : 'http://<server>:7788');
+      setText(cmdEl, cmd);
+      cmdCopy.disabled = !(nameReady && urlReady);
+      cmdCopy.dataset.copy = nameReady && urlReady ? cmd : '';
+      setText(document.getElementById('info-hint'),
+        !nameReady ? '填入這台 client 的名稱（字母、數字、. _ -），指令會跟著更新。'
+          : !urlReady ? '這台 server 沒偵測到 Tailscale 位址；請把 <server> 換成 server 的 IP 或主機名稱。'
+            : '到要加入的那台機器上，在 tmux-attn 專案目錄內執行。');
+    }
+    function renderServerInfo() {
+      const info = serverInfo;
+      if (info) {
+        const stale = !!info.version && !!info.started_version && info.version !== info.started_version;
+        document.getElementById('info-dot').hidden = !stale;
+        document.getElementById('info-stale').hidden = !stale;
+        infoToggle.setAttribute('aria-label', stale ? '伺服器連線資訊（程式已更新，需要重啟）' : '伺服器連線資訊');
+        setText(document.getElementById('info-host'), info.host || '未知');
+        setText(document.getElementById('info-version'), info.version ? shortVersion(info.version) : '未知');
+        setText(document.getElementById('info-mode'),
+          info.fleet_only ? '聚合檢視（--fleet）' : (info.peers.length ? '多機 server' : '單機'));
+        setText(document.getElementById('info-peers-count'), `${info.peers.length} 台`);
+        const peersHtml = info.peers.map(p => `<li><strong>${escapeHtml(p.name)}</strong><span>${escapeHtml(p.url)}</span></li>`).join('');
+        const peersEl = document.getElementById('info-peers');
+        if (peersEl.innerHTML !== peersHtml) peersEl.innerHTML = peersHtml;
+        setText(document.getElementById('info-bind'), `${info.bind}:${info.port}`);
+        setText(document.getElementById('info-peers-path'), info.peers_path || '');
+      }
+      renderJoin();
+    }
+    async function loadServerInfo() {
+      try {
+        const response = await fetch('/api/info', { cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error('server info unavailable');
+        serverInfo = data;
+        infoFailed = false;
+      } catch (_) {
+        // Keep the last good snapshot on a transient failure; only a first failure is shown.
+        infoFailed = true;
+      }
+      renderServerInfo();
+    }
+    function setInfoOpen(open) {
+      infoOpen = open;
+      infoToggle.setAttribute('aria-expanded', String(open));
+      infoPanel.hidden = !open;
+      if (open) loadServerInfo();
+    }
+    function closeInfo({ focusToggle = false } = {}) {
+      infoPinned = false;
+      setInfoOpen(false);
+      if (focusToggle) infoToggle.focus();
+    }
+    // Mouse: hover previews, click pins. Touch has no hover, so a tap opens and pins.
+    infoWrap.addEventListener('pointerenter', (event) => {
+      if (event.pointerType === 'mouse' && !infoOpen) setInfoOpen(true);
+    });
+    infoWrap.addEventListener('pointerleave', (event) => {
+      if (event.pointerType === 'mouse' && !infoPinned) setInfoOpen(false);
+    });
+    infoToggle.addEventListener('click', () => {
+      if (infoOpen && infoPinned) return closeInfo();
+      infoPinned = true;
+      if (!infoOpen) setInfoOpen(true);
+    });
+    document.addEventListener('pointerdown', (event) => {
+      if (infoOpen && !infoWrap.contains(event.target)) closeInfo();
+    });
+    infoPeerName.addEventListener('input', renderJoin);
+    infoPanel.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-copy]');
+      if (!button || button.disabled || !button.dataset.copy) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(button.dataset.copy);
+        else legacyCopy(button.dataset.copy);
+        button.textContent = '已複製';
+      } catch (_) {
+        button.textContent = '無法複製';
+      }
+      setTimeout(() => { button.textContent = '複製'; }, 1600);
+    });
+    loadServerInfo();
+    setInterval(loadServerInfo, INFO_POLL_MS);
     initFontScale();
     paintNotifyButton();
     refresh();
