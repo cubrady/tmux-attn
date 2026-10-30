@@ -2874,10 +2874,6 @@
     let usageExpanded = false;
     let usageRefreshing = false;
     let usageReqSeq = 0;
-    const cachedUsage = readUsageCache();
-    if (cachedUsage) {
-      renderUsage(cachedUsage, { persist: false });
-    }
     let agentFilter = readAgentFilter();
     const NOTIFY_STORE = 'tmux-attn:notify';
     const FAVICON_CALM_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="tmux Attention"><rect width="32" height="32" rx="8" fill="#0f766e"/><rect x="5" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="5" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="17" width="10" height="10" rx="2.2" fill="#2a9d8f"/><rect x="17" y="5" width="10" height="10" rx="2.2" fill="#2a9d8f"/></svg>';
@@ -5403,6 +5399,7 @@
     let refreshEpoch = 0;
     const hostSliceByName = new Map();
     const REFRESH_HINT_MIN_MS = 280;
+    const FLEET_TIMEOUT_MS = 15000;
 
     function setColdSkeleton(on) {
       document.body.classList.toggle('is-loading', on);
@@ -5524,16 +5521,31 @@
       return data;
     }
 
+    async function withFleetTimeout(request) {
+      let timer;
+      try {
+        return await Promise.race([request, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('讀取逾時')), FLEET_TIMEOUT_MS);
+        })]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     async function fetchFleetPlan() {
       const early = window.initialFleetPlanRequest;
       window.initialFleetPlanRequest = null;
-      const result = early ? await early : { res: await fetch('/api/fleet/plan', { cache: 'no-store' }) };
-      return readJsonResponse(result);
+      return withFleetTimeout((async () => {
+        const result = early ? await early : { res: await fetch('/api/fleet/plan', { cache: 'no-store' }) };
+        return readJsonResponse(result);
+      })());
     }
 
     async function fetchHostSlice(name) {
-      const res = await fetch('/api/fleet/host?name=' + encodeURIComponent(name), { cache: 'no-store' });
-      return readJsonResponse({ res });
+      return withFleetTimeout((async () => {
+        const res = await fetch('/api/fleet/host?name=' + encodeURIComponent(name), { cache: 'no-store' });
+        return readJsonResponse({ res });
+      })());
     }
 
     async function refresh() {
@@ -5593,7 +5605,7 @@
           }));
         }
         if (epoch !== refreshEpoch) return;
-        if (!sawHost) throw new Error('所有主機都無法讀取');
+        if (names.length && !sawHost) throw new Error('所有主機都無法讀取');
         document.getElementById('error').hidden = true;
         if (cold) {
           setColdSkeleton(false);
@@ -5609,11 +5621,8 @@
         if (epoch !== refreshEpoch) return;
         document.getElementById('error').hidden = false;
         document.getElementById('error').textContent = '無法讀取狀態：' + e.message;
-        if (cold && !hasLoaded) {
-          // Stay on skeleton until first successful host.
-        } else {
-          setRefreshing(false);
-        }
+        if (cold) setColdSkeleton(false);
+        else setRefreshing(false);
         paintClock('offline');
       } finally {
         if (epoch === refreshEpoch) {
@@ -5746,6 +5755,8 @@
     setInterval(loadServerInfo, INFO_POLL_MS);
     initFontScale();
     paintNotifyButton();
+    const cachedUsage = readUsageCache();
+    if (cachedUsage) renderUsage(cachedUsage, { persist: false });
     refresh();
     setInterval(refresh, POLL_MS);
     setInterval(() => {

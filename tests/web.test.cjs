@@ -57,7 +57,7 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
       }
       return fetchRequest(url, options);
     },
-    setInterval() {}, setTimeout() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => String(value) },
+    setInterval() {}, setTimeout() {}, clearTimeout() {}, requestAnimationFrame: animationFrame, CSS: { escape: value => String(value) },
     ...(overrides.globals || {}),
   });
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
@@ -83,6 +83,22 @@ function agent(host, state, tracked = true, pending = false) {
 function hostNames(element) {
   return [...element.innerHTML.matchAll(/data-host="([^"]*)"/g)].map(([, name]) => name);
 }
+
+test('cached usage renders on startup with the saved agent filter', () => {
+  const values = {
+    'tmux-attn:agent-filter': 'codex',
+    'tmux-attn:usage-cache': JSON.stringify({ accounts: [
+      { provider: 'codex', account: 'cached', windows: [{ label: 'Weekly', usedPercent: 25 }] },
+      { provider: 'claude', account: 'other', windows: [{ label: 'Weekly', usedPercent: 50 }] },
+    ] }),
+  };
+  const ui = dashboard({ globals: { sessionStorage: {
+    getItem: key => values[key] || null, setItem() {}, removeItem() {},
+  } } });
+  assert.match(ui.elements.get('agent-usage').innerHTML, /cached/);
+  assert.doesNotMatch(ui.elements.get('agent-usage').innerHTML, /other/);
+  assert.equal(typeof ui.elements.get('hosts').listeners.click, 'function');
+});
 
 test('host counts exclude shells and sort active hosts before empty/offline hosts', () => {
   const ui = dashboard();
@@ -493,6 +509,41 @@ test('later header count follows host filters and opens the collapsed group', ()
   ui.render({ hosts, agents: [{ ...review('one', 2, 2), host: 'alpha', later: true }] });
   assert.match(ui.elements.get('list').innerHTML, /id="group-later" open/);
   assert.doesNotMatch(ui.elements.get('summary').innerHTML, /class="stat active"/);
+});
+
+test('cold load failures leave the skeleton and allow a later retry', async () => {
+  let failed = true;
+  const loading = [];
+  const ui = dashboard({ allowFleetFetch: true, fetchRequest: async url => {
+    if (failed) throw new Error('offline');
+    if (url === '/api/fleet/plan') return response({ ok: true, hosts: [] });
+    throw new Error('unexpected request');
+  }, document: { body: { classList: { add() {}, remove() {}, toggle: (name, on) => loading.push([name, on]) } } } });
+  for (let i = 0; i < 8; i++) await settle();
+  assert.equal(ui.elements.get('error').hidden, false);
+  assert.deepEqual(loading.at(-1), ['is-loading', false]);
+  failed = false;
+  await ui.context.refresh();
+  assert.equal(ui.elements.get('error').hidden, true, ui.elements.get('error').textContent);
+  assert.equal(ui.elements.get('clock').dataset.state, 'live');
+});
+
+test('a stalled first request times out and releases refresh for retry', async () => {
+  const timers = [];
+  let calls = 0;
+  const ui = dashboard({ allowFleetFetch: true, globals: {
+    setTimeout: callback => { timers.push(callback); return timers.length; },
+    clearTimeout() {},
+  }, fetchRequest: async url => {
+    if (url === '/api/fleet/plan' && ++calls > 1) return response({ ok: true, hosts: [] });
+    return new Promise(() => {});
+  } });
+  timers[0]();
+  for (let i = 0; i < 8; i++) await settle();
+  assert.match(ui.elements.get('error').textContent, /逾時/);
+  await ui.context.refresh();
+  assert.equal(calls, 2);
+  assert.equal(ui.elements.get('error').hidden, true);
 });
 
 test('first load consumes the fleet plan request started in the page head', async () => {
