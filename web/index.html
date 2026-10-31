@@ -997,6 +997,8 @@
     }
     .card {
       position: relative;
+      display: flex;
+      flex-direction: column;
       background: var(--card);
       border-radius: var(--radius);
       padding: 12px 12px 12px 14px;
@@ -1375,16 +1377,22 @@
       color: color-mix(in srgb, var(--fg) 82%, var(--muted));
       text-wrap: pretty;
     }
+    .card .reason {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+    }
     .card.error .reason { color: var(--danger); font-weight: 500; }
     .card-tasks {
       margin-top: 8px;
-      padding: 7px 10px;
+      padding: 6px 9px;
       border-radius: 6px;
       border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
       background: color-mix(in srgb, var(--bg) 55%, var(--card));
       display: flex;
       flex-direction: column;
-      gap: 3px;
     }
     .card-task-head {
       display: flex;
@@ -1455,14 +1463,6 @@
       font-size: 0.68rem;
       font-weight: 600;
       color: var(--muted);
-      white-space: nowrap;
-    }
-    .card-task-active {
-      padding-left: 1.15rem;
-      font-size: 0.75rem;
-      color: var(--muted);
-      overflow: hidden;
-      text-overflow: ellipsis;
       white-space: nowrap;
     }
     .sheet-tasks {
@@ -1618,8 +1618,9 @@
       white-space: nowrap;
     }
     .card .preview-line.agent { margin-top: 0; padding-top: 0; border-top: 0; }
+    .card .preview { margin-top: auto; padding-top: 19px; }
     .card .preview-line .text.md {
-      max-height: calc(1.45em * 5);
+      max-height: calc(1.45em * 3);
       overflow: hidden;
     }
     .card .preview-line .text.md > * { margin: 0; }
@@ -1642,9 +1643,12 @@
       font-weight: 600;
     }
     .card .preview-line.user .text.md {
-      max-height: calc(1.45em * 2);
+      max-height: calc(1.45em * 1);
       color: var(--muted);
       font-weight: 400;
+    }
+    .card .reason ~ .preview .preview-line.agent .text.md {
+      max-height: calc(1.45em * 1);
     }
     .sheet-preview .preview-line .text {
       overflow-wrap: anywhere;
@@ -2586,7 +2590,7 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 12px;
-        align-items: start;
+        align-items: stretch;
       }
       .section,
       .skel-section,
@@ -2604,7 +2608,7 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 12px;
-        align-items: start;
+        align-items: stretch;
       }
       .later-group summary {
         grid-column: 1 / -1;
@@ -3737,7 +3741,6 @@
         || items[items.length - 1];
       const remaining = Math.max(0, inProgress + pending - 1);
       const moreChip = remaining > 0 ? `<span class="task-more">+${remaining} 待辦</span>` : '';
-      const activeText = focus.status === 'in_progress' ? distinctActiveForm(focus.subject, focus.active_form) : '';
       return `<div class="card-tasks" aria-label="任務進度 ${completed}/${total}">` +
         `<div class="card-task-head">` +
           `<div class="card-task-main">` +
@@ -3747,7 +3750,6 @@
           `</div>` +
           `<div class="card-task-right">${moreChip}${taskBarHtml(items)}<span class="task-count">${completed}/${total}</span></div>` +
         `</div>` +
-        (activeText ? `<div class="card-task-active">${escapeHtml(activeText)}</div>` : '') +
       `</div>`;
     }
     let sheetTasksDoneOpen = true;
@@ -3879,6 +3881,7 @@
         ? `<div class="kill-note">${escapeHtml(killState.note)}</div>` : '';
       const agentMeta = titleAgentHtml(a);
       const meta = envLineHtml(a);
+      const showReason = Boolean(reason) && !GENERIC_REASONS.has(reason);
       // Section headings + left rail already show wait/review/idle/running; only ⏳ adds new info.
       const statusMark = cat === 'running' && a.background_wait
         ? `<span class="emoji" aria-hidden="true">⏳</span>` : '';
@@ -3897,7 +3900,7 @@
           </div>
         </div>
         ${killNote}
-        ${GENERIC_REASONS.has(reason) ? '' : `<div class="reason">${escapeHtml(reason)}</div>`}
+        ${showReason ? `<div class="reason">${escapeHtml(reason)}</div>` : ''}
         ${cardTasksHtml(a.tasks)}
         ${cat === 'shell' ? shellPreviewHtml(a) + shellInputHtml(a) : cardPreviewHtml(a.preview)}
       </article>`;

@@ -2221,11 +2221,12 @@ test('previews that overflow their lines are marked so they can fade out', () =>
   assert.deepEqual(toggled, [['long', 'clipped', true], ['short', 'clipped', false]]);
 });
 
-test('card preview CSS cuts on whole lines, drops the label gutter and keeps labels for screen readers', () => {
+test('compact card previews cut on whole lines and keep full text available in the sheet', () => {
   const html = readFileSync(join(__dirname, '../web/index.html'), 'utf8');
   assert.doesNotMatch(html, /max-height: 4\.9em|max-height: 6\.6em/);
-  assert.match(html, /\.card \.preview-line \.text\.md \{[^}]*max-height: calc\(1\.45em \* 5\)/);
-  assert.match(html, /\.card \.preview-line\.user \.text\.md \{[^}]*max-height: calc\(1\.45em \* 2\)/);
+  assert.match(html, /\.card \.preview-line \.text\.md \{[^}]*max-height: calc\(1\.45em \* 3\)/);
+  assert.match(html, /\.card \.preview-line\.user \.text\.md \{[^}]*max-height: calc\(1\.45em \* 1\)/);
+  assert.match(html, /\.card \.reason ~ \.preview \.preview-line\.agent \.text\.md \{[^}]*max-height: calc\(1\.45em \* 1\)/);
   assert.match(html, /\.card \.preview-line \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(html, /\.card \.preview-line \.who \{[^}]*clip:/);
   assert.match(html, /\.text\.md\.clipped \{[^}]*mask-image/);
@@ -3456,11 +3457,11 @@ test('cards and sheets render structured task lists, deduplicate gerund activeFo
   const a5 = { ...agent('local', 'RUNNING'), pane: '%5', pid: '500', project: 'insightgpt', cli: 'pi', tasks: s5Tasks };
   ui.render({ agents: [a6, a5] });
   const cardsHtml = ui.elements.get('list').innerHTML;
-  // Session 6 card: shows 3/5, #4 subject, +1 待辦, and keeps distinct active_form with (x3)/(20x3)
+  // Session 6 card: shows one compact progress row. The full active form stays in the sheet.
   assert.match(cardsHtml, /aria-label="任務進度 3\/5"/);
   assert.match(cardsHtml, /#4<\/span><span class="card-task-subject">Execute Frozen Prefix A\/B and Full-Chain Replay evaluations<\/span>/);
   assert.match(cardsHtml, /\+1 待辦/);
-  assert.match(cardsHtml, /card-task-active">executing Frozen Prefix A\/B \(x3\) and Full-Chain Replay \(20x3\) evaluations<\/div>/);
+  assert.doesNotMatch(cardsHtml, /card-task-active|executing Frozen Prefix A\/B \(x3\)/);
   // Session 5 card: shows 1/5, #2 subject, +3 待辦, and deduplicates redundant gerund active_form
   assert.match(cardsHtml, /aria-label="任務進度 1\/5"/);
   assert.match(cardsHtml, /\+3 待辦/);
@@ -3473,6 +3474,9 @@ test('cards and sheets render structured task lists, deduplicate gerund activeFo
   assert.match(sheetTasks.innerHTML, /task-dep resolved" title="前置 #1 已完成">⛓ #1<\/span>/);
   assert.match(sheetTasks.innerHTML, /task-dep blocked" title="等待前置 #2">⛓ #2<\/span><span class="task-dep blocked" title="等待前置 #3">⛓ #3<\/span>/);
   assert.match(sheetTasks.innerHTML, /收合已完成 \(1\)/);
+  ui.open(a6);
+  assert.match(sheetTasks.innerHTML, /executing Frozen Prefix A\/B \(x3\) and Full-Chain Replay \(20x3\) evaluations/);
+  ui.open(a5);
 
   // Toggle fold for completed tasks
   sheetTasks.listeners.click({ target: { closest: sel => sel === '[data-tasks-done-toggle]' ? {} : null } });
