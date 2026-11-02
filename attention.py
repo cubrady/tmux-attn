@@ -3542,7 +3542,72 @@ def _cursor_window_pace(used_pct, start_ms, end_ms, now_s):
     }
 
 
-def _build_cursor_usage_account(period_data, plan_data=None, me_data=None, now=None):
+def _cursor_epoch_ms(value):
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        try:
+            value = int(text)
+        except ValueError:
+            return 0
+    if isinstance(value, float):
+        if not value.is_integer():
+            return 0
+        value = int(value)
+    if isinstance(value, int) and value > 0:
+        return value
+    return 0
+
+
+def _cursor_sand_value(data, camel, snake):
+    if camel in data and data[camel] is not None:
+        return data[camel]
+    if snake in data and data[snake] is not None:
+        return data[snake]
+    return None
+
+
+def _cursor_bot_window(sand_data, now_s):
+    """Grok Bot (protocol name Sand) is a separate allowance from plan usage."""
+    if not isinstance(sand_data, dict) or not sand_data:
+        return None
+    if _cursor_sand_value(sand_data, 'usesPooledEnterpriseAllowance', 'uses_pooled_enterprise_allowance') is True:
+        return None
+    if _cursor_sand_value(sand_data, 'hasNonZeroIncludedLimit', 'has_non_zero_included_limit') is False:
+        return None
+    if _cursor_sand_value(sand_data, 'includedLimitZero', 'included_limit_zero') is True:
+        return None
+    raw_pct = _cursor_sand_value(sand_data, 'usagePercent', 'usage_percent')
+    if not isinstance(raw_pct, (int, float)) or isinstance(raw_pct, bool):
+        return None
+    pct = max(0, min(100, round(float(raw_pct))))
+    start_ms = _cursor_epoch_ms(_cursor_sand_value(sand_data, 'currentPeriodStart', 'current_period_start'))
+    end_ms = _cursor_epoch_ms(_cursor_sand_value(sand_data, 'nextResetTimestampUtc', 'next_reset_timestamp_utc'))
+    resets_at = ''
+    reset_desc = ''
+    if end_ms > 0:
+        dt = datetime.datetime.fromtimestamp(end_ms / 1000.0, tz=datetime.timezone.utc)
+        resets_at = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        reset_desc = dt.strftime('Resets %b ') + str(dt.day)
+    win = {
+        'key': 'grokBot',
+        'label': 'Grok Bot',
+        'shortLabel': 'Bot',
+        'usedPercent': pct,
+        'windowMinutes': max(1, round((end_ms - start_ms) / 60000)) if end_ms > start_ms > 0 else None,
+        'resetsAt': resets_at,
+        'resetDescription': reset_desc,
+    }
+    pace = _cursor_window_pace(pct, start_ms, end_ms, now_s)
+    if pace is not None:
+        win['pace'] = pace
+    return win
+
+
+def _build_cursor_usage_account(period_data, plan_data=None, me_data=None, sand_data=None, now=None):
     if not isinstance(period_data, dict):
         return None
     plan_usage = period_data.get('planUsage')
@@ -3596,6 +3661,9 @@ def _build_cursor_usage_account(period_data, plan_data=None, me_data=None, now=N
                 pace = {**pace, 'willLastToReset': True, 'etaSeconds': None}
             win['pace'] = pace
         windows.append(win)
+    bot = _cursor_bot_window(sand_data, now_s)
+    if bot is not None:
+        windows.append(bot)
     if not windows:
         return None
     email = clean(str((me_data or {}).get('email') or '')) if isinstance(me_data, dict) else ''
@@ -3630,7 +3698,12 @@ def _fetch_cursor_direct_usage(rpc=_cursor_dashboard_rpc, tokens=None, now=None)
                 me_data = rpc(token, 'GetMe')
             except Exception:
                 pass
-            acc = _build_cursor_usage_account(period_data, plan_data, me_data, now=now)
+            sand_data = None
+            try:
+                sand_data = rpc(token, 'GetSandUsageStatus')
+            except Exception:
+                pass
+            acc = _build_cursor_usage_account(period_data, plan_data, me_data, sand_data=sand_data, now=now)
             if acc is not None:
                 return [acc]
         return []

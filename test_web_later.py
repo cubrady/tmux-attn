@@ -1,4 +1,5 @@
 """Web-only later grouping stays separate from tmux attention state."""
+import datetime
 import json
 import tempfile
 import threading
@@ -180,6 +181,95 @@ class WebLaterTests(unittest.TestCase):
         self.assertEqual([w['usedPercent'] for w in acc['windows']], [63, 88, 60])
         self.assertFalse(acc['windows'][0]['pace']['willLastToReset'])
         self.assertTrue(acc['windows'][1]['pace']['willLastToReset'])
+
+    def _cursor_period_rpc(self, sand):
+        def fake_rpc(token, method):
+            self.assertEqual(token, 'valid-jwt-token')
+            if method == 'GetCurrentPeriodUsage':
+                return {
+                    'billingCycleStart': '1791940711000',
+                    'billingCycleEnd': '1794619111000',
+                    'planUsage': {
+                        'totalPercentUsed': 62.6,
+                        'apiPercentUsed': 88.2,
+                        'autoPercentUsed': 60.1,
+                    },
+                }
+            if method == 'GetPlanInfo':
+                return {'planInfo': {'planName': 'Pro', 'billingCycleEnd': '1794619111000'}}
+            if method == 'GetMe':
+                return {'email': 'alice@example.com'}
+            if method == 'GetSandUsageStatus':
+                if isinstance(sand, Exception):
+                    raise sand
+                return sand
+            return {}
+        return fake_rpc
+
+    def test_cursor_bot_window_uses_its_own_reset(self):
+        end_ms = 1793404800000
+        accounts = a._fetch_cursor_direct_usage(
+            rpc=self._cursor_period_rpc({
+                'usagePercent': 80.4,
+                'currentPeriodStart': '1792800000000',
+                'nextResetTimestampUtc': str(end_ms),
+                'hasNonZeroIncludedLimit': True,
+            }),
+            tokens=['valid-jwt-token'],
+            now=1793075000.0,
+        )
+        bot = accounts[0]['windows'][3]
+        expected_reset = datetime.datetime.fromtimestamp(
+            end_ms / 1000.0, tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.assertEqual(bot['key'], 'grokBot')
+        self.assertEqual(bot['label'], 'Grok Bot')
+        self.assertEqual(bot['shortLabel'], 'Bot')
+        self.assertEqual(bot['usedPercent'], 80)
+        self.assertEqual(bot['windowMinutes'], 10080)
+        self.assertEqual(bot['resetsAt'], expected_reset)
+        self.assertNotEqual(bot['resetsAt'], accounts[0]['windows'][0]['resetsAt'])
+        self.assertEqual(bot['pace']['expectedUsedPercent'], 45)
+        self.assertEqual(bot['pace']['deltaPercent'], 35)
+        self.assertFalse(bot['pace']['willLastToReset'])
+        self.assertEqual(bot['pace']['etaSeconds'], 68750)
+
+    def test_cursor_bot_without_reset_shows_percent_only(self):
+        accounts = a._fetch_cursor_direct_usage(
+            rpc=self._cursor_period_rpc({
+                'usage_percent': 12.2,
+                'current_period_start': '1792800000000',
+                'has_non_zero_included_limit': True,
+            }),
+            tokens=['valid-jwt-token'],
+            now=1793075000.0,
+        )
+        bot = accounts[0]['windows'][3]
+        self.assertEqual(bot['usedPercent'], 12)
+        self.assertEqual(bot['resetsAt'], '')
+        self.assertIsNone(bot['windowMinutes'])
+        self.assertNotIn('pace', bot)
+
+    def test_cursor_bot_hidden_without_personal_allowance(self):
+        for sand in (
+            {'usagePercent': 90, 'usesPooledEnterpriseAllowance': True},
+            {'usagePercent': 0, 'hasNonZeroIncludedLimit': False},
+            {'usagePercent': 0, 'includedLimitZero': True},
+            {'usage_percent': 40, 'included_limit_zero': True},
+        ):
+            accounts = a._fetch_cursor_direct_usage(
+                rpc=self._cursor_period_rpc(sand),
+                tokens=['valid-jwt-token'],
+                now=1793075000.0,
+            )
+            self.assertEqual([w['shortLabel'] for w in accounts[0]['windows']], ['月', 'API', 'Auto'])
+
+    def test_cursor_bot_rpc_failure_keeps_plan_windows(self):
+        accounts = a._fetch_cursor_direct_usage(
+            rpc=self._cursor_period_rpc(RuntimeError('sand down')),
+            tokens=['valid-jwt-token'],
+            now=1793075000.0,
+        )
+        self.assertEqual([w['shortLabel'] for w in accounts[0]['windows']], ['月', 'API', 'Auto'])
 
 
 if __name__ == '__main__':
