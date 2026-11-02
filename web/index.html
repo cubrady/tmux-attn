@@ -1764,7 +1764,26 @@
       font-size: 0.8rem;
     }
     .update-hint[hidden] { display: none; }
+    .update-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .update-title { color: var(--muted); margin-bottom: 6px; }
+    .update-head .update-title { margin-bottom: 0; }
+    .update-go {
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--bg);
+      font: 600 0.72rem var(--font);
+      cursor: pointer;
+    }
+    .update-go:disabled { opacity: 0.55; cursor: default; }
+    .update-go:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .update-range { margin-top: 8px; color: var(--muted); font-size: 0.72rem; }
+    .update-log { margin: 4px 0 0; padding: 0; list-style: none; max-height: 9.5rem; overflow: auto; }
+    .update-log li { font: 0.72rem/1.45 var(--mono); padding: 1px 0; }
+    .update-log-sha { color: var(--muted); margin-right: 6px; }
+    .update-status { margin-top: 4px; color: var(--muted); font-size: 0.72rem; }
     .update-row + .update-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
     .update-host { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
     .update-state { font: 500 0.72rem var(--mono); color: var(--muted); }
@@ -2949,29 +2968,119 @@
     const updateCommand = hub => `tmux-attn update --ref ${hub}`;
     const bootstrapCommand = hub => `curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/update.sh | TMUX_ATTN_REF=${hub} sh`;
     let updateHintHtml = '';
+    let updateBusy = '';
+    let updateLogs = null;
+    let updateResults = null;
     function shortVersion(version) {
       return String(version || '').slice(0, 7);
     }
     // Wait for each peer's response before comparing versions; pending peers have no version yet.
     // A peer that responds without a version predates `tmux-attn update`.
+    function isCommitVersion(version) {
+      return /^[0-9a-f]{7,40}$/i.test(version || '');
+    }
+    function behindPeers(hosts, hubVersion) {
+      if (!isCommitVersion(hubVersion)) return [];
+      return hosts.filter(h => !h.pending && h.ok && h.source === 'peer' && (h.version || '') !== hubVersion);
+    }
+    function updateStatusText(result) {
+      if (!result) return '';
+      if (result.started) return '已啟動';
+      if (result.running) return '進行中';
+      if (result.skipped) return '已是最新';
+      if (result.manual) return '需手動安裝';
+      return result.error || '失敗';
+    }
     function renderUpdateHint(hosts, hubVersion) {
       const el = document.getElementById('update-hint');
-      const behind = /^[0-9a-f]{7,40}$/.test(hubVersion)
-        ? hosts.filter(h => !h.pending && h.ok && h.source === 'peer' && (h.version || '') !== hubVersion) : [];
+      const behind = behindPeers(hosts, hubVersion);
       el.hidden = behind.length === 0;
+      if (!behind.length) {
+        updateLogs = null;
+        updateResults = null;
+        updateBusy = '';
+        updateHintHtml = '';
+        el.innerHTML = '';
+        return;
+      }
+      const auto = behind.filter(h => isCommitVersion(h.version));
+      const resultOf = name => (updateResults || []).find(row => row.name === name);
       const rows = behind.map(h => {
-        const cmd = h.version ? updateCommand(hubVersion) : bootstrapCommand(hubVersion);
         const state = `${h.version ? shortVersion(h.version) : '未回報版本'} → hub ${shortVersion(hubVersion)}`;
+        const result = resultOf(h.name);
+        const status = updateStatusText(result);
+        const failed = result && !result.ok && !result.started && !result.running;
+        const showCmd = !isCommitVersion(h.version) || failed;
+        const cmd = h.version ? updateCommand(hubVersion) : bootstrapCommand(hubVersion);
+        const cmdHtml = showCmd
+          ? `<div class="update-cmd"><code>${escapeHtml(cmd)}</code>` +
+            `<button type="button" class="copy-cmd" data-copy="${escapeHtml(cmd)}">複製</button></div>`
+          : '';
         return `<div class="update-row"><div class="update-host"><strong>${escapeHtml(h.name)}</strong>` +
           `<span class="update-state">${escapeHtml(state)}</span></div>` +
-          `<div class="update-cmd"><code>${escapeHtml(cmd)}</code>` +
-          `<button type="button" class="copy-cmd" data-copy="${escapeHtml(cmd)}">複製</button></div></div>`;
-      });
-      const html = behind.length ? '<div class="update-title">版本與 hub 不一致，請在該主機執行：</div>' + rows.join('') : '';
+          (status ? `<div class="update-status">${escapeHtml(status)}</div>` : '') +
+          cmdHtml + '</div>';
+      }).join('');
+      const logsHtml = (updateLogs || []).filter(group => auto.some(h => h.version === group.version)).map(group => {
+        const names = auto.filter(h => h.version === group.version).map(h => h.name).join('、');
+        const items = group.error
+          ? `<li>${escapeHtml(group.error)}</li>`
+          : (group.commits.length
+            ? group.commits.map(commit => `<li><span class="update-log-sha">${escapeHtml(shortVersion(commit.sha))}</span>${escapeHtml(commit.subject || '')}</li>`).join('')
+            : '<li>沒有可列出的 commit</li>');
+        return `<div class="update-range">${escapeHtml(shortVersion(group.version))} → hub ${escapeHtml(shortVersion(hubVersion))} · ${escapeHtml(names)}</div>` +
+          `<ul class="update-log">${items}</ul>`;
+      }).join('');
+      const nameless = (updateResults || []).filter(row => !row.name && row.error)
+        .map(row => `<div class="update-status">${escapeHtml(row.error)}</div>`).join('');
+      const label = updateBusy === 'log' ? '讀取變更…' : updateBusy === 'run' ? '更新中…' : (updateLogs ? '確認更新' : '更新全部');
+      const button = auto.length
+        ? `<button type="button" class="update-go" data-update-all${updateBusy ? ' disabled' : ''}>${label}</button>`
+        : '';
+      const html = `<div class="update-head"><div class="update-title">版本與 hub 不一致</div>${button}</div>${nameless}${logsHtml}${rows}`;
       // The poll renders every 20s; rewriting identical markup would drop a text selection and the 已複製 label.
       if (html !== updateHintHtml) {
         updateHintHtml = html;
         el.innerHTML = html;
+      }
+    }
+    async function loadUpdateLogs() {
+      const hubVersion = latestPayload?.version || '';
+      const versions = [...new Set(behindPeers(latestHosts, hubVersion).filter(h => isCommitVersion(h.version)).map(h => h.version))];
+      updateBusy = 'log';
+      renderUpdateHint(latestHosts, hubVersion);
+      try {
+        updateLogs = await Promise.all(versions.map(async version => {
+          try {
+            const res = await fetch(`/api/update-log?from=${encodeURIComponent(version)}`, { cache: 'no-store' });
+            const data = await res.json();
+            if (!data || !data.ok) return { version, commits: [], error: (data && data.error) || '無法讀取變更' };
+            return { version, commits: Array.isArray(data.commits) ? data.commits : [], error: '' };
+          } catch (_) {
+            return { version, commits: [], error: '無法讀取變更' };
+          }
+        }));
+      } finally {
+        updateBusy = '';
+        renderUpdateHint(latestHosts, hubVersion);
+      }
+    }
+    async function runFleetUpdate() {
+      const hubVersion = latestPayload?.version || '';
+      updateBusy = 'run';
+      renderUpdateHint(latestHosts, hubVersion);
+      try {
+        const res = await fetch('/api/fleet/update', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', cache: 'no-store',
+        });
+        const data = await res.json();
+        updateResults = Array.isArray(data?.hosts) ? data.hosts : [];
+        if (!data?.ok && !updateResults.length) updateResults = [{ name: '', ok: false, error: data?.error || '更新失敗' }];
+      } catch (_) {
+        updateResults = [{ name: '', ok: false, error: '無法連到 hub' }];
+      } finally {
+        updateBusy = '';
+        renderUpdateHint(latestHosts, hubVersion);
       }
     }
     function projectName(a) {
@@ -4950,16 +5059,21 @@
       }[c]));
     }
     document.getElementById('update-hint').addEventListener('click', async (event) => {
-      const button = event.target.closest('[data-copy]');
-      if (!button) return;
-      try {
-        // Same fallback as the reader: the async clipboard API needs a secure origin, and the hub is plain HTTP.
-        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(button.dataset.copy);
-        else legacyCopy(button.dataset.copy);
-        button.textContent = '已複製';
-      } catch (_) {
-        button.textContent = '無法複製';
+      const copy = event.target.closest('[data-copy]');
+      if (copy) {
+        try {
+          // Same fallback as the reader: the async clipboard API needs a secure origin, and the hub is plain HTTP.
+          if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(copy.dataset.copy);
+          else legacyCopy(copy.dataset.copy);
+          copy.textContent = '已複製';
+        } catch (_) {
+          copy.textContent = '無法複製';
+        }
+        return;
       }
+      if (!event.target.closest('[data-update-all]') || updateBusy) return;
+      if (!updateLogs) await loadUpdateLogs();
+      else await runFleetUpdate();
     });
     document.getElementById('summary').addEventListener('click', (event) => {
       if (event.target.closest('[data-later-jump]')) return jumpToLater();

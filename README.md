@@ -150,7 +150,7 @@ curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/<tag-或-sha>/upd
 - checkout 有未提交修改、已分叉、或指定的 `--ref` 比 checkout 舊時拒絕執行；不會動 tmux，也不會改 web 服務綁定的位址。
 - hooks 或 tmux 設定相關檔案（`install.py`、`bootstrap.sh`、`pi-attention.ts`、`opencode-attention.ts`）有變時只提示，要加 `--reinstall` 才會重跑安裝器。
 - 還原：`tmux-attn update --rollback`（最近一次）或 `--rollback <備份目錄>`。
-- hub 畫面會在 peer 版本與 hub 不同時顯示提示與可複製的指令。更新只能由該機器自己執行，沒有任何遠端觸發的 HTTP 端點（面板沒有登入機制）。
+- hub 畫面在 peer 版本不同時顯示一顆「更新全部」。點下去先列出各台到 hub 的 commit，確認後 hub 請每台有版本的 peer 在本機執行 `tmux-attn update --ref <完整 SHA>`。沒回報版本的舊機器仍只顯示安裝指令。這條請求和面板一樣沒有登入，只應在 Tailscale／區網可達。
 
 第一次安裝或需要重裝 hooks 時仍用 `sh install.sh --no-clone`。
 

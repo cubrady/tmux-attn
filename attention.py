@@ -4583,6 +4583,162 @@ def install_version():
     return str(install_info().get('version') or '')
 
 
+_SHA7 = re.compile(r'[0-9a-f]{7,40}')
+_SHA40 = re.compile(r'[0-9a-f]{40}')
+_UPDATE_LOCK = threading.Lock()
+_UPDATE_PROC = None
+
+
+def install_commit():
+    commit = str(install_info().get('commit') or '').strip().lower()
+    return commit if _SHA40.fullmatch(commit) else ''
+
+
+def install_source():
+    source = os.environ.get('TMUX_ATTN_SRC') or str(install_info().get('source') or '')
+    path = Path(source).expanduser() if source else None
+    if path and (path / 'update.py').is_file() and (path / '.git').exists():
+        return path.resolve()
+    return None
+
+
+def _git_commit(src, ref):
+    proc = subprocess.run(
+        ['git', '-C', str(src), 'rev-parse', '--verify', f'{ref}^{{commit}}'],
+        capture_output=True, text=True, timeout=5,
+    )
+    sha = (proc.stdout or '').strip().lower()
+    if proc.returncode != 0 or not _SHA40.fullmatch(sha):
+        return ''
+    return sha
+
+
+def update_log(old, new=None):
+    """Commits the hub checkout has between a peer version and the hub commit."""
+    old = str(old or '').strip().lower()
+    new = str(new or '').strip().lower() or install_commit()
+    if not _SHA7.fullmatch(old) or not _SHA7.fullmatch(new):
+        return 400, {'ok': False, 'error': 'bad ref'}
+    src = install_source()
+    if src is None:
+        return 409, {'ok': False, 'error': 'no checkout'}
+    old_full, new_full = _git_commit(src, old), _git_commit(src, new)
+    if not old_full or not new_full:
+        return 404, {'ok': False, 'error': 'commit not in checkout'}
+    proc = subprocess.run(
+        ['git', '-C', str(src), 'log', '--reverse', '--max-count=40',
+         '--format=%H%x09%s', f'{old_full}..{new_full}'],
+        capture_output=True, text=True, timeout=5,
+    )
+    if proc.returncode != 0:
+        return 409, {'ok': False, 'error': 'git log failed'}
+    commits = []
+    for line in (proc.stdout or '').splitlines():
+        sha, _, subject = line.partition('\t')
+        if _SHA40.fullmatch(sha):
+            commits.append({'sha': sha, 'subject': subject.strip()[:160]})
+    return 200, {'ok': True, 'from': old_full, 'to': new_full, 'commits': commits}
+
+
+def start_local_update(ref):
+    """Start update.py for one full commit. The child is detached so it can restart this process."""
+    global _UPDATE_PROC
+    ref = str(ref or '').strip().lower()
+    if not _SHA40.fullmatch(ref):
+        return 400, {'ok': False, 'error': 'ref must be a full commit'}
+    if ref == install_commit():
+        return 200, {'ok': True, 'skipped': True, 'ref': ref}
+    src = install_source()
+    if src is None:
+        return 409, {'ok': False, 'error': 'no checkout'}
+    with _UPDATE_LOCK:
+        if _UPDATE_PROC is not None and _UPDATE_PROC.poll() is None:
+            return 200, {'ok': True, 'started': False, 'running': True, 'ref': ref}
+        log_path = STATE / 'remote-update.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = open(log_path, 'ab')
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(src / 'update.py'), '--ref', ref],
+                cwd=str(src), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return 500, {'ok': False, 'error': type(exc).__name__}
+        finally:
+            log.close()
+        _UPDATE_PROC = proc
+    return 200, {'ok': True, 'started': True, 'running': True, 'ref': ref}
+
+
+def fetch_peer_health(url, timeout=PEER_FETCH_TIMEOUT):
+    request = Request(url.rstrip('/') + '/api/health', headers={'Accept': 'application/json'})
+    with urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode())
+    if not isinstance(data, dict) or data.get('ok') is not True:
+        raise RuntimeError('invalid health')
+    return data
+
+
+def post_peer_update(url, ref, timeout=8):
+    payload = json.dumps({'ref': ref}).encode()
+    request = Request(
+        url.rstrip('/') + '/api/update', data=payload, method='POST',
+        headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode())
+    except HTTPError as exc:
+        return {'ok': False, 'error': f'HTTP {exc.code}'}
+    if not isinstance(data, dict):
+        return {'ok': False, 'error': 'invalid response'}
+    return data
+
+
+def fleet_update(fetch=fetch_peer_health, post=post_peer_update):
+    """Ask every peer that is not already on this commit to update itself."""
+    target = install_commit()
+    if not target:
+        return 409, {'ok': False, 'error': 'hub has no recorded commit'}
+    peers = load_peers()
+
+    def one(peer):
+        name = peer['name']
+        try:
+            health = fetch(peer['url'])
+        except Exception as exc:
+            return {'name': name, 'ok': False, 'error': type(exc).__name__}
+        version = str(health.get('version') or '').strip().lower()
+        if version and (version == target or version == target[:12]):
+            return {'name': name, 'ok': True, 'skipped': True, 'version': version}
+        if not _SHA7.fullmatch(version):
+            return {'name': name, 'ok': False, 'manual': True, 'error': 'no version'}
+        try:
+            body = post(peer['url'], target)
+        except Exception as exc:
+            return {'name': name, 'ok': False, 'error': type(exc).__name__, 'version': version}
+        if not isinstance(body, dict):
+            return {'name': name, 'ok': False, 'error': 'invalid response', 'version': version}
+        row = {'name': name, 'version': version, 'ok': body.get('ok') is True}
+        if body.get('started') is True:
+            row['started'] = True
+        elif body.get('running') is True:
+            row['running'] = True
+        elif body.get('skipped') is True:
+            row['skipped'] = True
+        if not row['ok']:
+            row['error'] = str(body.get('error') or 'update refused')[:160]
+        return row
+
+    if not peers:
+        return 200, {'ok': True, 'ref': target, 'hosts': []}
+    with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+        hosts = list(pool.map(one, peers))
+    hosts.sort(key=lambda row: row['name'])
+    return 200, {'ok': True, 'ref': target, 'hosts': hosts}
+
+
 # What this process loaded. install_version() re-reads the file, so only this proves a restart picked up new code.
 STARTED_VERSION = install_version()
 
@@ -5110,6 +5266,12 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                     self._send(500, json.dumps({'ok': False, 'error': 'failed to load fleet'}),
                                'application/json; charset=utf-8')
                 return
+            if path == '/api/update-log':
+                query = parse_qs(urlparse(self.path).query)
+                raw_to = query.get('to', [''])[0]
+                code, body = update_log(query.get('from', [''])[0], raw_to or None)
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
             if path == '/api/usage':
                 query = parse_qs(urlparse(self.path).query)
                 raw_providers = ','.join(query.get('providers', []))
@@ -5183,6 +5345,18 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 except Exception as exc:
                     sys.stderr.write(f'web /api/inbox: {type(exc).__name__}: {exc}\n')
                     code, body = 500, {'ok': False, 'error': 'failed to update inbox'}
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
+            if path == '/api/update':
+                code, body = start_local_update(payload.get('ref'))
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
+            if path == '/api/fleet/update':
+                try:
+                    code, body = fleet_update()
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/fleet/update: {type(exc).__name__}: {exc}\n')
+                    code, body = 500, {'ok': False, 'error': 'failed to start updates'}
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             action = actions.get(path)
