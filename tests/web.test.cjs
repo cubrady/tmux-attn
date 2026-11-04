@@ -3784,7 +3784,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.equal(box.hidden, false);
   assert.match(box.innerHTML, /class="skel skel-usage-toggle"/);
   await new Promise(r => setImmediate(r));
-  assert.deepEqual(calls, ['/api/usage?providers=codex%2Cclaude%2Ccursor']);
+  assert.deepEqual(calls, ['/api/usage?providers=codex%2Cclaude%2Ccursor%2Cantigravity']);
   assert.equal(box.hidden, false);
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
   assert.match(box.innerHTML, /class="usage-mini-gauges"/);
@@ -3814,7 +3814,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   // 5. Clicking refresh forces a refresh=1 call and keeps panel open
   box.listeners.click({ target: { closest: sel => sel === '[data-usage-refresh]' ? {} : null } });
   await new Promise(r => setImmediate(r));
-  assert.equal(calls.at(-1), '/api/usage?providers=codex%2Cclaude%2Ccursor&refresh=1');
+  assert.equal(calls.at(-1), '/api/usage?providers=codex%2Cclaude%2Ccursor%2Cantigravity&refresh=1');
   assert.doesNotMatch(box.innerHTML, /id="usage-panel"[^>]*hidden/);
 
   // 6. Clicking close button or toggling collapses the inline panel
@@ -4187,4 +4187,27 @@ test('Antigravity (agy) renders filter chip and CLI icon badge', () => {
   pickAgent(ui, 'agy');
   assert.match(ui.elements.get('list').innerHTML, /work-agy/);
   assert.match(ui.elements.get('meta').textContent, /Agent Antigravity/);
+});
+
+
+test('agy filter requests Antigravity quota and renders its icon and model buckets', async () => {
+  const calls = [];
+  const ui = dashboard({ allowUsageFetch: true, fetchRequest: async url => {
+    calls.push(url);
+    return { ok: true, json: async () => ({ ok: true, providers: ['antigravity'], accounts: [{
+      provider: 'antigravity', label: 'Antigravity', windows: [{
+        key: 'argon-weekly', label: 'Gemini 4 Argon weekly', shortLabel: 'Gemini 4 Argon weekly',
+        usedPercent: 38, windowMinutes: 10080,
+      }],
+    }] }) };
+  } });
+  ui.render({ hosts: [{ name: 'work', ok: true }], agents: [filterSession('agy', 'work', 'IDLE')] });
+  await new Promise(r => setImmediate(r));
+  pickAgent(ui, 'agy');
+  const html = ui.elements.get('agent-usage').innerHTML;
+  assert.match(html, /data-usage-provider="antigravity"/);
+  assert.match(html, /\/icons\/agy.svg/);
+  assert.match(html, /Gemini 4 Argon weekly/);
+  assert.match(html, /剩 62%/);
+  assert.ok(calls.some(url => url.includes('antigravity')));
 });
