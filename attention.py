@@ -4764,6 +4764,39 @@ _SHA7 = re.compile(r'[0-9a-f]{7,40}')
 _SHA40 = re.compile(r'[0-9a-f]{40}')
 _UPDATE_LOCK = threading.Lock()
 _UPDATE_PROC = None
+# The supervisor survives a web restart and records the updater's actual exit,
+# including rollback or failures after INSTALL.json has already been written.
+_UPDATE_SUPERVISOR = '''
+import json, os, subprocess, sys
+from pathlib import Path
+path, updater, ref = sys.argv[1:]
+def save(data):
+    temp = Path(path + '.tmp')
+    temp.write_text(json.dumps(dict(ref=ref, **data)))
+    os.replace(temp, path)
+save(dict(running=True, pid=os.getpid()))
+try:
+    code = subprocess.call([sys.executable, updater, '--ref', ref])
+except BaseException:
+    code = 1
+save(dict(running=False, exit_code=code))
+sys.exit(code)
+'''
+
+
+def local_update_status():
+    try:
+        data = json.loads((STATE / 'remote-update-status.json').read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_update_status(data):
+    path = STATE / 'remote-update-status.json'
+    temp = path.with_suffix('.pending')
+    temp.write_text(json.dumps(data))
+    os.replace(temp, path)
 
 
 def install_commit():
@@ -4823,7 +4856,8 @@ def start_local_update(ref):
     ref = str(ref or '').strip().lower()
     if not _SHA40.fullmatch(ref):
         return 400, {'ok': False, 'error': 'ref must be a full commit'}
-    if ref == install_commit():
+    previous = local_update_status()
+    if ref == install_commit() and not (previous.get('ref') == ref and previous.get('exit_code', 0) != 0):
         return 200, {'ok': True, 'skipped': True, 'ref': ref}
     src = install_source()
     if src is None:
@@ -4831,16 +4865,29 @@ def start_local_update(ref):
     with _UPDATE_LOCK:
         if _UPDATE_PROC is not None and _UPDATE_PROC.poll() is None:
             return 200, {'ok': True, 'started': False, 'running': True, 'ref': ref}
+        previous = local_update_status()
+        if previous.get('running') and isinstance(previous.get('pid'), int):
+            try:
+                os.kill(previous['pid'], 0)
+            except OSError:
+                pass
+            else:
+                return 200, {'ok': True, 'started': False, 'running': True, 'ref': previous.get('ref')}
         log_path = STATE / 'remote-update.log'
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = open(log_path, 'ab')
         try:
+            # Publish before spawning: polling must never see an earlier
+            # attempt's terminal result. Only the supervisor writes after this.
+            _save_update_status({'ref': ref, 'running': True})
             proc = subprocess.Popen(
-                [sys.executable, str(src / 'update.py'), '--ref', ref],
+                [sys.executable, '-c', _UPDATE_SUPERVISOR,
+                 str(STATE / 'remote-update-status.json'), str(src / 'update.py'), ref],
                 cwd=str(src), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
         except OSError as exc:
+            _save_update_status({'ref': ref, 'running': False, 'exit_code': 1})
             return 500, {'ok': False, 'error': type(exc).__name__}
         finally:
             log.close()
@@ -4873,12 +4920,18 @@ def post_peer_update(url, ref, timeout=8):
     return data
 
 
-def fleet_update(fetch=fetch_peer_health, post=post_peer_update):
+def fleet_update(fetch=fetch_peer_health, post=post_peer_update, names=None, ref=None):
     """Ask every peer that is not already on this commit to update itself."""
     target = install_commit()
     if not target:
         return 409, {'ok': False, 'error': 'hub has no recorded commit'}
+    if ref and ref not in (target, target[:12]):
+        return 409, {'ok': False, 'error': 'hub 版本已變更，請關閉提示後重新更新'}
+    if names is not None and (not isinstance(names, list) or not all(isinstance(n, str) for n in names)):
+        return 400, {'ok': False, 'error': 'hosts must be a list of names'}
     peers = load_peers()
+    if names is not None:
+        peers = [peer for peer in peers if peer['name'] in names]
 
     def one(peer):
         name = peer['name']
@@ -4887,14 +4940,19 @@ def fleet_update(fetch=fetch_peer_health, post=post_peer_update):
         except Exception as exc:
             return {'name': name, 'ok': False, 'error': type(exc).__name__}
         version = str(health.get('version') or '').strip().lower()
-        if version and (version == target or version == target[:12]):
+        status = health.get('update') or {}
+        failed = status.get('ref') == target and status.get('exit_code', 0) != 0
+        if version and (version == target or version == target[:12]) and not failed:
             return {'name': name, 'ok': True, 'skipped': True, 'version': version}
         if not _SHA7.fullmatch(version):
             return {'name': name, 'ok': False, 'manual': True, 'error': 'no version'}
         try:
             body = post(peer['url'], target)
-        except Exception as exc:
-            return {'name': name, 'ok': False, 'error': type(exc).__name__, 'version': version}
+        except Exception:
+            # A service restart may drop the response after accepting the POST.
+            # Only status polling can distinguish that from a lost request.
+            return {'name': name, 'ok': True, 'running': True, 'uncertain': True,
+                    'message': '連線中斷，正在確認客戶端更新狀態…', 'version': version}
         if not isinstance(body, dict):
             return {'name': name, 'ok': False, 'error': 'invalid response', 'version': version}
         row = {'name': name, 'version': version, 'ok': body.get('ok') is True}
@@ -4916,8 +4974,56 @@ def fleet_update(fetch=fetch_peer_health, post=post_peer_update):
     return 200, {'ok': True, 'ref': target, 'hosts': hosts}
 
 
+def fleet_update_status(ref, fetch=fetch_peer_health, names=None):
+    """Observe updates without starting them; unavailable peers may be restarting."""
+    if not _SHA40.fullmatch(str(ref or '')):
+        target = install_commit()
+        if not _SHA7.fullmatch(str(ref or '')) or not target or not target.startswith(ref):
+            return 400, {'ok': False, 'error': 'unknown update ref'}
+        ref = target
+
+    def one(peer):
+        row = {'name': peer['name'], 'state': 'running'}
+        try:
+            health = fetch(peer['url'])
+        except Exception:
+            return {**row, 'message': '等待客戶端重新連線…'}
+        status = health.get('update') or {}
+        version = str(health.get('version') or '')
+        matches = version in (ref, ref[:12])
+        if status.get('ref') == ref:
+            if status.get('running'):
+                return row
+            if status.get('exit_code') != 0:
+                return {**row, 'state': 'failed', 'error': '更新程序失敗，請重試或查看 remote-update.log'}
+            if matches and health.get('code_current') is True:
+                return {**row, 'state': 'success'}
+            if matches:
+                return {**row, 'message': '等待 web 服務載入新版程式…'}
+        # Clients predating persistent status must at least have restarted into
+        # the target. Disk version alone can be observed before a rollback.
+        elif matches and health.get('started_version') in (ref, ref[:12]):
+            return {**row, 'state': 'success'}
+        return row
+
+    peers = load_peers()
+    if names is not None:
+        peers = [peer for peer in peers if peer['name'] in names]
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(peers)))) as pool:
+        hosts = list(pool.map(one, peers))
+    return 200, {'ok': True, 'ref': ref, 'hosts': hosts}
+
+
 # What this process loaded. install_version() re-reads the file, so only this proves a restart picked up new code.
 STARTED_VERSION = install_version()
+STARTED_CODE_HASH = hashlib.sha256(Path(__file__).read_bytes()).digest()
+
+
+def loaded_code_current():
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).digest() == STARTED_CODE_HASH
+    except OSError:
+        return False
 
 
 def run_update(argv):
@@ -5397,7 +5503,15 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                     'peers': len(load_peers()),
                     'version': install_version(),
                     'started_version': STARTED_VERSION,
+                    'update': local_update_status(),
+                    'code_current': loaded_code_current(),
                 }), 'application/json; charset=utf-8')
+                return
+            if path == '/api/fleet/update-status':
+                query = parse_qs(urlparse(self.path).query)
+                ref = query.get('ref', [''])[0]
+                code, body = fleet_update_status(ref, names=query.get('host'))
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             if path == '/api/info':
                 try:
@@ -5530,7 +5644,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 return
             if path == '/api/fleet/update':
                 try:
-                    code, body = fleet_update()
+                    code, body = fleet_update(names=payload.get('hosts'), ref=payload.get('ref'))
                 except Exception as exc:
                     sys.stderr.write(f'web /api/fleet/update: {type(exc).__name__}: {exc}\n')
                     code, body = 500, {'ok': False, 'error': 'failed to start updates'}

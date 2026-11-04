@@ -45,7 +45,7 @@ function dashboard(firstArg = {}, animationFrame = callback => callback()) {
   const nav = overrides.navigator || win.navigator || {};
   win.navigator = nav;
   const context = vm.createContext({
-    window: win, navigator: nav, location: win.location,
+    window: win, navigator: nav, location: win.location, AbortSignal,
     document, performance: { now: () => nowMs },
     fetch: (url, options) => {
       const fleetPoll = typeof url === 'string' && (url === '/api/fleet' || url.startsWith('/api/fleet/'));
@@ -2523,6 +2523,105 @@ test('identical update-hint markup is not rewritten on every poll, so a selectio
   assert.equal(hint.innerHTML, 'user-visible state');
   ui.render({ ...payload, hosts: hostRows({ name: 'lab', ok: true, source: 'peer', version: HUB }) });
   assert.equal(hint.innerHTML, '');
+});
+
+function updatingDashboard(fetchRequest, globals = {}) {
+  const ui = dashboard({ allowFleetFetch: true, fetchRequest, globals });
+  ui.render({ version: HUB, agents: [], hosts: hostRows(
+    { name: 'lab', ok: true, source: 'peer', version: 'a'.repeat(12) },
+  ) });
+  return ui;
+}
+const jsonResponse = data => ({ ok: true, json: async () => data });
+const updateClick = (ui, selector) => ui.elements.get('update-hint').listeners.click({
+  target: { closest: s => s === selector ? {} : null },
+});
+
+test('updates remain busy through restart and preserve success until dismissed', async () => {
+  let state = 'running';
+  const ui = updatingDashboard(async url => url === '/api/fleet/update'
+    ? jsonResponse({ ok: true, ref: 'c'.repeat(40), hosts: [{ name: 'lab', ok: true, started: true }] })
+    : url.startsWith('/api/fleet/update-status')
+      ? jsonResponse({ ok: true, hosts: [{ name: 'lab', state }] }) : new Promise(() => {}));
+  await ui.context.runFleetUpdate();
+  const hint = ui.elements.get('update-hint');
+  assert.match(hint.innerHTML, /更新中/);
+  assert.match(hint.innerHTML, /disabled/);
+  assert.equal(hint.attrs['aria-busy'], 'true');
+  ui.render({ version: HUB, agents: [], hosts: hostRows({ name: 'lab', pending: true, source: 'peer' }) });
+  assert.equal(hint.hidden, false);
+  assert.match(hint.innerHTML, /lab/);
+  state = 'success';
+  await ui.context.pollUpdateRun();
+  ui.render({ version: HUB, agents: [], hosts: hostRows({ name: 'lab', ok: true, source: 'peer', version: HUB }) });
+  assert.match(hint.innerHTML, /全部客戶端更新成功/);
+  assert.match(hint.innerHTML, /data-update-dismiss/);
+  assert.doesNotMatch(hint.innerHTML, /data-update-retry/);
+  assert.equal(hint.attrs['aria-busy'], 'false');
+  await updateClick(ui, '[data-update-dismiss]');
+  assert.equal(hint.hidden, true);
+});
+
+test('failed updates offer retry and retry waits for confirmation again', async () => {
+  let state = 'failed';
+  let posts = 0;
+  const ui = updatingDashboard(async url => {
+    if (url === '/api/fleet/update') {
+      posts++;
+      return jsonResponse({ ok: true, ref: 'c'.repeat(40), hosts: [{ name: 'lab', ok: true, started: true }] });
+    }
+    if (url.startsWith('/api/fleet/update-status')) return jsonResponse({ ok: true, hosts: [{ name: 'lab', state, error: 'rollback' }] });
+    return new Promise(() => {});
+  });
+  await ui.context.runFleetUpdate();
+  assert.match(ui.elements.get('update-hint').innerHTML, /rollback/);
+  assert.match(ui.elements.get('update-hint').innerHTML, /data-update-retry/);
+  state = 'success';
+  await updateClick(ui, '[data-update-retry]');
+  assert.equal(posts, 2);
+  assert.match(ui.elements.get('update-hint').innerHTML, /全部客戶端更新成功/);
+});
+
+test('unreachable status polling times out with a retry action', async () => {
+  let now = 0;
+  const ui = updatingDashboard(async url => {
+    if (url === '/api/fleet/update') return jsonResponse({ ok: true, ref: 'c'.repeat(40), hosts: [{ name: 'lab', ok: true, running: true }] });
+    if (url.startsWith('/api/fleet/update-status')) throw new Error('offline');
+    return new Promise(() => {});
+  }, { Date: { now: () => now } });
+  await ui.context.runFleetUpdate();
+  assert.match(ui.elements.get('update-hint').innerHTML, /更新中/);
+  now = 240001;
+  await ui.context.pollUpdateRun();
+  assert.match(ui.elements.get('update-hint').innerHTML, /逾時/);
+  assert.match(ui.elements.get('update-hint').innerHTML, /data-update-retry/);
+});
+
+test('a lost start response keeps polling because clients may already be updating', async () => {
+  let state = 'running';
+  const ui = updatingDashboard(async url => {
+    if (url === '/api/fleet/update') throw new Error('connection reset');
+    if (url.startsWith('/api/fleet/update-status')) return jsonResponse({ ok: true, ref: 'c'.repeat(40), hosts: [{ name: 'lab', state }] });
+    return new Promise(() => {});
+  });
+  await ui.context.runFleetUpdate();
+  assert.match(ui.elements.get('update-hint').innerHTML, /更新中/);
+  assert.doesNotMatch(ui.elements.get('update-hint').innerHTML, /data-update-retry/);
+  state = 'success';
+  await ui.context.pollUpdateRun();
+  assert.match(ui.elements.get('update-hint').innerHTML, /更新成功/);
+});
+
+test('dismiss after success does not resurrect the stale fleet snapshot', async () => {
+  const ui = updatingDashboard(async url => {
+    if (url === '/api/fleet/update') return jsonResponse({ ok: true, ref: HUB.padEnd(40, 'a'), hosts: [{ name: 'lab', ok: true, started: true }] });
+    if (url.startsWith('/api/fleet/update-status')) return jsonResponse({ ok: true, hosts: [{ name: 'lab', state: 'success' }] });
+    return new Promise(() => {});
+  });
+  await ui.context.runFleetUpdate();
+  assert.match(ui.elements.get('update-hint').innerHTML, /更新成功/);
+  await updateClick(ui, '[data-update-dismiss]');
+  assert.equal(ui.elements.get('update-hint').hidden, true);
 });
 
 test('a hub version that is not a commit hash never produces a command', () => {

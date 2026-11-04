@@ -70,8 +70,10 @@ class FleetUpdateTests(unittest.TestCase):
             again = a.start_local_update(second)[1]
             self.assertEqual((again['started'], again['running'], popen.call_count), (False, True, 1))
         command = popen.call_args.args[0]
-        self.assertEqual(command[-2:], ['--ref', second])
+        self.assertEqual(command[-2:], [str(root / 'update.py'), second])
+        self.assertEqual(command[1:3], ['-c', a._UPDATE_SUPERVISOR])
         self.assertTrue(popen.call_args.kwargs['start_new_session'])
+        self.assertEqual(a.local_update_status(), {'ref': second, 'running': True})
         self.assertEqual(popen.call_args.kwargs['cwd'], str(root))
 
     def test_fleet_update_starts_only_outdated_peers_with_the_hub_commit(self):
@@ -116,6 +118,62 @@ class FleetUpdateTests(unittest.TestCase):
         self.assertTrue(by_name['same']['skipped'])
         self.assertTrue(by_name['old']['manual'])
         self.assertEqual(by_name['down']['error'], 'OSError')
+
+    def test_status_waits_for_exit_and_reports_failure_after_rollback(self):
+        target = 'c' * 40
+        peers = [{'name': name, 'url': name} for name in ('running', 'success', 'failed', 'down', 'legacy', 'stale')]
+        health = {
+            'running': {'version': target[:12], 'update': {'ref': target, 'running': True}},
+            'success': {'version': target[:12], 'started_version': 'old', 'code_current': True,
+                        'update': {'ref': target, 'running': False, 'exit_code': 0}},
+            'failed': {'version': 'a' * 12, 'update': {'ref': target, 'exit_code': 1}},
+            'legacy': {'version': target[:12], 'started_version': target[:12]},
+            'stale': {'version': target[:12], 'started_version': 'a' * 12, 'code_current': False,
+                      'update': {'ref': target, 'running': False, 'exit_code': 0}},
+        }
+        with patch.object(a, 'load_peers', return_value=peers):
+            self.assertEqual(a.fleet_update_status('bad')[0], 400)
+            code, body = a.fleet_update_status(target, fetch=lambda url: health[url])
+        self.assertEqual(code, 200)
+        self.assertEqual({h['name']: h['state'] for h in body['hosts']}, {
+            'running': 'running', 'success': 'success', 'failed': 'failed',
+            'down': 'running', 'legacy': 'success', 'stale': 'running',
+        })
+
+    def test_supervisor_persists_exit_after_updater_finishes(self):
+        target = 'd' * 40
+        status = a.STATE / 'remote-update-status.json'
+        updater = a.STATE / 'fake-update.py'
+        for code in (0, 1):
+            updater.write_text(f'import sys\nsys.exit({code})\n')
+            result = subprocess.run([a.sys.executable, '-c', a._UPDATE_SUPERVISOR,
+                                     str(status), str(updater), target], capture_output=True)
+            self.assertEqual(result.returncode, code, result.stderr)
+            self.assertEqual(a.local_update_status(), {'ref': target, 'running': False, 'exit_code': code})
+
+    def test_retry_only_selected_hosts_and_rejects_changed_hub(self):
+        target = 'c' * 40
+        peers = [{'name': name, 'url': name} for name in ('failed', 'success')]
+        fetch = Mock(return_value={'ok': True, 'version': 'a' * 12})
+        post = Mock(return_value={'ok': True, 'started': True})
+        with patch.object(a, 'install_commit', return_value=target), patch.object(a, 'load_peers', return_value=peers):
+            code, body = a.fleet_update(fetch=fetch, post=post, names=['failed'], ref=target[:12])
+            self.assertEqual(code, 200)
+            self.assertEqual([h['name'] for h in body['hosts']], ['failed'])
+            post.assert_called_once_with('failed', target)
+            self.assertEqual(a.fleet_update(names='bad')[0], 400)
+            self.assertEqual(a.fleet_update(ref='b' * 40)[0], 409)
+
+    def test_lost_peer_start_response_is_polled_instead_of_reported_failed(self):
+        target = 'c' * 40
+        with patch.object(a, 'install_commit', return_value=target), \
+                patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'lab'}]):
+            code, body = a.fleet_update(fetch=lambda url: {'ok': True, 'version': 'a' * 12},
+                                        post=Mock(side_effect=TimeoutError))
+        self.assertEqual(code, 200)
+        self.assertTrue(body['hosts'][0]['ok'])
+        self.assertTrue(body['hosts'][0]['running'])
+        self.assertTrue(body['hosts'][0]['uncertain'])
 
     def test_http_routes_reject_a_short_ref_and_serve_the_log(self):
         root, first, second = self.repo()
