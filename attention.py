@@ -3442,7 +3442,7 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
     }
 
 
-USAGE_PROVIDERS = ('codex', 'claude', 'cursor')
+USAGE_PROVIDERS = ('codex', 'claude', 'cursor', 'antigravity')
 _USAGE_CACHE = {}
 _USAGE_TTL = 180.0
 _USAGE_STALE_TTL = 1800.0
@@ -3549,6 +3549,21 @@ def _normalize_usage_account(item, fallback_provider):
         win = _normalize_usage_window(key, usage.get(key), labels.get(key), paces.get(key))
         if win is not None:
             windows.append(win)
+    if provider == 'antigravity':
+        # Rich CLI quota buckets include weekly/model limits absent from primary/secondary.
+        extra_windows = []
+        extras = usage.get('extraRateWindows')
+        for index, extra in enumerate(extras if isinstance(extras, list) else []):
+            if not isinstance(extra, dict):
+                continue
+            win = _normalize_usage_window(
+                clean(str(extra.get('id') or f'extra-{index}')),
+                extra.get('window'), extra.get('title'), None,
+            )
+            if win is not None:
+                extra_windows.append(win)
+        if extra_windows:
+            windows = extra_windows
     if not windows:
         return None
     return {

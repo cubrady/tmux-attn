@@ -2874,8 +2874,8 @@
     let hostFilters = new Set(); // empty = show all hosts
     const refreshPendingHosts = new Set();
     const AGENT_FILTER_STORE = 'tmux-attn:agent-filter';
-    const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode', agy: 'Antigravity' };
-    const USAGE_PROVIDERS = ['codex', 'claude', 'cursor'];
+    const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode', agy: 'Antigravity', antigravity: 'Antigravity' };
+    const USAGE_PROVIDERS = ['codex', 'claude', 'cursor', 'antigravity'];
     const USAGE_POLL_MS = 60_000;
     const USAGE_CACHE_STORE = 'tmux-attn:usage-cache';
     function readUsageCache() {
@@ -3223,7 +3223,7 @@
     }
     function activeUsageProviders() {
       if (agentFilter) {
-        return USAGE_PROVIDERS.filter(p => p === agentFilter);
+        return USAGE_PROVIDERS.filter(p => p === (agentFilter === 'agy' ? 'antigravity' : agentFilter));
       }
       return USAGE_PROVIDERS.slice();
     }
@@ -3373,6 +3373,7 @@
             paceHtml = `<div class="usage-pace">⚡ ${escapeHtml(delta + eta)}</div>`;
           }
           return `<div class="usage-win">` +
+            (acc.provider === 'antigravity' ? `<div class="usage-win-tag">${escapeHtml(win.label)}</div>` : '') +
             `<div class="usage-meter-row" title="${escapeHtml(`${win.label || win.shortLabel}: 剩餘 ${remainPct}%${resetInfo ? ` · ${resetInfo}` : ''}`)}">` +
               `<span class="usage-win-tag">${escapeHtml(win.shortLabel || win.label)}</span>` +
               `<div class="usage-bar" role="progressbar" aria-label="${escapeHtml(win.label || win.shortLabel)}" aria-valuenow="${remainPct}" aria-valuemin="0" aria-valuemax="100">` +
@@ -3596,7 +3597,7 @@
         if (sheetOpen && selectedKey === key) updateSheetLater(agent);
       }
     }
-    const CLI_ICONS = { claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi', opencode: 'opencode', agy: 'agy' };
+    const CLI_ICONS = { claude: 'claude', codex: 'codex', agent: 'agent', cursor: 'agent', pi: 'pi', opencode: 'opencode', agy: 'agy', antigravity: 'agy' };
     function cliBadge(cli, small = false) {
       const name = String(cli || '').toLowerCase();
       if (!Object.hasOwn(CLI_ICONS, name)) return '';
