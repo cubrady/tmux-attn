@@ -3,7 +3,6 @@
 import datetime
 import argparse
 import json
-import os
 import re
 from pathlib import Path
 import shutil
@@ -372,13 +371,13 @@ source = f'source-file {shlex.quote(str(config))}'
 if source not in tmux_config:
     paths[0].write_text(tmux_config.rstrip()+'\n\n# Global agent attention inbox\n'+source+'\n')
 
-for lock_file in (HOME / '.local/state/tmux-attn').glob('codex-observer-*.lock'):
+# Lock files survive observer exit and their PIDs may have been reused. Match
+# the installed observer command before signaling, as the updater does.
+if update is not None:
     try:
-        obs_pid = int(lock_file.read_text().strip())
-        if obs_pid > 1:
-            os.kill(obs_pid, 15)
-    except (OSError, ValueError):
-        pass
+        update.SystemServices(runtime=DEST, home=HOME).restart_observers()
+    except (update.UpdateError, OSError) as error:
+        print(f'warning: observers not restarted ({error})', file=sys.stderr)
 subprocess.run(['tmux','source-file',str(config)],check=True)
 if not options.sidebar:
     for line in tmux('list-panes','-a','-F','#{pane_id}\t#{@tmux_attn_sidebar}').splitlines():

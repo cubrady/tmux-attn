@@ -2199,6 +2199,7 @@ class IntegrationTests(unittest.TestCase):
             label='attn-test-'+str(os.getpid())
             command=['tmux','-L',label]
             subprocess.run(command+['-f','/dev/null','new-session','-d','-s','fixture','-x','160','-y','45','/bin/sh'],check=True)
+            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
             try:
                 def initial(*args): return subprocess.check_output(command+list(args),text=True).strip()
                 sock=initial('display-message','-p','#{socket_path}')
@@ -2217,7 +2218,12 @@ class IntegrationTests(unittest.TestCase):
                 (home/'.cursor').mkdir()
                 cursor_old=json.dumps({'version':1,'hooks':{'stop':[{'command':'echo unrelated-cursor'}]}})
                 (home/'.cursor/hooks.json').write_text(cursor_old)
+                # A leftover observer lock may contain a PID now owned by another app.
+                stale_lock = home/'.local/state/tmux-attn/codex-observer-stale.lock'
+                stale_lock.parent.mkdir(parents=True)
+                stale_lock.write_text(str(unrelated.pid))
                 result=subprocess.check_output([sys.executable,'install.py','--sidebar'],env=env,text=True)
+                self.assertIsNone(unrelated.poll(), 'installer killed an unrelated process from a stale lock')
                 backup=json.loads(result)['backup']
                 app=home/'.local/share/tmux-attn/attention.py'
                 def wait(predicate):
@@ -2365,6 +2371,8 @@ class IntegrationTests(unittest.TestCase):
                 self.assertNotIn('1',run('list-panes','-a','-F','#{@tmux_attn_sidebar}').splitlines())
                 self.assertEqual(run('list-panes','-a','-F','#{pane_id}').splitlines().__len__(),2)
             finally:
+                unrelated.terminate()
+                unrelated.wait(timeout=5)
                 subprocess.run(command+['kill-server'],check=False)
 
 if __name__=='__main__': unittest.main(verbosity=2)

@@ -775,6 +775,21 @@ class CodexProfileTests(unittest.TestCase):
     self.assertEqual((row['state'], row['reason'], row['needs_review']),
                      ('IDLE', 'Response finished; review needed', 1))
 
+ def test_agy_darwin_transcript_discovery(self):
+  import subprocess
+  with tempfile.TemporaryDirectory() as directory:
+   base = Path(directory) / 'antigravity-cli'
+   conv = 'e4e0d414-d51a-456c-9653-98167ee00c3e'
+   transcript = base / 'brain' / conv / '.system_generated/logs/transcript.jsonl'
+   transcript.parent.mkdir(parents=True)
+   transcript.write_text('')
+   output = f'p123\nn{base}/presence/{conv}.lock\n'
+   with patch('codex_observer.sys.platform', 'darwin'), patch(
+       'codex_observer.subprocess.run', return_value=subprocess.CompletedProcess([], 0, output, '')
+   ) as run:
+    self.assertEqual(agy_transcript_for_pid(123), str(transcript))
+    self.assertIn('123', run.call_args.args[0])
+
  def test_agy_observer_screen_model_and_transcript_discovery(self):
   table = {
    100: (1, 'zsh'),

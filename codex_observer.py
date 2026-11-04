@@ -523,17 +523,29 @@ def native_agy_pids(pane_pid, table):
 
 def agy_transcript_for_pid(cli_pid):
     """Discover an active Antigravity CLI conversation transcript from its open lock/db fd."""
-    fd_dir = Path(f'/proc/{int(cli_pid)}/fd')
-    try:
-        entries = list(os.scandir(fd_dir))
-    except OSError:
-        return ''
-    found = set()
-    for entry in entries:
+    targets = []
+    if sys.platform == 'darwin':
         try:
-            target = os.readlink(entry.path)
+            result = subprocess.run(
+                ['lsof', '-n', '-a', '-p', str(int(cli_pid)), '-Fn'],
+                capture_output=True, text=True, timeout=4,
+            )
+            targets = [line[1:] for line in result.stdout.splitlines() if line.startswith('n')]
+        except (OSError, subprocess.TimeoutExpired):
+            return ''
+    else:
+        fd_dir = Path(f'/proc/{int(cli_pid)}/fd')
+        try:
+            entries = list(os.scandir(fd_dir))
         except OSError:
-            continue
+            return ''
+        for entry in entries:
+            try:
+                targets.append(os.readlink(entry.path))
+            except OSError:
+                continue
+    found = set()
+    for target in targets:
         match = _AGY_FD_RE.match(target)
         if match:
             base, conv_id = match.group(1), match.group(2)

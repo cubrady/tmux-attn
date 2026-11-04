@@ -2455,7 +2455,7 @@ test('the reply sheet has no trash button and keeps attach and send inside one c
 const HUB = '5d18590aaaaa';
 const hostRows = (...extra) => [{ name: 'hub', ok: true, source: 'local', version: HUB }, ...extra];
 
-test('the update hint names peers on another version and offers the update command', () => {
+test('the update hint names peers on another version and offers the update action', () => {
   const ui = dashboard();
   ui.render({ version: HUB, agents: [], hosts: hostRows(
     { name: 'lab', ok: true, source: 'peer', url: 'http://lab', version: '8e7d0fcbbbbb' },
@@ -2466,7 +2466,7 @@ test('the update hint names peers on another version and offers the update comma
   assert.equal(hint.hidden, false);
   assert.match(hint.innerHTML, /<strong>lab<\/strong>/);
   assert.match(hint.innerHTML, /8e7d0fc → hub 5d18590/);
-  assert.match(hint.innerHTML, /<code>tmux-attn update --ref 5d18590aaaaa<\/code>/);
+  assert.match(hint.innerHTML, /data-update-all/);
   assert.doesNotMatch(hint.innerHTML, /down|same/, 'offline hosts and hosts already on the hub version stay out');
 });
 
