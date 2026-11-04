@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
 import attention as a
-from codex_observer import approval_screen,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli,pi_screen,native_pi_pids
+from codex_observer import approval_screen,read_lifecycle,startup_match,resumed_match,retire_mapping,repair_mapping,cursor_screen,native_cursor_pids,observe_cursor,discover,claude_screen,native_claude_pids,observe_claude,native_codex_pids,is_native_codex_cli,pi_screen,native_pi_pids,agy_screen,agy_screen_model,native_agy_pids,agy_transcript_for_pid,observe_agy
 from codex_observer import queued_questions_screen,sync_attention_overlay,observe_codex_unmapped
 from codex_observer import codex_terminal_footer,read_codex_terminals,parked_codex_terminals
 from codex_observer import _darwin_procargs_environment, process_codex_home
@@ -774,6 +774,61 @@ class CodexProfileTests(unittest.TestCase):
     row = con.execute('SELECT state, reason, needs_review FROM panes').fetchone()
     self.assertEqual((row['state'], row['reason'], row['needs_review']),
                      ('IDLE', 'Response finished; review needed', 1))
+
+ def test_agy_observer_screen_model_and_transcript_discovery(self):
+  table = {
+   100: (1, 'zsh'),
+   200: (100, 'agy'),
+   300: (200, '/bin/bash -c echo hi'),
+  }
+  self.assertEqual(native_agy_pids(100, table), [200])
+  approval = (
+   '╭─ Requesting permission for: ─────────────────────────────────────────╮\n'
+   '│ Run this command?                                                    │\n'
+   '│  > 1. Yes, allow once                                                │\n'
+   '│    2. Yes, allow for this conversation                               │\n'
+   '│    3. No, tell the agent what to do instead (esc)                    │\n'
+   '╰──────────────────────────────────────────────────────────────────────╯\n'
+   ' ↑/↓ Navigate · Enter to select · Esc to cancel\n'
+   ' ~/proj/tmux-attn   Claude Opus 4.6 · high\n'
+  )
+  self.assertEqual(agy_screen(approval), ('WAIT', 'Approval dialog visible', False))
+  self.assertEqual(agy_screen_model(approval), ('Claude Opus 4.6', 'high'))
+
+  working = (
+   ' > 支援 agy\n'
+   ' ⠋ Thinking... (4s)\n'
+   ' esc to cancel\n'
+   ' ~/proj/tmux-attn   Gemini 3.1 Pro · high\n'
+  )
+  self.assertEqual(agy_screen(working), ('RUNNING', 'Working', False))
+  self.assertEqual(agy_screen_model(working), ('Gemini 3.1 Pro', 'high'))
+
+  idle = (
+   '✦ Done!\n'
+   ' > Type your message or @path/to/file\n'
+   ' ~/proj/tmux-attn   Claude Opus 4.6 · high\n'
+  )
+  self.assertEqual(agy_screen(idle), ('IDLE', 'Waiting for next task', False))
+
+  with tempfile.TemporaryDirectory() as directory:
+   root = Path(directory)
+   brain = root / '.gemini/antigravity-cli/brain/a6913bdd-8c2a-4e35-b098-357b4d52dc86/.system_generated/logs'
+   brain.mkdir(parents=True)
+   transcript = brain / 'transcript.jsonl'
+   transcript.write_text(json.dumps({
+    'step_index': 0, 'type': 'USER_INPUT',
+    'content': '<USER_REQUEST>\n支援 agy\n</USER_REQUEST>',
+   }) + '\n')
+   with patch.object(a, 'STATE', root / 'inbox'), closing(a.db()) as con:
+    live = {('%28', '100'): {'path': '/proj/tmux-attn'}}
+    with patch('codex_observer.tmux', return_value=approval), \
+         patch('codex_observer.agy_transcript_for_pid', return_value=str(transcript)):
+     observe_agy(con, 'sock', live, table)
+     row = dict(con.execute('SELECT * FROM panes WHERE pane=?', ('%28',)).fetchone())
+     self.assertEqual((row['agent'], row['state'], row['reason']), ('agy', 'WAIT', 'Approval dialog visible'))
+     self.assertEqual(row['transcript_path'], str(transcript))
+     self.assertEqual((row['hint_model'], row['hint_effort']), ('Claude Opus 4.6', 'high'))
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

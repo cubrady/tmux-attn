@@ -6,7 +6,7 @@
 
 tmux Attention 讓你一眼知道：誰在問你、誰做完還沒看、誰還在跑——在 tmux 底列、手機或另一台電腦的網頁上都一樣。
 
-支援 **Claude Code** · **Codex** · **Cursor CLI** · **Pi** · **OpenCode**。
+支援 **Claude Code** · **Codex** · **Cursor CLI** · **Pi** · **OpenCode** · **Antigravity (`agy`)**。
 
 主 repo：[`cubrady/tmux-attn`](https://github.com/cubrady/tmux-attn)。所有更新與 issue 集中在此；舊私人 repo `tmux-attention` 已封存。
 

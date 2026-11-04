@@ -36,6 +36,7 @@ class MigrationTests(unittest.TestCase):
                 self.assertIn('tmux-attn/tests/web.test.cjs', names)
                 self.assertIn('tmux-attn/opencode-attention.ts', names)
                 self.assertIn('tmux-attn/web/icons/opencode.svg', names)
+                self.assertIn('tmux-attn/web/icons/agy.svg', names)
                 self.assertFalse(any('.claude' in name or 'sqlite' in name for name in names))
                 for member in archive.getmembers():
                     target = extracted/member.name
@@ -74,6 +75,8 @@ class MigrationTests(unittest.TestCase):
                 generated = (destination/'.claude/settings.json').read_text()
                 self.assertIn(str(app),generated)
                 self.assertNotIn(str(source_home),generated)
+                agy_hooks = destination/'.gemini/config/hooks.json'
+                self.assertIn(str(app), agy_hooks.read_text())
                 # Destination aliases win; source-only aliases are merged on reinstall.
                 target_aliases.write_text(json.dumps({'aliases':{'web-app-sampleapp':'localday'}}))
                 config_text='model = "local-model"\n[features] # keep comment\nhooks = false # retain\nother = true\n[other]\nvalue = 1\n'

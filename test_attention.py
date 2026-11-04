@@ -2099,6 +2099,99 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertNotIn('transcript_path',source)
 
 
+class AgyTests(unittest.TestCase):
+    def test_agy_event_classification_transcript_and_model(self):
+        self.assertEqual(a.classify('agy', 'SessionStart', {}), ('IDLE', 'Registered; no new work yet'))
+        self.assertEqual(a.classify('agy', 'PreInvocation', {}), ('RUNNING', 'Working'))
+        self.assertEqual(a.classify('agy', 'PostInvocation', {}), ('RUNNING', 'Working'))
+        self.assertEqual(a.classify('agy', 'PostToolUse', {}), ('RUNNING', 'Working'))
+        self.assertEqual(
+            a.classify('agy', 'PreToolUse', {'toolCall': {'name': 'ask_question'}}),
+            ('WAIT', 'Answer or decision needed'),
+        )
+        self.assertEqual(
+            a.classify('agy', 'PreToolUse', {'toolCall': {'name': 'read_file'}}),
+            ('RUNNING', 'Working'),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'NO_TOOL_CALL', 'last_assistant_message': 'All done.'}),
+            ('IDLE', 'Response finished; review needed', True),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'NO_TOOL_CALL', 'last_assistant_message': 'Should I proceed？'}),
+            ('IDLE', 'Response ends with a question; review suggested', True),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'USER_CANCELED'}),
+            ('IDLE', 'Interrupted; review current work', True),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'ERROR'}),
+            ('IDLE', 'Agent stopped with an error; review needed', True),
+        )
+        self.assertEqual(a.cli_label('agy'), 'agy')
+        self.assertEqual(a.command_cli('agy'), 'agy')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            brain = root / '.gemini/antigravity-cli/brain/conv-1/.system_generated/logs'
+            brain.mkdir(parents=True)
+            compact = brain / 'transcript.jsonl'
+            full = brain / 'transcript_full.jsonl'
+            entries = [
+                {'step_index': 0, 'type': 'USER_INPUT', 'content': '<USER_REQUEST>\n請支援 agy\n</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from none to Claude Opus 4.6 (high).\n</USER_SETTINGS_CHANGE>'},
+                {'step_index': 1, 'type': 'PLANNER_RESPONSE', 'content': '', 'tool_calls': [{'name': 'read_file'}]},
+                {'step_index': 2, 'type': 'USER_INPUT', 'content': '<CONTEXT_SUMMARY>\ncompacted history\n</CONTEXT_SUMMARY>'},
+                {'step_index': 3, 'type': 'PLANNER_RESPONSE', 'content': '已經完成支援！'},
+            ]
+            compact.write_text('\n'.join(json.dumps(e) for e in entries[:2]) + '\n')
+            full.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
+
+            preview = a.read_transcript(str(compact), 'agy')
+            self.assertEqual(preview, (['請支援 agy'], '已經完成支援！'))
+            self.assertEqual(a.transcript_model(str(compact), 'agy'), ('Claude Opus 4.6', 'high'))
+            self.assertEqual(
+                a.pane_model(None, {'agent': 'agy', 'transcript_path': str(compact)}),
+                ('Claude Opus 4.6', 'high'),
+            )
+            self.assertEqual(a.resolve_transcript_path(None, {'agent': 'agy'}, {'path': str(root)}), '')
+
+            with patch.object(a, 'STATE', root / 'state'):
+                out_pre = io.StringIO()
+                payload_pre = {
+                    'conversationId': 'conv-1',
+                    'executionNum': 1,
+                    'transcriptPath': str(compact),
+                    'cwd': str(root),
+                    'lastUserInput': '<USER_REQUEST>\n請支援 agy\n</USER_REQUEST>',
+                    'toolCall': {'name': 'ask_question'},
+                }
+                with patch.object(a.sys, 'stdin', io.StringIO(json.dumps(payload_pre))), \
+                     patch.object(a.sys, 'stdout', out_pre), \
+                     patch.object(a, 'hook_target', return_value=('/tmp/sock', '%28', '1000')):
+                    a.event_command('agy', 'PreToolUse')
+                self.assertEqual(json.loads(out_pre.getvalue()), {'decision': 'allow'})
+
+                out_stop = io.StringIO()
+                payload_stop = {
+                    'conversationId': 'conv-1',
+                    'executionNum': 1,
+                    'transcriptPath': str(compact),
+                    'cwd': str(root),
+                    'terminationReason': 'NO_TOOL_CALL',
+                }
+                with patch.object(a.sys, 'stdin', io.StringIO(json.dumps(payload_stop))), \
+                     patch.object(a.sys, 'stdout', out_stop), \
+                     patch.object(a, 'hook_target', return_value=('/tmp/sock', '%28', '1000')):
+                    a.event_command('agy', 'Stop')
+                self.assertEqual(json.loads(out_stop.getvalue()), {'decision': 'stop'})
+                with closing(a.db()) as con:
+                    row = dict(con.execute('SELECT * FROM panes WHERE pane=?', ('%28',)).fetchone())
+                self.assertEqual(row['state'], 'IDLE')
+                self.assertEqual(row['event_key'], 'conv-1:1')
+                self.assertEqual(row['preview_agent'], '已經完成支援！')
+
+
 class IntegrationTests(unittest.TestCase):
     def test_install_live_hooks_sidebars_navigation_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:

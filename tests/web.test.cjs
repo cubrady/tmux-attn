@@ -4176,3 +4176,15 @@ test('Escape and an outside pointer close the popover', async () => {
   ui.document.listeners.pointerdown({ target: ui.elements.get('info-wrap') });
   assert.equal(ui.elements.get('info-panel').hidden, false, 'pointer inside the popover keeps it open');
 });
+
+test('Antigravity (agy) renders filter chip and CLI icon badge', () => {
+  const ui = dashboard();
+  ui.render({ agents: [filterSession('agy')] });
+  assert.match(ui.elements.get('agent-filters').innerHTML,
+    /data-agent-filter="agy"[^>]*>Antigravity/);
+  assert.match(ui.elements.get('list').innerHTML,
+    /class="cli sm agy"[^>]*>.*?src="\/icons\/agy\.svg"/);
+  pickAgent(ui, 'agy');
+  assert.match(ui.elements.get('list').innerHTML, /work-agy/);
+  assert.match(ui.elements.get('meta').textContent, /Agent Antigravity/);
+});

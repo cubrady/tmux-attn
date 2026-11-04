@@ -18,7 +18,7 @@ import time
 
 from attention import (
     STATE, BACKGROUND_WAIT, background_wait, classify, codex_home, codex_root_transcript, codex_transcript_meta, db, live_panes,
-    prune_stale_panes, record, resolve_socket, tmux, observer_lock_path, log_observer_error, user_home,
+    prune_stale_panes, read_transcript, record, resolve_socket, tmux, observer_lock_path, log_observer_error, user_home,
 )
 
 
@@ -474,6 +474,163 @@ def observe_pi(con, sock, live, table):
         if current and time.time() - max(current['updated'], current['last_event_time']) < 2:
             continue
         record(con, sock, pane, pid, 'pi', *state, source='observer')
+
+
+_AGY_FD_RE = re.compile(
+    r'^(.*?/antigravity-cli)/(?:presence|conversations)/([0-9a-fA-F-]{36})\.(?:lock|db)$'
+)
+_AGY_FOOTER_MODEL_RE = re.compile(
+    r'(?:^|\s{2,})([A-Za-z0-9][A-Za-z0-9 ._-]{1,48}?)\s+·\s+(low|medium|high|max|minimal|none)\s*$',
+    re.I,
+)
+_AGY_HEADER_MODEL_RE = re.compile(
+    r'(?:▀+|▄+)\s+([A-Za-z0-9][A-Za-z0-9 ._-]{1,48}?)(?:\s*\((low|medium|high|max|minimal|none)\))?\s*$',
+    re.I,
+)
+
+
+def native_agy_pids(pane_pid, table):
+    descendants = {int(pane_pid)}
+    for _ in range(30):
+        more = {pid for pid, (parent, _) in table.items() if parent in descendants}
+        if more.issubset(descendants):
+            break
+        descendants |= more
+    candidates = set()
+    for pid in descendants:
+        args = table.get(pid, (0, ''))[1]
+        exe = Path((args.split(None, 1)[0] if args else '')).name
+        if exe in ('agy', 'antigravity', 'antigravity-cli'):
+            tokens = args.split()[1:]
+            if any(flag in tokens for flag in (
+                '-p', '--prompt', '--print', '--help', '-h', '--version', '-v',
+                'version', 'auth', 'login', 'logout', 'update', 'mcp',
+            )):
+                continue
+            candidates.add(pid)
+    roots = []
+    for pid in sorted(candidates):
+        parent = table[pid][0]
+        for _ in range(30):
+            if parent in candidates:
+                break
+            if parent not in descendants or parent not in table:
+                roots.append(pid)
+                break
+            parent = table[parent][0]
+    return roots
+
+
+def agy_transcript_for_pid(cli_pid):
+    """Discover an active Antigravity CLI conversation transcript from its open lock/db fd."""
+    fd_dir = Path(f'/proc/{int(cli_pid)}/fd')
+    try:
+        entries = list(os.scandir(fd_dir))
+    except OSError:
+        return ''
+    found = set()
+    for entry in entries:
+        try:
+            target = os.readlink(entry.path)
+        except OSError:
+            continue
+        match = _AGY_FD_RE.match(target)
+        if match:
+            base, conv_id = match.group(1), match.group(2)
+            transcript = Path(base) / 'brain' / conv_id / '.system_generated' / 'logs' / 'transcript.jsonl'
+            if transcript.is_file():
+                found.add(str(transcript))
+    return next(iter(found)) if len(found) == 1 else ''
+
+
+def agy_screen_model(screen):
+    lines = [line.rstrip() for line in (screen or '').splitlines() if line.strip()]
+    for line in reversed(lines[-8:]):
+        match = _AGY_FOOTER_MODEL_RE.search(line)
+        if match:
+            return match.group(1).strip(), match.group(2).strip().lower()
+    for line in lines[:12]:
+        match = _AGY_HEADER_MODEL_RE.search(line)
+        if match:
+            model = match.group(1).strip()
+            effort = (match.group(2) or '').strip().lower()
+            if not model.lower().startswith('antigravity cli') and '@' not in model:
+                return model, effort
+    return '', ''
+
+
+def agy_screen(screen):
+    lines = [line.rstrip() for line in (screen or '').rstrip().splitlines()]
+    if not lines:
+        return None
+    tail = '\n'.join(lines[-25:])
+    footer = '\n'.join(lines[-8:])
+    if (re.search(r'(?:Requesting permission|Run this command\?|Allow this|Do you want to (?:run|allow|proceed))', tail, re.I)
+            and re.search(r'(?:↑/↓\s*Navigate|>\s*1\.\s*(?:Yes|Allow)|1\.\s*Yes.*\n\s*>?\s*2\.\s*No)', tail, re.I)):
+        return 'WAIT', 'Approval dialog visible', False
+    if re.search(r'↑/↓\s*Navigate', footer) and re.search(
+        r'(?:Enter to (?:select|submit|confirm)|Space to (?:select|toggle)|tab Amend)', footer, re.I
+    ):
+        return 'WAIT', 'Answer or decision needed', False
+    if re.search(r'(?:^|\s)esc to cancel(?:\s|$)', footer, re.I):
+        return 'RUNNING', 'Working', False
+    if any(re.match(r'^\s*>\s', line) or line.strip() == '>' for line in lines[-10:]) and (
+        _AGY_FOOTER_MODEL_RE.search(footer) or 'Antigravity CLI' in '\n'.join(lines[:10])
+    ):
+        return 'IDLE', 'Waiting for next task', False
+    return None
+
+
+def observe_agy(con, sock, live, table):
+    for (pane, pid) in live:
+        roots = native_agy_pids(pid, table)
+        if len(roots) != 1:
+            continue
+        cli_pid = roots[0]
+        current = con.execute(
+            'SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)
+        ).fetchone()
+        screen = tmux('capture-pane', '-p', '-J', '-t', pane, check=False, sock=sock)
+        state = agy_screen(screen)
+        model, effort = agy_screen_model(screen)
+        transcript = agy_transcript_for_pid(cli_pid)
+        if state:
+            if not current or current['agent'] != 'agy':
+                record(con, sock, pane, pid, 'agy', *state, source='observer')
+                current = con.execute(
+                    'SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)
+                ).fetchone()
+            elif current['state'] != state[0]:
+                if state[0] == 'IDLE' and current['state'] in ('RUNNING', 'WAIT'):
+                    if time.time() - max(current['updated'], current['last_event_time']) >= 2:
+                        t_path = transcript or current['transcript_path'] or ''
+                        _, last_agent = read_transcript(t_path, 'agy') if t_path else ([], '')
+                        done = classify('agy', 'Stop', {'last_assistant_message': last_agent})
+                        done = (*done, False) if len(done) == 2 else done
+                        record(con, sock, pane, pid, 'agy', *done, source='observer')
+                elif time.time() - max(current['updated'], current['last_event_time']) >= 2 or state[0] == 'WAIT':
+                    record(con, sock, pane, pid, 'agy', *state, source='observer')
+        if not current:
+            current = con.execute(
+                'SELECT * FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)
+            ).fetchone()
+        if current and current['agent'] == 'agy':
+            updates, params = [], []
+            if transcript and transcript != (current['transcript_path'] or ''):
+                updates.append('transcript_path=?')
+                params.append(transcript)
+            if model and model != (current['hint_model'] or ''):
+                updates.append('hint_model=?')
+                params.append(model)
+            if effort and effort != (current['hint_effort'] or ''):
+                updates.append('hint_effort=?')
+                params.append(effort)
+            if updates:
+                with con:
+                    con.execute(
+                        f"UPDATE panes SET {','.join(updates)} WHERE socket=? AND pane=? AND pid=?",
+                        (*params, sock, pane, pid),
+                    )
 
 
 def process_start(pid):
@@ -1091,6 +1248,7 @@ def observe():
                 observe_cursor(con,sock,live,table)
                 observe_claude(con,sock,live,table)
                 observe_pi(con,sock,live,table)
+                observe_agy(con,sock,live,table)
                 observe_codex_unmapped(con,sock,live,table)
                 for mapping in con.execute('SELECT * FROM codex_sessions WHERE socket=?',(sock,)).fetchall():
                     pane,pid = mapping['pane'],mapping['pid']
