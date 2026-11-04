@@ -69,6 +69,11 @@ for path in [HOME/'.claude/settings.json', codex_hooks_path, HOME/'.cursor/hooks
         data = json.loads(path.read_text())
         if not isinstance(data, dict) or not isinstance(data.get('hooks', {}), dict):
             raise SystemExit('Invalid hook configuration: '+str(path))
+agy_hooks_path = HOME/'.gemini/config/hooks.json'
+if agy_hooks_path.exists():
+    data = json.loads(agy_hooks_path.read_text())
+    if not isinstance(data, dict):
+        raise SystemExit('Invalid hook configuration: '+str(agy_hooks_path))
 # Confirm server access and save runtime before any live-file mutation.
 def tmux(*args):
     return subprocess.check_output(['tmux',*args],text=True).strip()
@@ -99,6 +104,7 @@ paths.append(alias_config)
 paths.append(HOME/'.cursor/hooks.json')
 paths.append(web_index)
 paths.append(opencode_plugin)
+paths.append(agy_hooks_path)
 paths.extend([
     DEST/'web/icons', DEST/'install_web_service.sh',
     DEST/'contrib/systemd/tmux-attn-web.service',
@@ -273,6 +279,28 @@ for event in [
 cursor_path.parent.mkdir(parents=True, exist_ok=True)
 cursor_path.write_text(json.dumps(cursor,indent=2)+'\n')
 
+agy = json.loads(agy_hooks_path.read_text()) if agy_hooks_path.exists() else {}
+for name, entry in list(agy.items()):
+    if name == 'tmux-attn' or (isinstance(entry, dict) and str(app) in json.dumps(entry)):
+        agy.pop(name, None)
+agy['tmux-attn'] = {
+    'enabled': True,
+    'SessionStart': [{'type': 'command', 'command': shlex.join([python, str(app), 'event', 'agy', 'SessionStart'])}],
+    'PreInvocation': [{'type': 'command', 'command': shlex.join([python, str(app), 'event', 'agy', 'PreInvocation'])}],
+    'PreToolUse': [{
+        'matcher': 'ask_question',
+        'hooks': [{'type': 'command', 'command': shlex.join([python, str(app), 'event', 'agy', 'PreToolUse'])}],
+    }],
+    'PostToolUse': [{
+        'matcher': '*',
+        'hooks': [{'type': 'command', 'command': shlex.join([python, str(app), 'event', 'agy', 'PostToolUse'])}],
+    }],
+    'PostInvocation': [{'type': 'command', 'command': shlex.join([python, str(app), 'event', 'agy', 'PostInvocation'])}],
+    'Stop': [{'type': 'command', 'command': shlex.join([python, str(app), 'event', 'agy', 'Stop'])}],
+}
+agy_hooks_path.parent.mkdir(parents=True, exist_ok=True)
+agy_hooks_path.write_text(json.dumps(agy, indent=2)+'\n')
+
 launch = shlex.join(['env', 'TMUX_ATTN_STATE_DIR='+str(HOME/'.local/state/tmux-attn'), python,str(app)])
 config.parent.mkdir(parents=True, exist_ok=True)
 alias_config.write_text(json.dumps(alias_data, ensure_ascii=False, indent=2)+'\n')
@@ -343,6 +371,13 @@ source = f'source-file {shlex.quote(str(config))}'
 if source not in tmux_config:
     paths[0].write_text(tmux_config.rstrip()+'\n\n# Global agent attention inbox\n'+source+'\n')
 
+# Lock files survive observer exit and their PIDs may have been reused. Match
+# the installed observer command before signaling, as the updater does.
+if update is not None:
+    try:
+        update.SystemServices(runtime=DEST, home=HOME).restart_observers()
+    except (update.UpdateError, OSError) as error:
+        print(f'warning: observers not restarted ({error})', file=sys.stderr)
 subprocess.run(['tmux','source-file',str(config)],check=True)
 if not options.sidebar:
     for line in tmux('list-panes','-a','-F','#{pane_id}\t#{@tmux_attn_sidebar}').splitlines():

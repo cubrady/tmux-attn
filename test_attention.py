@@ -2099,6 +2099,99 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertNotIn('transcript_path',source)
 
 
+class AgyTests(unittest.TestCase):
+    def test_agy_event_classification_transcript_and_model(self):
+        self.assertEqual(a.classify('agy', 'SessionStart', {}), ('IDLE', 'Registered; no new work yet'))
+        self.assertEqual(a.classify('agy', 'PreInvocation', {}), ('RUNNING', 'Working'))
+        self.assertEqual(a.classify('agy', 'PostInvocation', {}), ('RUNNING', 'Working'))
+        self.assertEqual(a.classify('agy', 'PostToolUse', {}), ('RUNNING', 'Working'))
+        self.assertEqual(
+            a.classify('agy', 'PreToolUse', {'toolCall': {'name': 'ask_question'}}),
+            ('WAIT', 'Answer or decision needed'),
+        )
+        self.assertEqual(
+            a.classify('agy', 'PreToolUse', {'toolCall': {'name': 'read_file'}}),
+            ('RUNNING', 'Working'),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'NO_TOOL_CALL', 'last_assistant_message': 'All done.'}),
+            ('IDLE', 'Response finished; review needed', True),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'NO_TOOL_CALL', 'last_assistant_message': 'Should I proceed？'}),
+            ('IDLE', 'Response ends with a question; review suggested', True),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'USER_CANCELED'}),
+            ('IDLE', 'Interrupted; review current work', True),
+        )
+        self.assertEqual(
+            a.classify('agy', 'Stop', {'terminationReason': 'ERROR'}),
+            ('IDLE', 'Agent stopped with an error; review needed', True),
+        )
+        self.assertEqual(a.cli_label('agy'), 'agy')
+        self.assertEqual(a.command_cli('agy'), 'agy')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            brain = root / '.gemini/antigravity-cli/brain/conv-1/.system_generated/logs'
+            brain.mkdir(parents=True)
+            compact = brain / 'transcript.jsonl'
+            full = brain / 'transcript_full.jsonl'
+            entries = [
+                {'step_index': 0, 'type': 'USER_INPUT', 'content': '<USER_REQUEST>\n請支援 agy\n</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from none to Claude Opus 4.6 (high).\n</USER_SETTINGS_CHANGE>'},
+                {'step_index': 1, 'type': 'PLANNER_RESPONSE', 'content': '', 'tool_calls': [{'name': 'read_file'}]},
+                {'step_index': 2, 'type': 'USER_INPUT', 'content': '<CONTEXT_SUMMARY>\ncompacted history\n</CONTEXT_SUMMARY>'},
+                {'step_index': 3, 'type': 'PLANNER_RESPONSE', 'content': '已經完成支援！'},
+            ]
+            compact.write_text('\n'.join(json.dumps(e) for e in entries[:2]) + '\n')
+            full.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
+
+            preview = a.read_transcript(str(compact), 'agy')
+            self.assertEqual(preview, (['請支援 agy'], '已經完成支援！'))
+            self.assertEqual(a.transcript_model(str(compact), 'agy'), ('Claude Opus 4.6', 'high'))
+            self.assertEqual(
+                a.pane_model(None, {'agent': 'agy', 'transcript_path': str(compact)}),
+                ('Claude Opus 4.6', 'high'),
+            )
+            self.assertEqual(a.resolve_transcript_path(None, {'agent': 'agy'}, {'path': str(root)}), '')
+
+            with patch.object(a, 'STATE', root / 'state'):
+                out_pre = io.StringIO()
+                payload_pre = {
+                    'conversationId': 'conv-1',
+                    'executionNum': 1,
+                    'transcriptPath': str(compact),
+                    'cwd': str(root),
+                    'lastUserInput': '<USER_REQUEST>\n請支援 agy\n</USER_REQUEST>',
+                    'toolCall': {'name': 'ask_question'},
+                }
+                with patch.object(a.sys, 'stdin', io.StringIO(json.dumps(payload_pre))), \
+                     patch.object(a.sys, 'stdout', out_pre), \
+                     patch.object(a, 'hook_target', return_value=('/tmp/sock', '%28', '1000')):
+                    a.event_command('agy', 'PreToolUse')
+                self.assertEqual(json.loads(out_pre.getvalue()), {'decision': 'allow'})
+
+                out_stop = io.StringIO()
+                payload_stop = {
+                    'conversationId': 'conv-1',
+                    'executionNum': 1,
+                    'transcriptPath': str(compact),
+                    'cwd': str(root),
+                    'terminationReason': 'NO_TOOL_CALL',
+                }
+                with patch.object(a.sys, 'stdin', io.StringIO(json.dumps(payload_stop))), \
+                     patch.object(a.sys, 'stdout', out_stop), \
+                     patch.object(a, 'hook_target', return_value=('/tmp/sock', '%28', '1000')):
+                    a.event_command('agy', 'Stop')
+                self.assertEqual(json.loads(out_stop.getvalue()), {'decision': 'stop'})
+                with closing(a.db()) as con:
+                    row = dict(con.execute('SELECT * FROM panes WHERE pane=?', ('%28',)).fetchone())
+                self.assertEqual(row['state'], 'IDLE')
+                self.assertEqual(row['event_key'], 'conv-1:1')
+                self.assertEqual(row['preview_agent'], '已經完成支援！')
+
+
 class IntegrationTests(unittest.TestCase):
     def test_install_live_hooks_sidebars_navigation_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2106,6 +2199,7 @@ class IntegrationTests(unittest.TestCase):
             label='attn-test-'+str(os.getpid())
             command=['tmux','-L',label]
             subprocess.run(command+['-f','/dev/null','new-session','-d','-s','fixture','-x','160','-y','45','/bin/sh'],check=True)
+            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
             try:
                 def initial(*args): return subprocess.check_output(command+list(args),text=True).strip()
                 sock=initial('display-message','-p','#{socket_path}')
@@ -2124,7 +2218,12 @@ class IntegrationTests(unittest.TestCase):
                 (home/'.cursor').mkdir()
                 cursor_old=json.dumps({'version':1,'hooks':{'stop':[{'command':'echo unrelated-cursor'}]}})
                 (home/'.cursor/hooks.json').write_text(cursor_old)
+                # A leftover observer lock may contain a PID now owned by another app.
+                stale_lock = home/'.local/state/tmux-attn/codex-observer-stale.lock'
+                stale_lock.parent.mkdir(parents=True)
+                stale_lock.write_text(str(unrelated.pid))
                 result=subprocess.check_output([sys.executable,'install.py','--sidebar'],env=env,text=True)
+                self.assertIsNone(unrelated.poll(), 'installer killed an unrelated process from a stale lock')
                 backup=json.loads(result)['backup']
                 app=home/'.local/share/tmux-attn/attention.py'
                 def wait(predicate):
@@ -2272,6 +2371,8 @@ class IntegrationTests(unittest.TestCase):
                 self.assertNotIn('1',run('list-panes','-a','-F','#{@tmux_attn_sidebar}').splitlines())
                 self.assertEqual(run('list-panes','-a','-F','#{pane_id}').splitlines().__len__(),2)
             finally:
+                unrelated.terminate()
+                unrelated.wait(timeout=5)
                 subprocess.run(command+['kill-server'],check=False)
 
 if __name__=='__main__': unittest.main(verbosity=2)

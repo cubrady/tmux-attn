@@ -2455,7 +2455,7 @@ test('the reply sheet has no trash button and keeps attach and send inside one c
 const HUB = '5d18590aaaaa';
 const hostRows = (...extra) => [{ name: 'hub', ok: true, source: 'local', version: HUB }, ...extra];
 
-test('the update hint names peers on another version and offers the update command', () => {
+test('the update hint names peers on another version and offers the update action', () => {
   const ui = dashboard();
   ui.render({ version: HUB, agents: [], hosts: hostRows(
     { name: 'lab', ok: true, source: 'peer', url: 'http://lab', version: '8e7d0fcbbbbb' },
@@ -2466,7 +2466,7 @@ test('the update hint names peers on another version and offers the update comma
   assert.equal(hint.hidden, false);
   assert.match(hint.innerHTML, /<strong>lab<\/strong>/);
   assert.match(hint.innerHTML, /8e7d0fc → hub 5d18590/);
-  assert.match(hint.innerHTML, /<code>tmux-attn update --ref 5d18590aaaaa<\/code>/);
+  assert.match(hint.innerHTML, /data-update-all/);
   assert.doesNotMatch(hint.innerHTML, /down|same/, 'offline hosts and hosts already on the hub version stay out');
 });
 
@@ -4175,4 +4175,16 @@ test('Escape and an outside pointer close the popover', async () => {
   await openInfo(ui);
   ui.document.listeners.pointerdown({ target: ui.elements.get('info-wrap') });
   assert.equal(ui.elements.get('info-panel').hidden, false, 'pointer inside the popover keeps it open');
+});
+
+test('Antigravity (agy) renders filter chip and CLI icon badge', () => {
+  const ui = dashboard();
+  ui.render({ agents: [filterSession('agy')] });
+  assert.match(ui.elements.get('agent-filters').innerHTML,
+    /data-agent-filter="agy"[^>]*>Antigravity/);
+  assert.match(ui.elements.get('list').innerHTML,
+    /class="cli sm agy"[^>]*>.*?src="\/icons\/agy\.svg"/);
+  pickAgent(ui, 'agy');
+  assert.match(ui.elements.get('list').innerHTML, /work-agy/);
+  assert.match(ui.elements.get('meta').textContent, /Agent Antigravity/);
 });

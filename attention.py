@@ -299,13 +299,27 @@ def content_to_text(content):
     return ''
 
 
+def clean_agy_user_text(text):
+    text = str(text or '').strip()
+    if not text:
+        return ''
+    match = re.search(r'<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>', text, re.S | re.I)
+    if match:
+        return match.group(1).strip()
+    if '<CONTEXT_SUMMARY>' in text and '<USER_REQUEST>' not in text:
+        return ''
+    text = re.sub(r'<ADDITIONAL_METADATA>[\s\S]*?</ADDITIONAL_METADATA>', '', text, flags=re.I)
+    text = re.sub(r'<USER_SETTINGS_CHANGE>[\s\S]*?</USER_SETTINGS_CHANGE>', '', text, flags=re.I)
+    return text.strip()
+
+
 def hook_user_text(data):
     if not isinstance(data, dict):
         return ''
-    for key in ('prompt', 'user_prompt', 'last_user_message', 'message', 'text', 'input', 'query'):
+    for key in ('prompt', 'user_prompt', 'last_user_message', 'lastUserInput', 'message', 'text', 'input', 'query'):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
-            return value
+            return clean_agy_user_text(value) if '<USER_REQUEST>' in value or '<CONTEXT_SUMMARY>' in value else value
         if isinstance(value, dict):
             text = content_to_text(value.get('content'))
             if text.strip():
@@ -560,6 +574,38 @@ def parse_pi_transcript(path):
     return _parse_with_tail_fallback(path, _parse_pi_lines)
 
 
+def _parse_agy_lines(lines):
+    users, agent = [], ''
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        kind = row.get('type')
+        if kind == 'USER_INPUT':
+            text = clean_agy_user_text(content_to_text(row.get('content')))
+            if text and not user_text_is_noise(text):
+                users.append(text)
+                agent = ''
+        elif kind == 'PLANNER_RESPONSE':
+            text = content_to_text(row.get('content')).strip()
+            if text:
+                agent = text
+    return users, agent
+
+
+def parse_agy_transcript(path):
+    """Antigravity CLI transcript.jsonl / transcript_full.jsonl."""
+    p = Path(path)
+    if p.name == 'transcript.jsonl':
+        full_path = p.with_name('transcript_full.jsonl')
+        if full_path.is_file():
+            p = full_path
+    return _parse_with_tail_fallback(p, _parse_agy_lines)
+
+
 def read_transcript(path, agent=''):
     """Raw (user messages, latest agent message) from a transcript. ([], '') if unreadable."""
     path = Path(path) if path else None
@@ -573,6 +619,8 @@ def read_transcript(path, agent=''):
             return parse_cursor_transcript(path)
         if agent == 'pi' or '.pi' in parts:
             return parse_pi_transcript(path)
+        if agent == 'agy' or 'antigravity-cli' in parts:
+            return parse_agy_transcript(path)
         return parse_claude_style_transcript(path)
     except OSError:
         return [], ''
@@ -589,6 +637,24 @@ _MODEL_CACHE = {}
 _MODEL_CACHE_LIMIT = 256
 _CLAUDE_MODEL = re.compile(r'claude-(?:(?P<fam>opus|sonnet|haiku|fable)-(?P<ver>\d+(?:-\d{1,2})?)'
                            r'|(?P<ver2>\d+(?:-\d{1,2})?)-(?P<fam2>opus|sonnet|haiku))(?:-\d{8})?')
+_AGY_MODEL_LABEL_RE = re.compile(
+    r'^\s*([^\n(·]+?)(?:\s*(?:\(\s*([^)\n]+?)\s*\)|·\s*([^\s\n]+)))\s*$'
+)
+_AGY_SETTINGS_MODEL_RE = re.compile(
+    r'changed setting `Model Selection` from [^\n`]+ to ([^\n]+?)\.(?:\s|$)'
+)
+
+
+def parse_agy_model_label(raw):
+    text = clean(raw or '', 120).strip()
+    if not text or text.lower() == 'none':
+        return '', ''
+    match = _AGY_MODEL_LABEL_RE.match(text)
+    if match:
+        model = match.group(1).strip()
+        effort = (match.group(2) or match.group(3) or '').strip().lower()
+        return model, effort
+    return text, ''
 
 
 def _scan_model(lines, agent):
@@ -599,6 +665,9 @@ def _scan_model(lines, agent):
                 continue
         elif agent == 'pi':
             if not any(tag in line for tag in ('"model_change"', '"thinking_level_change"', '"assistant"')):
+                continue
+        elif agent == 'agy':
+            if 'Model Selection' not in line:
                 continue
         elif '"assistant"' not in line:
             continue
@@ -622,6 +691,14 @@ def _scan_model(lines, agent):
                     found = str(message.get('model') or '')
                     if found and not found.startswith('<'):
                         model = found
+        elif agent == 'agy':
+            if row.get('type') == 'USER_INPUT':
+                text = content_to_text(row.get('content'))
+                for match in _AGY_SETTINGS_MODEL_RE.finditer(text):
+                    parsed_model, parsed_effort = parse_agy_model_label(match.group(1))
+                    if parsed_model:
+                        model = parsed_model
+                        effort = parsed_effort
         elif row.get('type') == 'assistant':
             message = row.get('message') if isinstance(row.get('message'), dict) else {}
             found = str(message.get('model') or '')
@@ -633,8 +710,8 @@ def _scan_model(lines, agent):
 def transcript_model(path, agent=''):
     """(model id, reasoning effort) last seen in a transcript; ('', '') when unknown.
 
-    Claude, Codex, and Pi transcripts record the model. The tail scan can miss it during a
-    long turn, so the last value seen for a file is kept rather than blanking the badge.
+    Claude, Codex, Pi, and Antigravity transcripts record the model. The tail scan can miss it
+    during a long turn, so the last value seen for a file is kept rather than blanking the badge.
     """
     key = str(path or '')
     try:
@@ -643,8 +720,9 @@ def transcript_model(path, agent=''):
         return '', ''
     parts = {p.lower() for p in Path(key).parts}
     rollout = 'rollout' in Path(key).name or agent == 'codex'
-    kind = 'codex' if rollout else ('pi' if agent == 'pi' or '.pi' in parts else agent)
-    if kind not in ('codex', 'claude', 'pi'):
+    kind = 'codex' if rollout else ('pi' if agent == 'pi' or '.pi' in parts else (
+        'agy' if agent == 'agy' or 'antigravity-cli' in parts else agent))
+    if kind not in ('codex', 'claude', 'pi', 'agy'):
         return '', ''
     signature = (stat_result.st_mtime_ns, stat_result.st_size)
     cached = _MODEL_CACHE.get(key)
@@ -652,8 +730,8 @@ def transcript_model(path, agent=''):
         return cached[1], cached[2]
     try:
         model, effort = _scan_model(_iter_transcript_tail_lines(key), kind)
-        if (not model or (kind == 'pi' and not effort)) and not cached and stat_result.st_size > TRANSCRIPT_TAIL_BYTES:
-            # Codex writes turn_context once per turn and Pi writes model_change / thinking_level_change
+        if (not model or (kind in ('pi', 'agy') and not effort)) and not cached and stat_result.st_size > TRANSCRIPT_TAIL_BYTES:
+            # Codex writes turn_context once per turn and Pi/Antigravity write model selection
             # at session start, so a long turn can push them past the tail.
             with open(key, errors='replace') as source:
                 full_model, full_effort = _scan_model(source, kind)
@@ -674,6 +752,13 @@ def pane_model(con, row):
     """(model id, effort) for a tracked pane's transcript, or the plugin's live hint."""
     if row.get('agent') == 'opencode':
         return (row.get('hint_model') or '', row.get('hint_effort') or '')
+    if row.get('agent') == 'agy':
+        t_model, t_effort = transcript_model(resolve_transcript_path(con, row, row), 'agy')
+        h_model = (row.get('hint_model') or '').strip()
+        h_effort = (row.get('hint_effort') or '').strip()
+        model = (h_model if h_model and h_model.lower() != 'auto' else '') or t_model or h_model
+        effort = h_effort or t_effort
+        return model, effort
     return transcript_model(resolve_transcript_path(con, row, row), row.get('agent') or '')
 
 
@@ -1122,8 +1207,8 @@ def resolve_transcript_path(con, row, meta):
         header = pi_transcript_meta(path) or {}
         parent = header.get('parentSession') or ''
         path = parent if parent and not pi_child_transcript(parent) else ''
-    # A new Claude, Pi, or Cursor session can bind its transcript before the file is created.
-    if path and (agent in ('claude', 'pi', 'cursor') or Path(path).is_file()):
+    # A new Claude, Pi, Cursor, or Antigravity session can bind its transcript before the file is created.
+    if path and (agent in ('claude', 'pi', 'cursor', 'agy') or Path(path).is_file()):
         return path
     mapping = con.execute(
         'SELECT rollout_path FROM codex_sessions WHERE socket=? AND pane=? AND pid=?',
@@ -1131,8 +1216,8 @@ def resolve_transcript_path(con, row, meta):
     ).fetchone() if con is not None and agent == 'codex' else None
     if mapping and mapping['rollout_path'] and Path(mapping['rollout_path']).is_file():
         return mapping['rollout_path']
-    # A cwd identifies a project, not a Codex thread or a different CLI's transcript.
-    if agent == 'codex':
+    # A cwd identifies a project, not a Codex/Antigravity thread or a different CLI's transcript.
+    if agent in ('codex', 'agy'):
         return ''
     cwd = (meta or {}).get('path') or ''
     claimed = set()
@@ -1207,7 +1292,7 @@ def completed_transcript_matches_revision(path, row, displayed_agent, *, lines=N
     from datetime import datetime
 
     agent = row.get('agent')
-    if agent not in ('codex', 'claude') or not displayed_agent.strip():
+    if agent not in ('codex', 'claude', 'agy') or not displayed_agent.strip():
         return False
     reason = str(row.get('reason') or '').lower()
     if any(outcome in reason for outcome in ('interrupted', 'error', 'exited')):
@@ -1223,8 +1308,14 @@ def completed_transcript_matches_revision(path, row, displayed_agent, *, lines=N
         except (KeyError, ValueError, TypeError, AttributeError):
             return None
 
+    target_path = Path(path)
+    if agent == 'agy' and lines is None and target_path.name == 'transcript.jsonl':
+        full_path = target_path.with_name('transcript_full.jsonl')
+        if full_path.is_file():
+            target_path = full_path
+
     try:
-        with (Path(path).open(errors='replace') if lines is None else nullcontext(lines)) as source:
+        with (target_path.open(errors='replace') if lines is None else nullcontext(lines)) as source:
             for line in source:
                 if not line.endswith('\n'):
                     return False
@@ -1265,6 +1356,16 @@ def completed_transcript_matches_revision(path, row, displayed_agent, *, lines=N
                             final_text, matched = '', False
                         elif payload.get('role') == 'assistant' and text:
                             final_text, matched = text, False
+                elif agent == 'agy':
+                    if kind == 'USER_INPUT':
+                        text = clean_agy_user_text(content_to_text(entry.get('content')))
+                        if text and not user_text_is_noise(text):
+                            final_text, matched = '', False
+                    elif kind == 'PLANNER_RESPONSE':
+                        text = content_to_text(entry.get('content')).strip()
+                        if text:
+                            final_text = text
+                            matched = entry.get('status') == 'DONE' and not entry.get('tool_calls')
                 else:
                     message = entry.get('message')
                     message = message if isinstance(message, dict) else {}
@@ -1536,6 +1637,26 @@ def classify(agent, event, data):
             # scrape remains the WAIT source; this marks early RUNNING.
             detail = (data.get('command') or data.get('tool_name') or 'tool')
             return 'RUNNING', 'Tool proposed: ' + clean(str(detail), 120)
+    if agent == 'agy':
+        if event in ('PreInvocation', 'PostInvocation', 'PostToolUse'):
+            return 'RUNNING', 'Working'
+        if event == 'PreToolUse':
+            tool = data.get('tool_name') or (
+                data.get('toolCall', {}).get('name') if isinstance(data.get('toolCall'), dict) else ''
+            ) or ''
+            if str(tool).split('__')[-1].rsplit('.', 1)[-1] in (
+                'AskUserQuestion', 'request_user_input', 'request_user_input_async', 'ask_question',
+            ):
+                return 'WAIT', 'Answer or decision needed'
+            return 'RUNNING', 'Working'
+        if event == 'Stop':
+            term = str(data.get('terminationReason') or '')
+            if term == 'USER_CANCELED':
+                return 'IDLE', 'Interrupted; review current work', True
+            if term in (
+                'ERROR', 'MAX_INVOCATIONS', 'MAX_FORCED_INVOCATIONS', 'MAX_TOKEN_BUDGET_EXCEEDED',
+            ) or data.get('error'):
+                return 'IDLE', 'Agent stopped with an error; review needed', True
     if event in ('SessionStart', 'session_start'):
         return 'IDLE', 'Registered; no new work yet'
     if event in ('SessionEnd', 'session_shutdown'):
@@ -2478,8 +2599,21 @@ HINT_FIELDS = (('title', 'hint_title', 120), ('model', 'hint_model', 120), ('eff
 
 
 def event_hints(agent, data):
-    """Metadata the OpenCode TUI plugin knows but no transcript can supply."""
-    if agent != 'opencode' or not isinstance(data, dict):
+    """Metadata the OpenCode TUI plugin or Antigravity hook knows."""
+    if not isinstance(data, dict):
+        return {}
+    if agent == 'agy':
+        raw_model = data.get('modelName')
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            return {}
+        model, effort = parse_agy_model_label(raw_model)
+        if not model or model.lower() == 'auto':
+            return {}
+        hints = {'hint_model': clean(model, 120).strip()}
+        if effort:
+            hints['hint_effort'] = clean(effort, 60).strip()
+        return hints
+    if agent != 'opencode':
         return {}
     return {
         column: clean(data[source], limit).strip()
@@ -2488,15 +2622,15 @@ def event_hints(agent, data):
     }
 
 
-def remember_hints(con, sock, pane, pid, hints, session_key=''):
+def remember_hints(con, sock, pane, pid, hints, session_key='', agent='opencode'):
     """Store live title/model hints without touching the pane's attention revision."""
     if not hints:
         return
     existing = con.execute('SELECT agent, event_key FROM panes WHERE socket=? AND pane=? AND pid=?', (sock, pane, pid)).fetchone()
-    if not existing or existing['agent'] != 'opencode':
-        record(con, sock, pane, pid, 'opencode', 'IDLE', 'Registered; no new work yet', event_key=session_key)
-    elif session_key and existing['event_key'] and existing['event_key'] != session_key:
-        record(con, sock, pane, pid, 'opencode', 'IDLE', 'Registered; no new work yet',
+    if not existing or existing['agent'] != agent:
+        record(con, sock, pane, pid, agent, 'IDLE', 'Registered; no new work yet', event_key=session_key)
+    elif session_key and existing['event_key'] and existing['event_key'] != session_key and agent == 'opencode':
+        record(con, sock, pane, pid, agent, 'IDLE', 'Registered; no new work yet',
                event_key=session_key, replace_identity=True, clear_source=True)
     elif session_key and not existing['event_key']:
         with con:
@@ -2515,6 +2649,15 @@ def event_command(agent, event):
         # Cursor imports Claude hooks; retain the identity of the actual caller.
         if agent == 'claude' and (os.environ.get('CURSOR_VERSION') or data.get('cursor_version')):
             agent = 'cursor'
+        if agent == 'agy' and isinstance(data, dict):
+            if data.get('transcriptPath') and not data.get('transcript_path'):
+                data['transcript_path'] = data['transcriptPath']
+            if isinstance(data.get('toolCall'), dict):
+                data.setdefault('tool_name', data['toolCall'].get('name') or '')
+            if event == 'Stop' and not data.get('last_assistant_message') and data.get('transcript_path'):
+                _, last_msg = read_transcript(data['transcript_path'], 'agy')
+                if last_msg:
+                    data['last_assistant_message'] = last_msg
         # Child transcripts share the parent's session_id/pane but have their own id.
         # Their completion/tool hooks must never replace the visible parent's state.
         if (agent == 'codex' and codex_child_hook(data)) or (agent == 'pi' and pi_child_hook(data)):
@@ -2522,6 +2665,11 @@ def event_command(agent, event):
             return
         hints = event_hints(agent, data)
         session_key = clean(data.get('session_id'), 200) if agent == 'opencode' else ''
+        agy_turn_key = ''
+        if agent == 'agy' and isinstance(data, dict):
+            conv_id = clean(data.get('conversationId') or '', 120)
+            exec_num = data.get('executionNum')
+            agy_turn_key = f'{conv_id}:{exec_num}' if conv_id and exec_num is not None else conv_id
         state = classify(agent, event, data)
         target = hook_target() if state or hints else None
         if state and not target and agent == 'codex' and data.get('session_id'):
@@ -2570,11 +2718,12 @@ def event_command(agent, event):
                         recorded_revision = record(con, sock, pane, pid, agent, *state,
                                                    event_key=(data.get('generation_id','') if agent == 'cursor'
                                                               else session_key if agent == 'opencode'
+                                                              else agy_turn_key if agent == 'agy'
                                                               else data.get('turn_id','')),
                                                    replace_identity=session_changed or reset_session,
                                                    clear_source=session_changed)
                 user_text = hook_user_text(data) if event in (
-                    'UserPromptSubmit', 'beforeSubmitPrompt', 'agent_start',
+                    'UserPromptSubmit', 'beforeSubmitPrompt', 'agent_start', 'PreInvocation',
                 ) else ''
                 agent_text = str(data.get('last_assistant_message') or '').strip() if event in (
                     'Stop', 'stop', 'agent_settled', 'StopFailure',
@@ -2598,18 +2747,21 @@ def event_command(agent, event):
                         transcript_path=transcript or None,
                         expected_revision=recorded_revision,
                     )
-                remember_hints(con, sock, pane, pid, hints, session_key)
+                remember_hints(con, sock, pane, pid, hints, session_key, agent=agent)
     except Exception as exc:
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (STATE / 'hook-errors.log').open('a') as f:
             f.write(f'{time.time():.0f} {agent}/{event}: {type(exc).__name__}: {exc}\n')
-    # Cursor permission hooks require a schema-valid allow; never block agent work.
-    # Codex Stop and other agents accept {} with no decision effects.
+    # Cursor and Antigravity hooks require schema-valid decisions; never block agent work.
     if agent == 'cursor' and event in (
         'beforeShellExecution', 'beforeMCPExecution',
         'preToolUse', 'PreToolUse', 'beforeReadFile', 'beforeTabFileRead',
     ):
         print(json.dumps({'permission': 'allow'}))
+    elif agent == 'agy' and event == 'PreToolUse':
+        print(json.dumps({'decision': 'allow'}))
+    elif agent == 'agy' and event == 'Stop':
+        print(json.dumps({'decision': 'stop'}))
     else:
         print('{}')
 
@@ -2639,7 +2791,7 @@ def live_panes(sock=None):
 SESSION_TITLE_CHARS = 80
 # Agents write their session title into the tmux pane title: Claude Code as "<glyph> title",
 # Codex as "title | project". Anything else here is a shell prompt or a default placeholder.
-GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'opencode', 'cursor', 'cursor agent', 'agent', 'pi', 'pi-bolt', 'pi-bin', 'pi-agent', 'π', 'zsh', 'bash', 'fish', 'sh', 'tmux', 'new session'}
+GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'opencode', 'cursor', 'cursor agent', 'agent', 'pi', 'pi-bolt', 'pi-bin', 'pi-agent', 'π', 'agy', 'antigravity', 'antigravity cli', 'zsh', 'bash', 'fish', 'sh', 'tmux', 'new session'}
 
 
 def pane_session_title(raw, path='', command='', hint=''):
@@ -2975,7 +3127,7 @@ def agent_severity(row):
     return ''
 
 
-KNOWN_CLI_ICONS = ('claude', 'codex', 'agent', 'pi', 'opencode')
+KNOWN_CLI_ICONS = ('claude', 'codex', 'agent', 'pi', 'opencode', 'agy')
 
 
 def cli_label(agent):
@@ -2987,6 +3139,7 @@ def cli_label(agent):
         'cursor': 'agent',
         'pi': 'pi',
         'opencode': 'opencode',
+        'agy': 'agy',
     }.get(key, key or 'unknown')
 
 
@@ -3006,6 +3159,8 @@ def command_cli(command):
         return 'pi'
     if key in ('opencode',):
         return 'opencode'
+    if key in ('agy', 'antigravity', 'antigravity-cli'):
+        return 'agy'
     # Claude Code sometimes surfaces as a version-looking binary name.
     if key.replace('.', '').isdigit() and key.count('.') >= 2:
         return 'claude'
@@ -4145,7 +4300,12 @@ def _bounded_handoff_lines(path):
     """Read at most one tail window, with no unbounded transcript fallback."""
     try:
         lines = []
-        with Path(path).open('rb') as source:
+        target = Path(path)
+        if target.name == 'transcript.jsonl':
+            full_path = target.with_name('transcript_full.jsonl')
+            if full_path.is_file():
+                target = full_path
+        with target.open('rb') as source:
             size = os.fstat(source.fileno()).st_size
             offset = max(0, size - TRANSCRIPT_TAIL_BYTES)
             source.seek(offset)
@@ -4187,6 +4347,8 @@ def _handoff_parser(agent):
         return _parse_cursor_lines
     if agent == 'pi':
         return _parse_pi_lines
+    if agent == 'agy':
+        return _parse_agy_lines
     return _parse_claude_lines
 
 
