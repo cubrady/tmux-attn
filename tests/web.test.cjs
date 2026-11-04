@@ -4196,7 +4196,7 @@ test('agy filter requests Antigravity quota and renders its icon and model bucke
     calls.push(url);
     return { ok: true, json: async () => ({ ok: true, providers: ['antigravity'], accounts: [{
       provider: 'antigravity', label: 'Antigravity', windows: [{
-        key: 'argon-weekly', label: 'Gemini 4 Argon weekly', shortLabel: 'Gemini 4 Argon weekly',
+        key: 'argon-weekly', label: 'Gemini 4 Argon weekly', shortLabel: '週',
         usedPercent: 38, windowMinutes: 10080,
       }],
     }] }) };

@@ -3373,6 +3373,7 @@
             paceHtml = `<div class="usage-pace">⚡ ${escapeHtml(delta + eta)}</div>`;
           }
           return `<div class="usage-win">` +
+            (acc.provider === 'antigravity' ? `<div class="usage-win-tag">${escapeHtml(win.label)}</div>` : '') +
             `<div class="usage-meter-row" title="${escapeHtml(`${win.label || win.shortLabel}: 剩餘 ${remainPct}%${resetInfo ? ` · ${resetInfo}` : ''}`)}">` +
               `<span class="usage-win-tag">${escapeHtml(win.shortLabel || win.label)}</span>` +
               `<div class="usage-bar" role="progressbar" aria-label="${escapeHtml(win.label || win.shortLabel)}" aria-valuenow="${remainPct}" aria-valuemin="0" aria-valuemax="100">` +

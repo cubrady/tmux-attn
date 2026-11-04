@@ -3561,7 +3561,6 @@ def _normalize_usage_account(item, fallback_provider):
                 extra.get('window'), extra.get('title'), None,
             )
             if win is not None:
-                win['shortLabel'] = win['label']
                 extra_windows.append(win)
         if extra_windows:
             windows = extra_windows

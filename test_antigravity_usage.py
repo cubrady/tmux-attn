@@ -24,7 +24,8 @@ class AntigravityUsageTests(unittest.TestCase):
         self.assertEqual(a.parse_usage_providers('antigravity'), ['antigravity'])
         windows = rows[0]['windows']
         self.assertEqual(len(windows), 2)  # primary duplicates the Gemini bucket
-        self.assertEqual(windows[1]['shortLabel'], 'Gemini 4 Argon weekly')
+        self.assertEqual(windows[1]['label'], 'Gemini 4 Argon weekly')
+        self.assertEqual(windows[1]['shortLabel'], '週')
         self.assertEqual(windows[1]['usedPercent'], 38)
 
     def test_basic_windows_survive_missing_or_invalid_extras(self):
