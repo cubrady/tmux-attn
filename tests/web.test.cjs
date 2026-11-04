@@ -3310,13 +3310,16 @@ test('card title falls back to the project and does not repeat it in meta', () =
   }
 });
 
-test('card shows the agent session title as L1 and project in meta', () => {
+test('card leads with the project and shows the session title as secondary context', () => {
   const ui = dashboard();
   const a = handoffAgent('sample', [], { pane: '%3', title: 'Sample 專案列表與內頁模組', preview: { users: [], agent: '' } });
   ui.render({ agents: [a] });
   const html = ui.elements.get('list').innerHTML;
-  assert.ok(html.includes('<span class="card-title">Sample 專案列表與內頁模組</span>'));
-  assert.ok(html.includes('<span class="project">sample</span>'));
+  assert.ok(html.includes('<span class="card-title">sample</span>'));
+  assert.ok(html.includes('<div class="session-context">Sample 專案列表與內頁模組</div>'));
+  assert.doesNotMatch(html, /class="project"/);
+  assert.doesNotMatch(cardHtmlFor({ title: '' }), /class="session-context"/);
+  assert.doesNotMatch(cardHtmlFor({ project: 'sample', title: 'sample' }), /class="session-context"/);
 });
 
 test('card meta hides redundant repos and shows distinct repos with a safe small CLI icon', () => {
@@ -3326,8 +3329,8 @@ test('card meta hides redundant repos and shows distinct repos with a safe small
   assert.match(hidden, /class="cli sm codex" title="codex"><img src="\/icons\/codex\.svg" alt="codex"/);
 
   const shown = cardHtmlFor({ project: 'Atlas', repo: 'company/atlas-service', title: 'Deploy API' });
-  assert.match(shown, /<span class="card-title">Deploy API<\/span>/);
-  assert.match(shown, /<span class="project">Atlas<\/span><span class="repo" title="company\/atlas-service">company\/atlas-service<\/span>/);
+  assert.match(shown, /<span class="card-title">Atlas<\/span>/);
+  assert.match(shown, /<span class="repo" title="company\/atlas-service">company\/atlas-service<\/span>/);
   assert.doesNotMatch(shown, /branch|dirty/);
 });
 
@@ -3346,11 +3349,11 @@ test('two or more hosts label each card and the reply sheet, including while fil
   ui.render({ hosts, agents: [workstation, cicd, weird, wide] });
   const list = ui.elements.get('list').innerHTML;
   const tone = ui.context.hostTone('workstation');
-  assert.match(list, new RegExp(`<div class="title-line"><span class="card-title">Fix login</span><span class="title-agent"><span class="cli sm codex"`));
-  assert.match(list, new RegExp(`<div class="env"><span class="project">project-alpha</span><span class="host-chip tone-${tone}" title="workstation">workstation</span></div>`));
+  assert.match(list, new RegExp(`<div class="title-line"><span class="card-title">project-alpha</span><span class="title-agent"><span class="cli sm codex"`));
+  assert.match(list, new RegExp(`<div class="env"><span class="host-chip tone-${tone}" title="workstation">workstation</span></div>`));
   assert.match(ui.elements.get('hosts').innerHTML, new RegExp(`host-pill tone-${tone}`));
   assert.match(list, /title="client-2">client-2<\/span>/);
-  assert.match(list, /aria-label="開啟 Fix login，workstation"/);
+  assert.match(list, /aria-label="開啟 project-alpha · Fix login，workstation"/);
   assert.match(list, /title="&lt;b&gt;&quot;x&quot;">&lt;b&gt;&quot;x&quot;</);
   assert.doesNotMatch(list, /<b>/);
   const clipped = long.slice(0, 15) + '…';
@@ -3376,7 +3379,7 @@ test('a single host leaves cards and the reply sheet unlabeled', () => {
   const current = { ...agent('only', 'WAIT'), cli: 'codex', project: 'project-alpha', title: 'Fix login' };
   ui.render({ hosts: [{ name: 'only', ok: true }], agents: [current] });
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /host-chip/);
-  assert.match(ui.elements.get('list').innerHTML, /aria-label="開啟 Fix login"/);
+  assert.match(ui.elements.get('list').innerHTML, /aria-label="開啟 project-alpha · Fix login"/);
   ui.open(current);
   const sheetHost = ui.elements.get('sheet-host');
   assert.equal(sheetHost.hidden, true);
@@ -3385,7 +3388,7 @@ test('a single host leaves cards and the reply sheet unlabeled', () => {
 
 test('card meta shows the tmux window index', () => {
   const at = cardHtmlFor({ project: 'Atlas', title: 'Deploy API', session: 'work', window_index: 3, pane_index: 1 });
-  assert.match(at, /<div class="env"><span class="loc" title="tmux work:3\.1">3\.1<\/span><span class="project">Atlas<\/span><\/div>/, 'a split pane keeps its pane index and leads project');
+  assert.match(at, /<div class="env"><span class="loc" title="tmux work:3\.1">3\.1<\/span><\/div>/, 'a split pane keeps its pane index without repeating the project');
   const zero = cardHtmlFor({ project: 'Atlas', session: 'work', window_index: 0, pane_index: 0 });
   assert.match(zero, /<span class="loc" title="tmux work:0\.0">0<\/span>/, 'index 0 is a real position and the first pane stays a window number');
   const long = cardHtmlFor({ project: 'Atlas', session: 'a-very-long-session-name', window_index: 12, pane_index: 2 });
@@ -3421,11 +3424,11 @@ test('card title and meta fit long English and CJK text', () => {
   const a = handoffAgent(project, [], { title, preview: { users: [prompt], agent: '' } });
   ui.render({ agents: [a] });
   const cards = ui.elements.get('list').innerHTML;
-  assert.ok(cards.includes(`<div class="title-line"><span class="card-title">${title}</span>`));
-  assert.ok(cards.includes(`</div><div class="card-meta"><div class="env">`));
-  assert.ok(cards.includes(`<span class="project">${project}</span>`));
+  assert.ok(cards.includes(`<div class="title-line"><span class="card-title">${project}</span>`));
+  assert.doesNotMatch(cards, /class="project"/);
+  assert.ok(cards.includes(`<div class="session-context">${title}</div>`));
   assert.equal((cards.replace(/aria-label="[^"]*"/g, '').match(/我貼了 latest prompt/g) || []).length, 1);
-  assert.ok(cards.includes(`aria-label="開啟 ${title}"`));
+  assert.ok(cards.includes(`aria-label="開啟 ${project} · ${title}"`));
   ui.render({ agents: [{ ...a, title: '' }] });
   const promptCard = ui.elements.get('list').innerHTML;
   assert.ok(promptCard.includes(`<span class="card-title">${project}</span>`));
@@ -3513,9 +3516,9 @@ test('session titles bound and escape task hints and titles while keeping projec
   assert.match(ui.elements.get('list').innerHTML, /class="card-title">Atlas<\/span>/);
   assert.doesNotMatch(ui.elements.get('list').innerHTML, /<script>/);
   ui.render({ agents: [{ ...a, title: '<manual>' }] });
-  assert.match(ui.elements.get('list').innerHTML, /class="card-title">&lt;manual&gt;<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="session-context">&lt;manual&gt;<\/div>/);
   ui.render({ agents: [{ ...a, project: '<project>"&', title: '<manual>' }] });
-  assert.match(ui.elements.get('list').innerHTML, /class="card-title">&lt;manual&gt;<\/span>[\s\S]*?<span class="project">&lt;project&gt;&quot;&amp;<\/span>/);
+  assert.match(ui.elements.get('list').innerHTML, /class="card-title">&lt;project&gt;&quot;&amp;<\/span>[\s\S]*?<div class="session-context">&lt;manual&gt;<\/div>/);
 });
 
 test('cards and sheets render structured task lists, deduplicate gerund activeForm, and fold completed tasks', () => {

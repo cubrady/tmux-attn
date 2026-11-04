@@ -1194,6 +1194,16 @@
       color: var(--fg);
       font-weight: 600;
     }
+    .session-context {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+      color: var(--muted);
+      font-size: 0.8rem;
+      line-height: 1.4;
+    }
     .cli {
       display: inline-flex;
       align-items: center;
@@ -4022,7 +4032,6 @@
       const parts = [];
       const loc = paneLocation(a);
       if (loc) parts.push(`<span class="loc" title="${escapeHtml(loc.title)}">${escapeHtml(loc.text)}</span>`);
-      if (sessionLabel(a) && project) parts.push(`<span class="project">${escapeHtml(project)}</span>`);
       if (showRepo) parts.push(`<span class="repo" title="${escapeHtml(repo)}">${escapeHtml(repo)}</span>`);
       const hostChip = hostChipHtml(a);
       if (hostChip) parts.push(hostChip);
@@ -4063,9 +4072,10 @@
       if (cat === 'running') sentAt.delete(key); // it started: the tag has done its job and must not return later
       const sentTag = sentRecently(key) && cat !== 'running' ? '<span class="sent-tag">已送出</span>' : '';
       const label = sessionLabel(a);
-      const name = label || projectName(a);
+      const name = projectName(a);
+      const identity = label && label !== name ? `${name} · ${label}` : name;
       const machine = showHostChips() ? agentHostName(a) : '';
-      const openLabel = machine ? `開啟 ${name}，${machine}` : `開啟 ${name}`;
+      const openLabel = machine ? `開啟 ${identity}，${machine}` : `開啟 ${identity}`;
       const killClass = canKill(a) && killPhase(key) ? ' kill-armed' : '';
       const laterClass = laterPhase(a) === 'armed' ? ' later-armed' : '';
       const shellExpandable = cat === 'shell' && shellLines(a).length > SHELL_PREVIEW_COLLAPSED ? ' expandable' : '';
@@ -4082,13 +4092,13 @@
         <div class="row1">
           <div class="title">
             ${statusMark}
-            <div class="session-heading"><div class="title-line"><span class="card-title">${escapeHtml(name)}</span>${agentMeta}</div>${meta ? `<div class="card-meta">${meta}</div>` : ''}</div>
+            <div class="session-heading"><div class="title-line"><span class="card-title">${escapeHtml(name)}</span>${agentMeta}</div>${label && label !== name ? `<div class="session-context">${escapeHtml(label)}</div>` : ''}${meta ? `<div class="card-meta">${meta}</div>` : ''}</div>
           </div>
           <div class="row1-side">
             ${sentTag ? `<div class="session-flags">${sentTag}</div>` : ''}
             <div class="age">${escapeHtml(a.age)}</div>
             ${a.later || canMoveLater(a) ? laterButtonHtml(a) : ''}
-            ${canKill(a) ? killButtonHtml(key, name) : ''}
+            ${canKill(a) ? killButtonHtml(key, identity) : ''}
           </div>
         </div>
         ${killNote}

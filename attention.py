@@ -2792,11 +2792,23 @@ SESSION_TITLE_CHARS = 80
 # Agents write their session title into the tmux pane title: Claude Code as "<glyph> title",
 # Codex as "title | project". Anything else here is a shell prompt or a default placeholder.
 GENERIC_PANE_TITLES = {'claude code', 'claude', 'codex', 'opencode', 'cursor', 'cursor agent', 'agent', 'pi', 'pi-bolt', 'pi-bin', 'pi-agent', 'π', 'agy', 'antigravity', 'antigravity cli', 'zsh', 'bash', 'fish', 'sh', 'tmux', 'new session'}
+CLI_TITLE_COMMANDS = {'claude', 'claude-code', 'codex', 'agent', 'cursor', 'opencode',
+                      'pi', 'pi-bolt', 'pi-bin', 'pi-agent', 'agy', 'antigravity', 'antigravity-cli'}
+
+
+def cli_launch_title(title):
+    """Recognize a CLI invocation, without rejecting task titles mentioning flags."""
+    try:
+        argv = shlex.split(title)
+    except ValueError:
+        return False
+    return bool(argv and Path(argv[0]).name.lower() in CLI_TITLE_COMMANDS
+                and (len(argv) == 1 or argv[1].startswith('-')))
 
 
 def pane_session_title(raw, path='', command='', hint=''):
     hinted = clean(hint).strip()
-    if hinted and hinted.lower() not in GENERIC_PANE_TITLES:
+    if hinted and hinted.lower() not in GENERIC_PANE_TITLES and not cli_launch_title(hinted):
         return hinted[:SESSION_TITLE_CHARS]
     title = clean(raw).strip()
     title = re.sub(r'^[^\w]+\s+', '', title)  # status glyph or spinner frame
@@ -2808,7 +2820,8 @@ def pane_session_title(raw, path='', command='', hint=''):
                 title = title[:-len(project) - len(sep)].strip()
                 break
     lowered = title.lower()
-    if (not title or lowered in GENERIC_PANE_TITLES or lowered in {project.lower(), clean(command).lower()}
+    if (not title or lowered in GENERIC_PANE_TITLES or cli_launch_title(title)
+            or lowered in {project.lower(), clean(command).lower()}
             or re.fullmatch(r'[\w.-]+@[\w.-]+', title)):
         return ''
     return title[:SESSION_TITLE_CHARS]
@@ -3295,6 +3308,9 @@ def tag_host(payload, host):
     for row in payload.get('agents') or []:
         item = dict(row)
         item['host'] = host
+        # Older peers can mistake a shell's launch command for a session title.
+        if cli_launch_title(clean(item.get('title')).strip()):
+            item['title'] = ''
         item['category'] = attention_category(item)
         item['emoji'] = agent_emoji(item)
         safe = sanitized_handoff(item)
