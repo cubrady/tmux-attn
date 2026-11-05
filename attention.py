@@ -3738,7 +3738,14 @@ def _cursor_epoch_ms(value):
         try:
             value = int(text)
         except ValueError:
-            return 0
+            # Dashboard protobuf timestamps are RFC3339; older responses used epoch milliseconds.
+            try:
+                stamp = datetime.datetime.fromisoformat(text.replace('Z', '+00:00'))
+                if stamp.tzinfo is None:
+                    return 0
+                value = int(stamp.timestamp() * 1000)
+            except (ValueError, OverflowError, OSError):
+                return 0
     if isinstance(value, float):
         if not value.is_integer():
             return 0

@@ -100,6 +100,26 @@ test('cached usage renders on startup with the saved agent filter', () => {
   assert.equal(typeof ui.elements.get('hosts').listeners.click, 'function');
 });
 
+test('Cursor Bot shows its own reset countdown beside remaining allowance', () => {
+  const resetsAt = new Date(Date.now() + 12 * 3600000).toISOString();
+  const values = {
+    'tmux-attn:agent-filter': 'cursor',
+    'tmux-attn:usage-cache': JSON.stringify({ accounts: [
+      { provider: 'cursor', account: 'alice', windows: [
+        { key: 'grokBot', label: 'Grok Bot', shortLabel: 'Bot', usedPercent: 94, resetsAt },
+      ] },
+    ] }),
+  };
+  const ui = dashboard({ globals: { sessionStorage: {
+    getItem: key => values[key] || null, setItem() {}, removeItem() {},
+  } } });
+  const html = ui.elements.get('agent-usage').innerHTML;
+  assert.match(html, /Bot<\/span>/);
+  assert.match(html, /剩 6%/);
+  assert.match(html, /class="usage-win-reset">12h<\/span>/);
+  assert.match(html, /12h 後重置/);
+});
+
 test('host counts exclude shells and sort active hosts before empty/offline hosts', () => {
   const ui = dashboard();
   const hosts = [

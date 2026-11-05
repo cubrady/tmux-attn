@@ -233,6 +233,35 @@ class WebLaterTests(unittest.TestCase):
         self.assertFalse(bot['pace']['willLastToReset'])
         self.assertEqual(bot['pace']['etaSeconds'], 68750)
 
+    def test_cursor_bot_rfc3339_reset_from_dashboard(self):
+        accounts = a._fetch_cursor_direct_usage(
+            rpc=self._cursor_period_rpc({
+                'usagePercent': 93.898556,
+                'currentPeriodStart': '2026-10-30T01:38:01.867Z',
+                'nextResetTimestampUtc': '2026-11-06T01:38:01.867Z',
+                'hasNonZeroIncludedLimit': True,
+            }),
+            tokens=['valid-jwt-token'],
+            now=1793872800.0,
+        )
+        bot = accounts[0]['windows'][3]
+        self.assertEqual(bot['usedPercent'], 94)
+        self.assertEqual(bot['resetsAt'], '2026-11-06T01:38:01Z')
+        self.assertEqual(bot['windowMinutes'], 10080)
+        self.assertNotEqual(bot['resetsAt'], accounts[0]['windows'][0]['resetsAt'])
+        self.assertIn('pace', bot)
+
+    def test_cursor_timestamp_formats_and_invalid_values(self):
+        expected = 1793929081867
+        for value in (expected, str(expected), float(expected),
+                      '2026-11-06T01:38:01.867Z', '2026-11-06T09:38:01.867+08:00'):
+            with self.subTest(value=value):
+                self.assertEqual(a._cursor_epoch_ms(value), expected)
+        for value in (None, True, '', 'invalid', '2026-11-06T01:38:01',
+                      '2026-99-06T01:38:01Z', -1, 1.5, float('inf'), float('nan')):
+            with self.subTest(value=value):
+                self.assertEqual(a._cursor_epoch_ms(value), 0)
+
     def test_cursor_bot_without_reset_shows_percent_only(self):
         accounts = a._fetch_cursor_direct_usage(
             rpc=self._cursor_period_rpc({
