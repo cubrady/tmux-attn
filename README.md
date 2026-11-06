@@ -223,7 +223,7 @@ Web 服務保存，使用同一服務的手機與電腦瀏覽器會同步。agen
 各自貼上一次。Claude Code、Codex 會變成附件（`[Image #n]`）；Pi 沒有附件功能，只收到文字路徑。
 另支援一般文字檔（`.txt`、`.md`、`.csv`、`.tsv`、`.json`、`.log`、`.xml`、`.yaml`、`.yml`、`.ini`、`.cfg`、`.toml`，UTF-8／含 BOM 的 UTF-16）及
 Word（`.doc`、`.docx`）、Excel（`.xls`、`.xlsx`）、PowerPoint（`.ppt`、`.pptx`）。
-每檔上限 8MB，一次最多 4 個附件（圖片與檔案合計）；不接受 PDF、壓縮檔、執行檔及其他格式。
+每檔上限 8MB，一次最多 30 個附件（圖片與檔案合計）；不接受 PDF、壓縮檔、執行檔及其他格式。
 伺服器會檢查文字編碼／控制字元或 Office 容器結構；檔案保留原始內容，以隨機名稱及原格式副檔名儲存。
 文字與 Office 檔案送出後以路徑交給 agent，能否解析取決於該 agent 的工具。
 多主機時，hub 與每台 client 都要更新到同一版才能使用新增的檔案附件。

@@ -1128,9 +1128,10 @@ class StoreTests(unittest.TestCase):
         with patch.object(a, 'send_to_pane', return_value=None) as send:
             self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'files': [file_id]})[0], 200)
             self.assertEqual(send.call_args.kwargs['files'], [file_id])
-            for files in ('bad', [None], ['../notes.txt'], [image_id], [file_id] * 5):
+            for files in ('bad', [None], ['../notes.txt'], [image_id], [file_id] * 31):
                 self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'files': files})[0], 400)
-            self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'images': [image_id] * 3, 'files': [file_id] * 2})[0], 400)
+            self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'images': [image_id] * 15, 'files': [file_id] * 15})[0], 200)
+            self.assertEqual(a.dispatch_send({'pane': '%1', 'pid': '123', 'text': '', 'images': [image_id] * 15, 'files': [file_id] * 16})[0], 400)
         with patch.object(a, 'live_panes', return_value=self.LIVE), patch.object(a, 'tmux', return_value='123'), \
              patch.object(a, 'paste_to_pane') as paste, patch.object(a.time, 'sleep'):
             self.assertIsNone(a.send_to_pane('%1', '123', '', files=[file_id]))

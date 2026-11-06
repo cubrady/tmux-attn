@@ -1299,15 +1299,15 @@ test('a failed upload blocks sending until the image is removed', async () => {
   assert.deepEqual(t.sends()[0].body.images, ['id-ok.jpg']);
 });
 
-test('unsupported files are rejected and at most four attachments stay attached', async () => {
+test('unsupported files are rejected and at most 30 attachments stay attached', async () => {
   const t = uploader();
-  await t.pick([imageFile('notes.pdf', 'application/pdf'), imageFile('1.jpg'), imageFile('2.jpg'),
-    imageFile('3.jpg'), imageFile('4.jpg'), imageFile('5.jpg')]);
-  assert.equal(t.uploads().length, 4);
-  assert.equal(t.chipKeys().length, 4);
-  assert.match(t.ui.elements.get('sheet-status').textContent, /最多 4 個|只支援圖片/);
-  await t.pick([imageFile('6.jpg')]);
-  assert.equal(t.uploads().length, 4);
+  await t.pick([imageFile('notes.pdf', 'application/pdf'), ...Array.from({length: 31}, (_, i) => imageFile(`${i}.jpg`))]);
+  assert.equal(t.uploads().length, 30);
+  assert.equal(t.chipKeys().length, 30);
+  assert.match(t.ui.elements.get('sheet-status').textContent, /只支援圖片/);
+  await t.pick([imageFile('extra.jpg')]);
+  assert.equal(t.uploads().length, 30);
+  assert.match(t.ui.elements.get('sheet-status').textContent, /最多 30 個/);
 });
 
 test('text and Office files upload unchanged with filenames and mix with images', async () => {
