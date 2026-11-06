@@ -57,6 +57,10 @@ Web 的 Agent 快捷篩選一次選一種 coding agent，只列出所選主機�
 Session 卡片名稱顯示「專案」與 agent 自訂標題（若有）；開啟時的 aria 名稱可附帶任務提示：
 從最近三則使用者訊息中取有內容的短原文，略過 status check、continue、進度詢問等泛用訊息，
 再以回覆原文補足，最多 56 字元，不推測語意主題。沒有可用內容時不捏造任務名稱。
+專案名稱左側只在有明確專案設定時顯示代表圖示：Android、React／Next.js、Vue／Nuxt、Svelte、Angular、Flutter、React Native／Expo、Python、CLI、Rust 或 Go。
+混合 workspace 與無法確認的專案不顯示；依所在目錄向上檢查最近的專案設定，不從對話或專案名猜測。
+各主機自行辨識，舊版 peer 尚未提供類型時維持無圖示；結果最多快取 60 秒。
+辨識規則、官方文件依據與限制見 [專案圖示說明](docs/project-icons.md)。
 卡片資訊列最右顯示 tmux window 編號，與底列一致（例如 `7`）。同一個 window 分成多個 pane 時，
 非 0 的 pane 會寫成 `7.1`，避免兩張卡片看起來一樣。編號是一顆小標籤，和後面的模型版號分開。
 游標停在上面會看到完整 target `session:window.pane`，也就是 `tmux select-pane -t` 用的地址；

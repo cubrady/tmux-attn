@@ -4333,3 +4333,20 @@ test('agy filter requests Antigravity quota and renders its icon and model bucke
   assert.match(html, /剩 62%/);
   assert.ok(calls.some(url => url.includes('antigravity')));
 });
+
+
+test('project icons use only known host-provided types and leave unknown projects blank', () => {
+  const { context } = dashboard();
+  for (const type of ['android', 'react', 'nextjs', 'vue', 'nuxt', 'svelte', 'angular', 'flutter', 'react-native', 'python', 'cli', 'rust', 'go']) {
+    const html = context.projectIconHtml({ project_technology: type });
+    assert.ok(html.includes(`/icons/project-${type}.svg`));
+    assert.ok(html.includes('class="project-icon"'));
+    assert.ok(html.includes(`data-project-type="${type}"`));
+    assert.ok(readFileSync(join(__dirname, `../web/icons/project-${type}.svg`), 'utf8').includes('<svg'));
+  }
+  for (const type of [undefined, null, {}, [], { toString: 'android' }, '', 'unknown', 'constructor', '__proto__', '../../bad', '<script>']) {
+    assert.equal(context.projectIconHtml({ project_technology: type }), '');
+  }
+  const html = context.cardHtml({ ...agent('local', 'RUNNING'), project: 'demo', project_technology: 'android' });
+  assert.ok(html.indexOf('project-android.svg') < html.indexOf('class="card-title"'));
+});

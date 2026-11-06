@@ -1175,6 +1175,8 @@
     }
     .title-agent .cli.sm { transform: translateY(1.5px); }
     .title-agent .model { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
+    .project-icon { width: 19px; height: 19px; flex: 0 0 19px; align-self: center; object-fit: contain; }
+    .project-icon[data-project-type="rust"] { background: #fff; border-radius: 50%; padding: 1px; }
     .card-title {
       display: -webkit-box;
       overflow: hidden;
@@ -4019,6 +4021,17 @@
       const text = hasPane && a.pane_index > 0 ? `${a.window_index}.${a.pane_index}` : String(a.window_index);
       return { text, target, title: `tmux ${target}` };
     }
+    function projectIconHtml(a) {
+      const labels = {
+        android: 'Android 專案', react: 'React 網站', nextjs: 'Next.js', vue: 'Vue 網站',
+        nuxt: 'Nuxt', svelte: 'Svelte / SvelteKit', angular: 'Angular', flutter: 'Flutter App',
+        'react-native': 'React Native / Expo', python: 'Python 專案', cli: 'CLI 工具', rust: 'Rust', go: 'Go',
+      };
+      const tech = a.project_technology;
+      if (typeof tech !== 'string' || !Object.hasOwn(labels, tech)) return '';
+      const label = labels[tech];
+      return `<img class="project-icon" data-project-type="${tech}" src="/icons/project-${tech}.svg" alt="${label}" title="${label}" width="19" height="19" onerror="this.remove()">`;
+    }
     function titleAgentHtml(a) {
       const parts = [];
       if (a.cli || a.agent) parts.push(cliBadge(a.cli || a.agent, true));
@@ -4092,7 +4105,7 @@
         <div class="row1">
           <div class="title">
             ${statusMark}
-            <div class="session-heading"><div class="title-line"><span class="card-title">${escapeHtml(name)}</span>${agentMeta}</div>${label && label !== name ? `<div class="session-context">${escapeHtml(label)}</div>` : ''}${meta ? `<div class="card-meta">${meta}</div>` : ''}</div>
+            <div class="session-heading"><div class="title-line">${projectIconHtml(a)}<span class="card-title">${escapeHtml(name)}</span>${agentMeta}</div>${label && label !== name ? `<div class="session-context">${escapeHtml(label)}</div>` : ''}${meta ? `<div class="card-meta">${meta}</div>` : ''}</div>
           </div>
           <div class="row1-side">
             ${sentTag ? `<div class="session-flags">${sentTag}</div>` : ''}

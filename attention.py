@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import unicodedata
 import zipfile
 import zlib
@@ -4213,6 +4214,298 @@ def dispatch_web_inbox(payload, include_local=True):
 _GIT_ENV_CACHE = {}
 _GIT_ENV_TTL = 25.0
 
+_PROJECT_TECH_CACHE = {}
+_PROJECT_MANIFESTS = (
+    'package.json', 'pyproject.toml', 'requirements.txt', 'Cargo.toml', 'go.mod',
+    'pubspec.yaml', 'build.gradle', 'build.gradle.kts', 'settings.gradle',
+    'settings.gradle.kts', 'pnpm-workspace.yaml', 'lerna.json', 'nx.json', '.git',
+)
+
+
+def _project_read(path, *, prefix=False):
+    """Never block on special files or accept truncated manifests."""
+    try:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or (info.st_size > 65536 and not prefix):
+                return ''
+            data = stream.read(65537)
+            if len(data) > 65536 and not prefix:
+                return ''
+            return data[:65536].decode('utf-8')
+    except (OSError, UnicodeError):
+        return ''
+
+
+def _project_parse(path, *, toml=False):
+    try:
+        value = (tomllib.loads if toml else json.loads)(_project_read(path))
+        return value if isinstance(value, dict) else {}
+    except (ValueError, RecursionError):
+        return {}
+
+
+def _project_exists(path):
+    # lexists also treats dangling symlinks and unreadable manifests as boundaries.
+    return os.path.lexists(path)
+
+
+def _project_entries(root):
+    try:
+        with os.scandir(root) as entries:
+            result = []
+            for _ in range(128):
+                entry = next(entries, None)
+                if entry is None:
+                    return result
+                result.append(entry)
+            # Reject a full scan budget rather than continuing an unbounded listing.
+            return []
+    except OSError:
+        return []
+
+
+def _project_gradle(root):
+    """Recognize applied standard Android plugins; do not evaluate Gradle."""
+    catalog = {}
+    parent = root
+    for _ in range(8):
+        candidate = parent / 'gradle/libs.versions.toml'
+        if _project_exists(candidate):
+            catalog = _project_parse(candidate, toml=True).get('plugins', {})
+            break
+        if _project_exists(parent / '.git') or parent.parent == parent:
+            break
+        parent = parent.parent
+    if not isinstance(catalog, dict):
+        catalog = {}
+    aliases = {}
+    for key, value in catalog.items():
+        plugin = value.get('id') if isinstance(value, dict) else None
+        if plugin in ('com.android.application', 'com.android.library'):
+            aliases[re.sub(r'[-_]', '.', key)] = plugin
+    for name in ('build.gradle', 'build.gradle.kts', 'app/build.gradle', 'app/build.gradle.kts'):
+        if name.startswith('app/') and _project_exists(root / 'app/.git'):
+            continue
+        text = _project_read(root / name)
+        # Preserve quoted strings while removing comments (including commented plugins).
+        text = re.sub(r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|/\*.*?\*/|//[^\n]*''',
+                      lambda match: match[1] or '', text, flags=re.S)
+        code = re.sub(r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')''',
+                      lambda match: ' ' * len(match[0]), text)
+        declarations = re.finditer(
+            r'''\bid\s*(?:\(\s*)?["']com\.android\.(?:application|library)["']\s*\)?'''
+            r'|\balias\s*\(\s*libs\.plugins\.([\w.]+)\s*\)', text)
+        for match in declarations:
+            # A quoted example is not a declaration. Accept statement starts only.
+            if code[match.start()].isspace() or re.split(r'[\n{;]', code[:match.start()])[-1].strip():
+                continue
+            if match[1] and match[1] not in aliases:
+                continue
+            suffix = re.split(r'''[;}]|\b(?:id|alias)\s*(?=\(|["'])''', text[match.end():], maxsplit=1)[0]
+            if not re.search(r'\bapply\s*(?:\(\s*)?false\b', suffix):
+                return True
+        for match in re.finditer(r'''\bapply\s*(?:plugin\s*:\s*|\(\s*plugin\s*=\s*)["']com\.android\.(?:application|library)["']''', text):
+            if not code[match.start()].isspace() and not re.split(r'[\n{;]', code[:match.start()])[-1].strip():
+                return True
+    return False
+
+
+def _project_commands(script):
+    """Split only at unquoted shell boundaries; never interpret substitutions."""
+    if '`' in script or '$(' in script:
+        return []
+    commands = []
+    start = 0
+    quote = ''
+    escaped = False
+    comment = False
+    for index, char in enumerate(script):
+        if comment:
+            if char == '\n':
+                comment = False
+                start = index + 1
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\' and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ''
+        elif char in ("'", '"'):
+            quote = char
+        elif char == '#':
+            commands.append(script[start:index])
+            comment = True
+        elif char in ';&|\n':
+            commands.append(script[start:index])
+            start = index + 1
+    if quote or escaped:
+        return []
+    if not comment:
+        commands.append(script[start:])
+    return commands
+
+
+def _project_script(scripts, command):
+    if not isinstance(scripts, dict):
+        return False
+    for value in scripts.values():
+        if not isinstance(value, str):
+            continue
+        for segment in _project_commands(value):
+            try:
+                words = shlex.split(segment, comments=True)
+            except ValueError:
+                continue
+            while words and re.match(r'^[A-Za-z_]\w*=', words[0]):
+                words.pop(0)
+            if words[:1] == ['npx']:
+                words = words[1:]
+            elif len(words) >= 2 and words[0] in ('npm', 'pnpm', 'yarn') and words[1] == 'exec':
+                words = words[2:]
+            if (len(words) >= 2 and not any(char.isspace() for word in words[:2] for char in word)
+                    and re.fullmatch(command, ' '.join(words[:2]))):
+                return True
+    return False
+
+
+def _project_nonempty_strings(value):
+    return isinstance(value, dict) and bool(value) and all(
+        isinstance(key, str) and key.strip() and isinstance(item, str) and item.strip()
+        for key, item in value.items())
+
+
+def _project_candidates(root):
+    package = _project_parse(root / 'package.json')
+    cargo = _project_parse(root / 'Cargo.toml', toml=True)
+    if ('workspaces' in package or 'workspace' in cargo
+            or any(_project_exists(root / name) for name in ('pnpm-workspace.yaml', 'lerna.json', 'nx.json'))
+            or any((root / name).is_dir() for name in ('apps', 'services', 'packages'))):
+        return set()
+    candidates = set()
+    if _project_gradle(root):
+        candidates.add('android')
+    deps = package.get('dependencies', {})
+    deps = {key: value for key, value in deps.items() if isinstance(value, str) and value.strip()} if isinstance(deps, dict) else {}
+    dev = package.get('devDependencies', {})
+    dev = {key: value for key, value in dev.items() if isinstance(value, str) and value.strip()} if isinstance(dev, dict) else {}
+    all_deps = deps | dev
+    scripts = package.get('scripts', {})
+    html = (root / 'index.html').is_file()
+    web_build = _project_script(scripts, r'(?:vite|webpack|parcel|react-scripts|vue-cli-service)\s+(?:build|serve|start|dev)')
+    react = 'react' in deps and 'react-dom' in deps and 'react-native' not in deps
+    if react and 'next' in deps and _project_script(scripts, r'next\s+(?:dev|build|start)'):
+        candidates.add('nextjs')
+    elif react and (html and web_build or _project_script(scripts, r'react-scripts\s+(?:start|build)')):
+        candidates.add('react')
+    nuxt = 'nuxt' in all_deps and (
+        _project_script(scripts, r'(?:nuxt|nuxi)\s+(?:dev|build|start|generate|preview)')
+        or any((root / name).is_file() for name in ('nuxt.config.ts', 'nuxt.config.js', 'nuxt.config.mjs')))
+    if nuxt:
+        candidates.add('nuxt')
+    elif 'vue' in deps and (html and web_build or _project_script(scripts, r'vue-cli-service\s+(?:serve|build)')):
+        candidates.add('vue')
+    kit = ('@sveltejs/kit' in all_deps and 'vite' in all_deps
+           and (root / 'src/app.html').is_file() and (root / 'src/routes').is_dir())
+    svelte_vite = ('@sveltejs/vite-plugin-svelte' in all_deps and html
+                   and _project_script(scripts, r'vite\s+build')
+                   and any((root / name).is_file() for name in ('vite.config.js', 'vite.config.ts', 'vite.config.mjs')))
+    if 'svelte' in all_deps and (kit or svelte_vite):
+        candidates.add('svelte')
+    angular = _project_parse(root / 'angular.json').get('projects', {})
+    if ('@angular/core' in deps and isinstance(angular, dict)
+            and any(isinstance(value, dict) and value.get('projectType') == 'application'
+                    for value in angular.values())):
+        candidates.add('angular')
+    expo = _project_parse(root / 'app.json').get('expo')
+    native = (any((root / name).is_file() for name in ('metro.config.js', 'metro.config.cjs'))
+              or (root / 'android/app/src/main/AndroidManifest.xml').is_file()
+              or any(entry.name.endswith('.xcodeproj') and entry.is_dir(follow_symlinks=False)
+                     for entry in _project_entries(root / 'ios'))
+              or isinstance(expo, dict) and bool(expo)
+              or 'expo' in deps and any((root / name).is_file() for name in ('app.config.js', 'app.config.ts')))
+    if 'react' in deps and 'react-native' in deps and native:
+        candidates.add('react-native')
+    pubspec = _project_read(root / 'pubspec.yaml')
+    # Only the canonical indentation form is supported; no general YAML evaluation.
+    if (re.search(r'^dependencies:[ \t]*(?:#[^\n]*)?\n(?:(?:[ ]+[^\n]*|)[\n])*?'
+                  r'^  flutter:[ \t]*(?:#[^\n]*)?\n    sdk: flutter[ \t]*(?:#[^\n]*)?$', pubspec, re.M)
+            and (root / 'lib/main.dart').is_file()):
+        candidates.add('flutter')
+    pyproject = _project_parse(root / 'pyproject.toml', toml=True)
+    project = pyproject.get('project', {})
+    tool = pyproject.get('tool', {})
+    poetry = tool.get('poetry', {}) if isinstance(tool, dict) else {}
+    python = any(isinstance(value, dict) and isinstance(value.get('name'), str)
+                 and value['name'].strip() for value in (project, poetry))
+    py_cli = any(isinstance(value, dict) and _project_nonempty_strings(value.get('scripts'))
+                 and all(re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:'
+                                      r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\s*\[[^\]\n]+\])?', script.strip())
+                         for script in value['scripts'].values())
+                 for value in (project, poetry))
+    service = re.search(r'^(?:fastapi|flask|django)(?:\[|[<>=~!;\s]|$)',
+                        _project_read(root / 'requirements.txt'), re.M | re.I)
+    if py_cli:
+        candidates.add('cli')
+    elif python or service:
+        candidates.add('python')
+    npm_bin = package.get('bin')
+    if isinstance(npm_bin, str) and npm_bin.strip() or _project_nonempty_strings(npm_bin):
+        candidates.add('cli')
+    rust = cargo.get('package', {})
+    if isinstance(rust, dict) and isinstance(rust.get('name'), str) and rust['name'].strip():
+        candidates.add('rust')
+    if re.search(r'^module[ \t]+(?:"[^"\n]+"|[^\s/][^\s]*)[ \t]*(?://[^\n]*)?$',
+                 _project_read(root / 'go.mod'), re.M):
+        sources = _project_entries(root) + _project_entries(root / 'cmd')
+        if any(entry.name.endswith('.go') and entry.is_file(follow_symlinks=False) for entry in sources):
+            candidates.add('go')
+    for entry in _project_entries(root):
+        if '.' in entry.name or not entry.is_file(follow_symlinks=False) or not os.access(entry.path, os.X_OK):
+            continue
+        wrapper = _project_read(Path(entry.path))
+        target = re.search(r'exec\s+python3?\s+[^\n]*?([\w-]+\.py)', wrapper)
+        if (wrapper.startswith(('#!/bin/sh', '#!/bin/bash', '#!/usr/bin/env sh', '#!/usr/bin/env bash'))
+                and target and re.search(r'^(?:import argparse|from argparse import)\b',
+                                         _project_read(root / target[1], prefix=True), re.M)):
+            candidates.discard('python')
+            candidates.add('cli')
+            break
+    # Native applications commonly contain Android modules as part of their build.
+    if candidates & {'react-native', 'flutter'}:
+        candidates.discard('android')
+    return candidates
+
+
+def project_technology(path):
+    """Conservative, bounded manifest detection on the host that owns the cwd."""
+    if not path or not Path(path).is_absolute():
+        return ''
+    now = time.monotonic()
+    cached = _PROJECT_TECH_CACHE.get(path)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    root = Path(path)
+    result = ''
+    for _ in range(8):
+        if not root.is_dir():
+            break
+        candidates = _project_candidates(root)
+        if len(candidates) == 1:
+            result = candidates.pop()
+        if (candidates or result or any(_project_exists(root / name) for name in _PROJECT_MANIFESTS)
+                or any((root / name).is_dir() for name in ('apps', 'services', 'packages'))
+                or root.parent == root):
+            break
+        root = root.parent
+    if len(_PROJECT_TECH_CACHE) >= 256:
+        _PROJECT_TECH_CACHE.clear()
+    _PROJECT_TECH_CACHE[path] = (now, result)
+    return result
+
 
 def repo_name(path):
     return Path(path).name if path else ''
@@ -4517,6 +4810,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'title': pane_session_title(row.get('pane_title'), row.get('path', ''), command, hint_title),
             'path': row.get('path', ''),
             'repo': env['repo'],
+            'project_technology': project_technology(row.get('path', '')),
             'branch': env['branch'],
             'dirty': bool(env['dirty']),
             'state': row['state'],
@@ -4564,6 +4858,7 @@ def agents_payload(con, sock=None, live=None, now=None):
             'project': labels.get(meta['path'], Path(meta['path']).name if meta.get('path') else ''),
             'path': meta.get('path', ''),
             'repo': env['repo'],
+            'project_technology': project_technology(meta.get('path', '')),
             'branch': env['branch'],
             'dirty': bool(env['dirty']),
             'state': 'SHELL',
