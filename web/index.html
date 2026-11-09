@@ -2703,8 +2703,22 @@
     .work-project strong, .work-project small { display: block; overflow-wrap: anywhere; }
     .work-project small { color: var(--muted); font-size: .75rem; margin-top: 4px; }
     .work-agent-options { display: grid; gap: 8px; }
-    .work-agent-choice { display: flex; justify-content: space-between; gap: 12px; text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg); color: var(--fg); cursor: pointer; font: inherit; min-height: 48px; }
+    .work-agent-choice { display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg); color: var(--fg); cursor: pointer; font: inherit; min-height: 48px; }
     .work-agent-choice[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .work-agent-name { flex: 0 0 96px; font-weight: 500; }
+    .work-quota { flex: 1; min-width: 0; display: grid; gap: 7px; }
+    .work-quota-meter { display: grid; grid-template-columns: minmax(30px, 64px) minmax(35px, 1fr) 34px; align-items: center; gap: 7px; font-size: 11px; }
+    .work-quota-label { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .work-quota-track { height: 5px; border-radius: 9px; background: color-mix(in srgb, var(--muted) 16%, transparent); overflow: hidden; }
+    .work-quota-fill { display: block; height: 100%; border-radius: inherit; background: var(--running); }
+    .work-quota-fill[data-tone="warn"] { background: var(--wait); }
+    .work-quota-fill[data-tone="danger"] { background: var(--danger); }
+    .work-quota-value { text-align: right; font-variant-numeric: tabular-nums; }
+    .work-quota-more { color: var(--muted); font-size: 10px; text-align: right; }
+    .work-quota-detail { margin-top: 10px; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+    .work-quota-detail[hidden] { display: none; }
+    .work-quota-detail summary { cursor: pointer; padding: 7px 0; }
+    .work-quota-detail p { margin: 5px 0; overflow-wrap: anywhere; }
     .work-agent-choice:disabled { opacity: .45; cursor: default; }
     .work-agent-choice small { text-align: right; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
     .work-note { color: var(--muted); font-size: .8rem; line-height: 1.5; margin: 12px 0; }
@@ -2908,8 +2922,9 @@
         <label>主機<select id="work-host" required></select></label>
         <label>專案路徑<input id="work-path" placeholder="搜尋最近專案，或輸入完整路徑" autocomplete="off" spellcheck="false" required></label>
         <div id="work-projects" aria-label="已釘選與最近專案"></div>
-        <p class="work-note">Coding agent · 沿用專案上次的選擇，可隨時切換</p>
+        <p class="work-note">Coding agent <span style="float:right">剩餘用量</span></p>
         <div class="work-agent-options" id="work-agents" role="group" aria-label="選擇 Coding agent"></div>
+        <details class="work-quota-detail" id="work-quota-detail" hidden><summary>用量詳情</summary><p id="work-quota-description"></p></details>
         <p class="work-note">會在指定目錄建立新的 tmux session，並開始全新對話。用量來自所選主機。</p>
         <div class="work-status" id="work-status" role="status" aria-live="polite"></div>
         <button type="submit" class="work-submit" id="work-submit" disabled>開新工作</button>
@@ -2946,10 +2961,32 @@
       }).filter(Boolean);
       return summaries.join('；') || (workUsageLoading ? '讀取用量中…' : '暫無用量');
     }
+    function workQuotaHtml(id) {
+      const provider = ({agent: 'cursor', agy: 'antigravity'})[id] || id;
+      const accounts = workAccounts.filter(a => a.provider === provider);
+      const windows = accounts.flatMap(a => (a.windows || [])
+        .filter(w => typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent))
+        .map(w => ({account: a, win: w})));
+      if (!windows.length) return `<small>${workUsageLoading ? '讀取中…' : '暫無用量'}</small>`;
+      // Show the most constrained windows first; full account/window details stay available below.
+      windows.sort((a, b) => remainingPercentForWindow(a.win) - remainingPercentForWindow(b.win));
+      const meters = windows.slice(0, 2).map(({account, win}) => {
+        const remaining = remainingPercentForWindow(win);
+        const label = win.shortLabel || win.label || '額度';
+        const tone = remaining <= 10 ? 'danger' : remaining <= 25 ? 'warn' : 'ok';
+        const accessible = `${accounts.length > 1 ? (account.account || '帳號') + ' · ' : ''}${label} 剩 ${remaining}%`;
+        return `<span class="work-quota-meter" role="meter" aria-label="${escapeHtml(accessible)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${remaining}" title="${escapeHtml(accessible)}"><span class="work-quota-label">${escapeHtml(label)}</span><span class="work-quota-track" aria-hidden="true"><span class="work-quota-fill" data-tone="${tone}" style="width:${remaining}%"></span></span><span class="work-quota-value" aria-hidden="true">${remaining}%</span></span>`;
+      }).join('');
+      const cached = accounts.some(a => a.stale || (a.observed_at && Date.now() / 1000 - a.observed_at > 120));
+      const note = [windows.length > 2 ? `+${windows.length - 2} 項` : '', cached ? '快取' : ''].filter(Boolean).join(' · ');
+      return `<span class="work-quota">${meters}${note ? `<span class="work-quota-more">${escapeHtml(note)}</span>` : ''}</span>`;
+    }
     function renderWorkAgents() {
       const focused = document.activeElement?.closest?.('[data-work-agent]')?.dataset.workAgent;
       document.getElementById('work-agents').innerHTML = (workOptions.agents || []).map(a =>
-        `<button type="button" class="work-agent-choice" data-work-agent="${escapeHtml(a.id)}" aria-pressed="${workAgent === a.id}"${!a.available || workBusy ? ' disabled' : ''}><span>${escapeHtml(a.label || a.id)}</span><small>${escapeHtml(a.available ? workQuotaText(a.id) : '未安裝')}</small></button>`).join('');
+        `<button type="button" class="work-agent-choice" data-work-agent="${escapeHtml(a.id)}" aria-pressed="${workAgent === a.id}"${!a.available || workBusy ? ' disabled' : ''}><span class="work-agent-name">${escapeHtml(a.label || a.id)}</span>${a.available ? workQuotaHtml(a.id) : '<small>未安裝</small>'}</button>`).join('');
+      document.getElementById('work-quota-description').textContent = workQuotaText(workAgent);
+      document.getElementById('work-quota-detail').hidden = !workAgent;
       if (focused) document.querySelector(`[data-work-agent="${CSS.escape(focused)}"]`)?.focus();
       document.getElementById('work-submit').disabled = workBusy || workSucceeded || !workOptions.agents?.some(a => a.id === workAgent && a.available) || !document.getElementById('work-path').value.trim();
     }
