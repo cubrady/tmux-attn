@@ -228,6 +228,13 @@ Word（`.doc`、`.docx`）、Excel（`.xls`、`.xlsx`）、PowerPoint（`.ppt`�
 文字與 Office 檔案送出後以路徑交給 agent，能否解析取決於該 agent 的工具。
 多主機時，hub 與每台 client 都要更新到同一版才能使用新增的檔案附件。
 
+**輸出檔案**：agent 回覆中的絕對路徑（Markdown 連結、反引號或一般路徑）會在 sheet 與全文下方顯示「預覽／下載」。
+每次開啟都由來源主機重新讀取原檔，不保存副本、不修改 agent 輸出；已開啟的預覽可重新整理以取得最新內容。
+支援單檔 HTML、文字及 PNG／JPEG／GIF／WebP 預覽；PDF、Office 等其他格式直接下載。每檔上限 32 MiB。
+HTML 使用隔離環境，可執行內嵌 JavaScript；不載入其他本地檔案、外部資源或連線 API。
+來源主機與 agent pane 必須仍在線，路徑須出現在目前可讀取的 agent 回覆；關閉 pane 或換成新回覆後，舊連結可能失效。
+僅提供一般檔案，不開放目錄、末端符號連結或任意路徑存取。多主機使用時 hub 與來源 client 都要更新。
+
 ---
 
 ## 維運速查

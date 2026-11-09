@@ -2499,6 +2499,11 @@
       font: 500 0.88rem var(--font);
       cursor: pointer;
     }
+    .output-files { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+    .output-file { display: flex; align-items: baseline; gap: 12px; margin: 4px 0; font-size: 13px; }
+    .output-file-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .output-file a { flex-shrink: 0; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    .output-files small { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; }
     .reader-note {
       margin: 18px 0 0;
       padding-top: 10px;
@@ -3745,9 +3750,45 @@
       return `<div class="preview">${earlier}${latest}${
         agentLine ? previewLineHtml('agent', agentLine, target('agent', 0), openFull) : ''}</div>`;
     }
+    function outputFilePaths(text) {
+      const candidates = [];
+      let rest = String(text || '').replace(/\[[^\]\n]*\]\((?:<([^>\n]+)>|([^\)\n]+))\)/g, (_, angle, plain) => {
+        const path = (angle || plain).trim();
+        if (path.startsWith('/') || path.startsWith('file:///')) candidates.push(path);
+        return ' ';
+      });
+      rest = rest.replace(/`([^`\n]+)`/g, (_, path) => { candidates.push(path); return ' '; });
+      for (const match of rest.matchAll(/(?<![\w:/])\/[^\s`<>"'()\[\]，。；：！？]+/g)) candidates.push(match[0]);
+      const paths = [];
+      for (let path of candidates) {
+        if (path.startsWith('file:///')) {
+          try { path = decodeURIComponent(path.slice(7)); } catch (_) { continue; }
+        }
+        path = path.replace(/[.,;!?:，。；：！？]+$/, '');
+        if (path.startsWith('/') && !path.startsWith('//') && path.slice(1).includes('/')
+          && !path.includes('\0') && !path.split('/').includes('..') && !paths.includes(path)) paths.push(path);
+      }
+      return paths;
+    }
+    function outputFilesHtml(text, agent) {
+      if (!agent || !agent.pane || !agent.pid) return '';
+      const files = outputFilePaths(text);
+      if (!files.length) return '';
+      return '<div class="output-files" aria-label="輸出檔案">' + files.map(path => {
+        const params = Object.entries({ host: agent.host || '', pane: agent.pane, pid: agent.pid, path,
+          sig: Array.from(String(text || '')).slice(0, 160).join('') })
+          .map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+        const url = escapeHtml('/api/output-file?' + params);
+        return `<div class="output-file"><span class="output-file-name" title="${escapeHtml(path)}">${escapeHtml(path.split('/').pop())}</span>` +
+          `<a href="${url}" target="_blank" rel="noopener noreferrer">預覽</a>` +
+          `<a href="${url}&amp;download=1" target="_blank" rel="noopener noreferrer">下載</a></div>`;
+      }).join('') + '<small>每次開啟皆讀取原檔最新內容</small></div>';
+    }
     function renderSheetPreview(preview, actionable) {
       sheetShown = { preview, actionable };
-      document.getElementById('sheet-preview').innerHTML = previewHtml(preview, { actionable }) || emptyPreviewHtml();
+      const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
+      document.getElementById('sheet-preview').innerHTML = (previewHtml(preview, { actionable }) || emptyPreviewHtml())
+        + outputFilesHtml(preview?.agent, agent);
       markClippedPreviews();
     }
     // Questions the agent is waiting on (Codex queued questions, Claude AskUserQuestion), answered on the pane's host.
@@ -4434,11 +4475,12 @@
       const message = moved ? '對話已有新內容，這則訊息可能已不同。' : `載入失敗：${error || '未知錯誤'}`;
       return `<p class="reader-error" role="alert">${escapeHtml(message)}<button type="button" data-retry>${moved ? '載入最新內容' : '重試'}</button></p>`;
     }
-    function readerBodyHtml(text, data) {
+    function readerBodyHtml(text, data, route) {
       let note = '';
       if (data.partial) note = '<p class="reader-note">完整內容還在同步，稍後重新開啟即可看到全文。</p>';
       else if (data.truncated) note = `<p class="reader-note">內容過長，僅顯示前 ${text.length} 字（共 ${Number(data.chars) || 0} 字）。</p>`;
-      return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text)}</div></div>${note}`;
+      return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text)}</div></div>${note}`
+        + (route?.role === 'agent' ? outputFilesHtml(text, route) : '');
     }
     function readerSnapshot(route, sig) {
       if (!sheetOpen || !sheetPreviewFull || sheetPreviewKey !== agentKey(route) || !sig) return null;
@@ -4493,7 +4535,7 @@
       const snapshot = readerSnapshot(route, sig);
       body.setAttribute('aria-busy', 'true');
       body.innerHTML = snapshot
-        ? readerBodyHtml(snapshot.text, {}) + '<p class="reader-loading" role="status">載入全文中…</p>'
+        ? readerBodyHtml(snapshot.text, {}, route) + '<p class="reader-loading" role="status">載入全文中…</p>'
         : '<p class="reader-loading" role="status">載入中…</p>';
       const failed = (error) => {
         if (token !== readerToken || !readerOpen) return;
@@ -4507,7 +4549,7 @@
         readerText = String(data.text);
         copy.disabled = false;
         body.setAttribute('aria-busy', 'false');
-        body.innerHTML = readerBodyHtml(readerText, data);
+        body.innerHTML = readerBodyHtml(readerText, data, route);
         document.getElementById('reader-sub').textContent = readerSubLine(agent, data.chars);
       } catch (e) {
         failed(e && e.message);

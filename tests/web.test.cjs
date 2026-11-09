@@ -3283,6 +3283,39 @@ function handoffAgent(project, items, overrides = {}) {
     handoff: { revision: 7, source: 'completed response', truncated: false, items } };
 }
 
+test('output file discovery handles spaces, Chinese punctuation, file URLs and deduplication', () => {
+  const ui = dashboard();
+  const text = '[report](/Users/dev/my report.html) `/home/me/a b.txt` 完成 (/Users/dev/report.html)。 '
+    + 'https://example.com/a/b [web](https://example.com/c/d) [local](file:///home/me/a%20b.txt)';
+  assert.deepEqual(Array.from(ui.context.outputFilePaths(text)), [
+    '/Users/dev/my report.html', '/home/me/a b.txt', '/Users/dev/report.html',
+  ]);
+  assert.deepEqual(Array.from(ui.context.outputFilePaths('`/home/me/../secret` //host/a/b /single')), []);
+});
+
+test('output links preserve host and original text while encoding and escaping paths', () => {
+  const ui = dashboard();
+  const text = '完成 `/Users/dev/報告 & <test>.html`';
+  const html = ui.context.outputFilesHtml(text, agent('peer', 'DONE'));
+  assert.ok(html.includes('host=peer&amp;pane=%251&amp;pid=123'));
+  assert.ok(html.includes(encodeURIComponent('/Users/dev/報告 & <test>.html')));
+  assert.ok(html.includes('報告 &amp; &lt;test&gt;.html'));
+  assert.ok(html.includes('sig=' + encodeURIComponent(text)));
+  assert.ok(html.includes('&amp;download=1'));
+  assert.equal((html.match(/target="_blank" rel="noopener noreferrer"/g) || []).length, 2);
+  assert.equal(ui.context.outputFilesHtml(text, null), '');
+  assert.equal(ui.context.outputFilesHtml('no file', agent('peer', 'DONE')), '');
+});
+
+test('full reply offers output files while user messages remain ordinary messages', () => {
+  const ui = dashboard();
+  const text = '完成 `/Users/dev/report.html`';
+  const route = { ...agent('peer', 'DONE'), role: 'agent' };
+  assert.ok(ui.context.readerBodyHtml(text, {}, route).includes('輸出檔案'));
+  assert.ok(!ui.context.readerBodyHtml(text, {}, { ...route, role: 'user' }).includes('輸出檔案'));
+  assert.equal(text, '完成 `/Users/dev/report.html`');
+});
+
 test('Atlas sessions use literal task context and ignore generic prompts', () => {
   const ui = dashboard();
   const ci = '對,CI 已經恢復,而且是真的跑完整套件後通過的。';

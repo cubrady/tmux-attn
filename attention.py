@@ -32,7 +32,7 @@ import unicodedata
 import zipfile
 import zlib
 import xml.etree.ElementTree as ET
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -5623,6 +5623,117 @@ def dispatch_message(payload):
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, **message}
 
 
+MAX_OUTPUT_FILE_BYTES = 32 * 1024 * 1024
+
+
+def output_file_paths(text):
+    """Find absolute file references without changing the agent's original text."""
+    candidates = []
+
+    def link(match):
+        candidate = (match[1] or match[2]).strip()
+        if candidate.startswith(('/', 'file:///')):
+            candidates.append(candidate)
+        return ' '
+
+    def code(match):
+        candidates.append(match[1])
+        return ' '
+
+    rest = re.sub(r'\[[^\]\n]*\]\((?:<([^>\n]+)>|([^\)\n]+))\)', link, text)
+    rest = re.sub(r'`([^`\n]+)`', code, rest)
+    candidates.extend(re.findall(r'(?<![\w:/])/(?:[^\s`<>"\'()\[\]，。；：！？]+)', rest))
+    paths = []
+    for candidate in candidates:
+        if candidate.startswith('file:///'):
+            candidate = unquote(candidate[7:])
+        candidate = candidate.rstrip('.,;!?:，。；：！？')
+        if (candidate.startswith('/') and not candidate.startswith('//')
+                and '/' in candidate[1:] and '\x00' not in candidate
+                and '..' not in Path(candidate).parts and candidate not in paths):
+            paths.append(candidate)
+    return paths
+
+
+def output_file_response(query, fleet_only=False):
+    """Read a referenced file on its owner; never expose an arbitrary-path file server."""
+    pane, pid, host, path = (query.get(key, [''])[0] for key in ('pane', 'pid', 'host', 'path'))
+    sig = query.get('sig', [''])[0]
+    download = query.get('download', [''])[0] == '1'
+    if not pane or not pid or not path or len(path) > 4096 or len(sig) > 400:
+        return 400, 'pane, pid, and path are required'.encode(), {}
+    local = local_host_name()
+    if host and host != local:
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, b'Unknown host', {}
+        # Omit host on the peer request so it cannot be forwarded recursively.
+        url = peer['url'].rstrip('/') + '/api/output-file?' + urlencode({
+            'pane': pane, 'pid': pid, 'path': path, 'sig': sig, 'download': '1' if download else '0'})
+        try:
+            with urlopen(Request(url), timeout=PEER_UPLOAD_TIMEOUT) as response:
+                data = response.read(MAX_OUTPUT_FILE_BYTES + 1)
+                if len(data) > MAX_OUTPUT_FILE_BYTES:
+                    return 413, b'File too large (limit: 32 MiB)', {}
+                headers = {key: response.headers[key] for key in (
+                    'Content-Type', 'Content-Disposition', 'Content-Security-Policy',
+                    'X-Content-Type-Options', 'Referrer-Policy') if key in response.headers}
+                # A peer missing this endpoint must not be mistaken for a valid preview.
+                if 'Content-Disposition' not in headers:
+                    return 502, b'Update tmux-attn on the source host to open files', {}
+                return 200, data, headers
+        except HTTPError as exc:
+            with exc:
+                if exc.code == 404:
+                    return 404, b'File not found, or source host needs a tmux-attn update', {}
+                return exc.code, exc.read(4096), {}
+        except Exception:
+            return 502, b'Source host unavailable; retry when it is online', {}
+    if fleet_only:
+        return 400, b'Source host required', {}
+    try:
+        with closing(db()) as con:
+            message, error = full_message_for_pane(con, pane, pid, 'agent', 0, sig)
+        if error:
+            return 409, b'Agent conversation unavailable; refresh and retry', {}
+        if path not in output_file_paths(message['text']):
+            return 403, b'File is not referenced in the current agent reply', {}
+        # Nonblocking open prevents devices/FIFOs holding a web worker indefinitely.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, 'rb') as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return 403, b'Only regular files can be opened', {}
+            if info.st_size > MAX_OUTPUT_FILE_BYTES:
+                return 413, b'File too large (limit: 32 MiB)', {}
+            data = handle.read(MAX_OUTPUT_FILE_BYTES + 1)
+        if len(data) > MAX_OUTPUT_FILE_BYTES:
+            return 413, b'File too large (limit: 32 MiB)', {}
+    except FileNotFoundError:
+        return 404, b'File no longer exists on the source host', {}
+    except OSError:
+        return 403, b'File cannot be read (permissions or symbolic link)', {}
+    except Exception:
+        return 500, b'Could not load the agent file', {}
+    types = {'.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
+             '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+             '.json': 'text/plain; charset=utf-8', '.csv': 'text/plain; charset=utf-8',
+             '.log': 'text/plain; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg',
+             '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp'}
+    content_type = types.get(Path(path).suffix.lower(), 'application/octet-stream')
+    disposition = 'attachment' if download or content_type == 'application/octet-stream' else 'inline'
+    return 200, data, {
+        'Content-Type': content_type,
+        'Content-Disposition': f"{disposition}; filename*=UTF-8''{quote(Path(path).name, safe='')}",
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        # Unique origin: report scripts cannot operate the dashboard or read its API.
+        'Content-Security-Policy': "sandbox allow-scripts; default-src 'none'; "
+            "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; "
+            "font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    }
+
+
 def dispatch_ack(payload):
     """Persist the displayed version on its owning host, never a newer version."""
     if not isinstance(payload, dict):
@@ -5814,6 +5925,16 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
 
         def do_GET(self):
             path = urlparse(self.path).path
+            if path == '/api/output-file':
+                code, body, headers = output_file_response(parse_qs(urlparse(self.path).query), fleet_only)
+                self.send_response(code)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                for key, value in ({'Content-Type': 'text/plain; charset=utf-8', **headers}).items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if path == '/api/health':
                 self._send(200, json.dumps({
                     'ok': True,
