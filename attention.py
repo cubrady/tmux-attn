@@ -5631,7 +5631,8 @@ def output_file_paths(text):
     candidates = []
 
     def link(match):
-        candidate = (match[1] or match[2]).strip()
+        destination = match[1] or re.sub(r'''\s+(?:"[^"\n]*"|'[^'\n]*')$''', '', match[2].strip())
+        candidate = re.sub(r'\\([!-/:-@\[-`{-~])', r'\1', destination)
         if candidate.startswith(('/', 'file:///')):
             candidates.append(candidate)
         return ' '
@@ -5640,7 +5641,7 @@ def output_file_paths(text):
         candidates.append(match[1])
         return ' '
 
-    rest = re.sub(r'\[[^\]\n]*\]\((?:<([^>\n]+)>|([^\)\n]+))\)', link, text)
+    rest = re.sub(r'\[[^\]\n]*\]\((?:<([^>\n]+)>|((?:\\[^\n]|[^)\\\n])+))\)', link, text)
     rest = re.sub(r'`([^`\n]+)`', code, rest)
     candidates.extend(re.findall(r'(?<![\w:/])/(?:[^\s`<>"\'()\[\]，。；：！？]+)', rest))
     paths = []

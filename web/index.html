@@ -3710,7 +3710,7 @@
       node.setAttribute('target', '_blank');
       node.setAttribute('rel', 'noopener noreferrer');
     }
-    function renderMarkdown(text) {
+    function renderMarkdown(text, fileContext = null) {
       const raw = String(text ?? '');
       if (!raw) return '';
       try {
@@ -3720,7 +3720,18 @@
             DOMPurify.addHook('afterSanitizeAttributes', openLinkInNewWindow);
             renderMarkdown._ready = true;
           }
-          const html = marked.parse(raw, { async: false });
+          const paths = fileContext ? outputFilePaths(raw) : [];
+          const html = marked.parse(raw, { async: false, walkTokens(token) {
+            if (token.type !== 'link' || !fileContext) return;
+            let path = token.href || '';
+            if (path.startsWith('file:///')) {
+              try { path = decodeURIComponent(path.slice(7)); } catch (_) { return; }
+            }
+            // App routes and ordinary web links keep their original destinations.
+            if (/^\/(?:api|icons)\//.test(path) || !paths.includes(path)) return;
+            const url = outputFileUrl(path, fileContext.agent, fileContext.text);
+            if (url) token.href = url;
+          } });
           return DOMPurify.sanitize(html, {
             USE_PROFILES: { html: true },
             ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
@@ -3729,14 +3740,14 @@
       } catch (_) { /* fall through */ }
       return escapeHtml(raw).replace(/\n/g, '<br>');
     }
-    function previewLineHtml(role, text, attrs = '', hint = '') {
+    function previewLineHtml(role, text, attrs = '', hint = '', fileContext = null) {
       const label = role === 'user' ? '你' : '結果';
-      return `<div class="preview-line ${role}"${attrs}><span class="who">${label}</span><span class="text md">${renderMarkdown(text)}</span>${hint}</div>`;
+      return `<div class="preview-line ${role}"${attrs}><span class="who">${label}</span><span class="text md">${renderMarkdown(text, fileContext)}</span>${hint}</div>`;
     }
     // Sheet transcript: older prompts fold into one line; the latest prompt then the result keep their order.
     let sheetEarlierOpen = false;
     let sheetShown = { preview: null, actionable: false };
-    function previewHtml(preview, { actionable = false } = {}) {
+    function previewHtml(preview, { actionable = false, fileContext = null } = {}) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
       const agentLine = preview?.agent || '';
       if (!users.length && !agentLine) return '';
@@ -3748,12 +3759,13 @@
         ? `<button type="button" class="earlier-toggle" data-earlier aria-expanded="${sheetEarlierOpen}">較早的 ${lines.length} 則訊息</button>` +
           `<div class="earlier"${sheetEarlierOpen ? '' : ' hidden'}>${lines.join('')}</div>` : '';
       return `<div class="preview">${earlier}${latest}${
-        agentLine ? previewLineHtml('agent', agentLine, target('agent', 0), openFull) : ''}</div>`;
+        agentLine ? previewLineHtml('agent', agentLine, target('agent', 0), openFull, fileContext) : ''}</div>`;
     }
     function outputFilePaths(text) {
       const candidates = [];
-      let rest = String(text || '').replace(/\[[^\]\n]*\]\((?:<([^>\n]+)>|([^\)\n]+))\)/g, (_, angle, plain) => {
-        const path = (angle || plain).trim();
+      let rest = String(text || '').replace(/\[[^\]\n]*\]\((?:<([^>\n]+)>|((?:\\[^\n]|[^)\\\n])+))\)/g, (_, angle, plain) => {
+        const destination = angle || plain.trim().replace(/\s+(?:"[^"\n]*"|'[^'\n]*')$/, '');
+        const path = destination.replace(/\\([!-\/:-@\[-`{-~])/g, '$1');
         if (path.startsWith('/') || path.startsWith('file:///')) candidates.push(path);
         return ' ';
       });
@@ -3770,15 +3782,19 @@
       }
       return paths;
     }
+    function outputFileUrl(path, agent, text = '') {
+      if (!agent || !agent.pane || !agent.pid) return '';
+      const params = Object.entries({ host: agent.host || '', pane: agent.pane, pid: agent.pid, path,
+        sig: Array.from(String(text || '')).slice(0, 160).join('') })
+        .map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+      return '/api/output-file?' + params;
+    }
     function outputFilesHtml(text, agent) {
       if (!agent || !agent.pane || !agent.pid) return '';
       const files = outputFilePaths(text);
       if (!files.length) return '';
       return '<div class="output-files" aria-label="輸出檔案">' + files.map(path => {
-        const params = Object.entries({ host: agent.host || '', pane: agent.pane, pid: agent.pid, path,
-          sig: Array.from(String(text || '')).slice(0, 160).join('') })
-          .map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
-        const url = escapeHtml('/api/output-file?' + params);
+        const url = escapeHtml(outputFileUrl(path, agent, text));
         return `<div class="output-file"><span class="output-file-name" title="${escapeHtml(path)}">${escapeHtml(path.split('/').pop())}</span>` +
           `<a href="${url}" target="_blank" rel="noopener noreferrer">預覽</a>` +
           `<a href="${url}&amp;download=1" target="_blank" rel="noopener noreferrer">下載</a></div>`;
@@ -3787,7 +3803,8 @@
     function renderSheetPreview(preview, actionable) {
       sheetShown = { preview, actionable };
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
-      document.getElementById('sheet-preview').innerHTML = (previewHtml(preview, { actionable }) || emptyPreviewHtml())
+      const fileContext = { agent, text: actionable ? preview?.agent : '' };
+      document.getElementById('sheet-preview').innerHTML = (previewHtml(preview, { actionable, fileContext }) || emptyPreviewHtml())
         // The card's short summary may be clipped/escaped; file links need the source reply.
         + (actionable ? outputFilesHtml(preview?.agent, agent) : '');
       markClippedPreviews();
@@ -3931,12 +3948,12 @@
         (state.error ? `<div class="shell-input-error" role="alert">${escapeHtml(state.error)}</div>` : '') +
       `</form>`;
     }
-    function cardPreviewHtml(preview) {
+    function cardPreviewHtml(preview, agent) {
       const users = Array.isArray(preview?.users) ? preview.users.filter(Boolean) : [];
       const lastUser = users[users.length - 1] || '';
       const agentLine = preview?.agent || '';
       if (!lastUser && !agentLine) return '';
-      return `<div class="preview">${agentLine ? previewLineHtml('agent', agentLine) : ''}${lastUser ? previewLineHtml('user', lastUser) : ''}</div>`;
+      return `<div class="preview">${agentLine ? previewLineHtml('agent', agentLine, '', '', { agent }) : ''}${lastUser ? previewLineHtml('user', lastUser) : ''}</div>`;
     }
     const TASK_STOPWORDS = new Set(['and', 'or', 'the', 'a', 'an', 'to', 'on', 'in', 'of', 'for', 'with', 'across', 'by', 'from', 'into', 'at', 'as', 'is', 'are', 'be']);
     function taskWordTokens(text) {
@@ -4159,7 +4176,7 @@
         ${killNote}
         ${showReason ? `<div class="reason">${escapeHtml(reason)}</div>` : ''}
         ${cardTasksHtml(a.tasks)}
-        ${cat === 'shell' ? shellPreviewHtml(a) + shellInputHtml(a) : cardPreviewHtml(a.preview)}
+        ${cat === 'shell' ? shellPreviewHtml(a) + shellInputHtml(a) : cardPreviewHtml(a.preview, a)}
       </article>`;
     }
     // Closing a pane is destructive, so a card's trash needs two taps. The state lives here rather than in the
@@ -4480,7 +4497,8 @@
       let note = '';
       if (data.partial) note = '<p class="reader-note">完整內容還在同步，稍後重新開啟即可看到全文。</p>';
       else if (data.truncated) note = `<p class="reader-note">內容過長，僅顯示前 ${text.length} 字（共 ${Number(data.chars) || 0} 字）。</p>`;
-      return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text)}</div></div>${note}`
+      const fileContext = route?.role === 'agent' ? { agent: route, text } : null;
+      return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text, fileContext)}</div></div>${note}`
         + (route?.role === 'agent' ? outputFilesHtml(text, route) : '');
     }
     function readerSnapshot(route, sig) {

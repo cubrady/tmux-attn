@@ -3291,6 +3291,9 @@ test('output file discovery handles spaces, Chinese punctuation, file URLs and d
     '/Users/dev/my report.html', '/home/me/a b.txt', '/Users/dev/report.html',
   ]);
   assert.deepEqual(Array.from(ui.context.outputFilePaths('`/home/me/../secret` //host/a/b /single')), []);
+  assert.deepEqual(Array.from(ui.context.outputFilePaths(
+    String.raw`[report](/Users/dev/report.html "Report title") [other](/home/me/a\(b\).html)`)),
+  ['/Users/dev/report.html', '/home/me/a(b).html']);
 });
 
 test('output links preserve host and original text while encoding and escaping paths', () => {
@@ -3325,6 +3328,60 @@ test('file links wait for the full sheet preview instead of signing a clipped ca
   ui.context.renderSheetPreview({ agent: '完成 `/Users/dev/report.html`\n完整內容' }, true);
   assert.ok(ui.elements.get('sheet-preview').innerHTML.includes('輸出檔案'));
   assert.ok(ui.elements.get('sheet-preview').innerHTML.includes(encodeURIComponent('完成 `/Users/dev/report.html`\n完整內容')));
+});
+
+function markdownLinkDashboard() {
+  return dashboard({ globals: {
+    marked: { setOptions() {}, parse(raw, options) {
+      return raw.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
+        const token = { type: 'link', href };
+        options.walkTokens(token);
+        return `<a href="${token.href}">${text}</a>`;
+      });
+    } },
+    DOMPurify: { addHook() {}, sanitize: html => html },
+  } });
+}
+
+test('original Markdown file links retain their label and use the owning host file API', () => {
+  const ui = markdownLinkDashboard();
+  const raw = '[開啟報告](/Users/dev/my report.html) [local](file:///home/me/a%20b.txt)';
+  const current = agent('peer-b', 'IDLE');
+  const html = ui.context.renderMarkdown(raw, { agent: current, text: raw });
+  assert.ok(html.includes('href="/api/output-file?host=peer-b&pane=%251&pid=123'));
+  assert.ok(html.includes('path=' + encodeURIComponent('/Users/dev/my report.html')));
+  assert.ok(html.includes('path=' + encodeURIComponent('/home/me/a b.txt')));
+  assert.ok(html.includes('sig=' + encodeURIComponent(raw)));
+  assert.ok(html.includes('>開啟報告</a>'));
+  assert.equal(raw, '[開啟報告](/Users/dev/my report.html) [local](file:///home/me/a%20b.txt)');
+  assert.equal(ui.context.renderMarkdown(raw), '<a href="/Users/dev/my report.html">開啟報告</a> <a href="file:///home/me/a%20b.txt">local</a>');
+});
+
+test('web links, app routes, anchors and protocol-relative links keep their destinations', () => {
+  const ui = markdownLinkDashboard();
+  const raw = '[web](https://example.com/a/b) [mail](mailto:dev@example.com) '
+    + '[app](/api/agents) [icon](/icons/favicon.svg) [anchor](#section) [cdn](//example.com/a/b)';
+  const html = ui.context.renderMarkdown(raw, { agent: agent('peer', 'IDLE'), text: raw });
+  assert.ok(!html.includes('/api/output-file'));
+  for (const href of ['https://example.com/a/b', 'mailto:dev@example.com', '/api/agents', '/icons/favicon.svg', '#section', '//example.com/a/b']) {
+    assert.ok(html.includes(`href="${href}"`), href);
+  }
+});
+
+test('sheet summaries, full replies and reader route original agent links without changing user links', () => {
+  const ui = markdownLinkDashboard();
+  const text = '[report](/Users/dev/report.html)';
+  const current = { ...agent('peer-a', 'IDLE'), preview: { users: [text], agent: text + '…' } };
+  ui.render({ agents: [current] });
+  ui.open(current);
+  const short = ui.elements.get('sheet-preview').innerHTML;
+  assert.ok(short.includes('href="/api/output-file?host=peer-a'));
+  assert.ok(short.includes('&sig="'), 'summary must not sign clipped text');
+  assert.ok(short.includes('href="/Users/dev/report.html"'), 'user link stays unchanged');
+  ui.context.renderSheetPreview({ users: [text], agent: text }, true);
+  assert.ok(ui.elements.get('sheet-preview').innerHTML.includes('&sig=' + encodeURIComponent(text)));
+  assert.ok(ui.context.readerBodyHtml(text, {}, { ...current, role: 'agent' }).includes('href="/api/output-file?host=peer-a'));
+  assert.ok(!ui.context.readerBodyHtml(text, {}, { ...current, role: 'user' }).includes('href="/api/output-file'));
 });
 
 test('Atlas sessions use literal task context and ignore generic prompts', () => {

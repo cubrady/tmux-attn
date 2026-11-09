@@ -229,6 +229,7 @@ Word（`.doc`、`.docx`）、Excel（`.xls`、`.xlsx`）、PowerPoint（`.ppt`�
 多主機時，hub 與每台 client 都要更新到同一版才能使用新增的檔案附件。
 
 **輸出檔案**：agent 回覆中的絕對路徑（Markdown 連結、反引號或一般路徑）會在 sheet 與全文下方顯示「預覽／下載」。
+原文中的本地 Markdown 連結也會在 Web 顯示時接到檔案預覽 API，保留原連結文字、對話紀錄及複製原文。
 每次開啟都由來源主機重新讀取原檔，不保存副本、不修改 agent 輸出；已開啟的預覽可重新整理以取得最新內容。
 支援單檔 HTML、文字及 PNG／JPEG／GIF／WebP 預覽；PDF、Office 等其他格式直接下載。每檔上限 32 MiB。
 HTML 使用隔離環境，可執行內嵌 JavaScript；不載入其他本地檔案、外部資源或連線 API。

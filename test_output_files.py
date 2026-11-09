@@ -48,6 +48,9 @@ class OutputFileTests(unittest.TestCase):
         self.assertEqual(a.output_file_paths(text), [
             '/Users/dev/my report.html', '/home/me/a b.txt', '/Users/dev/report.html'])
         self.assertEqual(a.output_file_paths('`/home/me/../secret` //host/a/b /single'), [])
+        self.assertEqual(a.output_file_paths(
+            r'[report](/Users/dev/report.html "Report title") [other](/home/me/a\(b\).html)'),
+            ['/Users/dev/report.html', '/home/me/a(b).html'])
 
     def test_http_reads_latest_bytes_and_sets_isolation_and_download_headers(self):
         url = self.serve() + urlencode({key: values[0] for key, values in self.query().items()})
