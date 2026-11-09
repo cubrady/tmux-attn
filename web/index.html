@@ -3788,7 +3788,8 @@
       sheetShown = { preview, actionable };
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
       document.getElementById('sheet-preview').innerHTML = (previewHtml(preview, { actionable }) || emptyPreviewHtml())
-        + outputFilesHtml(preview?.agent, agent);
+        // The card's short summary may be clipped/escaped; file links need the source reply.
+        + (actionable ? outputFilesHtml(preview?.agent, agent) : '');
       markClippedPreviews();
     }
     // Questions the agent is waiting on (Codex queued questions, Claude AskUserQuestion), answered on the pane's host.

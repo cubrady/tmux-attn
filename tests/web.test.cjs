@@ -3316,6 +3316,17 @@ test('full reply offers output files while user messages remain ordinary message
   assert.equal(text, '完成 `/Users/dev/report.html`');
 });
 
+test('file links wait for the full sheet preview instead of signing a clipped card summary', () => {
+  const ui = dashboard();
+  const current = { ...agent('peer', 'IDLE'), preview: { agent: '完成 `/Users/dev/report.html`…' } };
+  ui.render({ agents: [current] });
+  ui.open(current);
+  assert.ok(!ui.elements.get('sheet-preview').innerHTML.includes('輸出檔案'));
+  ui.context.renderSheetPreview({ agent: '完成 `/Users/dev/report.html`\n完整內容' }, true);
+  assert.ok(ui.elements.get('sheet-preview').innerHTML.includes('輸出檔案'));
+  assert.ok(ui.elements.get('sheet-preview').innerHTML.includes(encodeURIComponent('完成 `/Users/dev/report.html`\n完整內容')));
+});
+
 test('Atlas sessions use literal task context and ignore generic prompts', () => {
   const ui = dashboard();
   const ci = '對,CI 已經恢復,而且是真的跑完整套件後通過的。';
