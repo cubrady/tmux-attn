@@ -2688,6 +2688,31 @@
     body.is-loading .live-content { display: none; }
     body.is-loading .skel-page { display: block; }
     body:not(.is-loading) .skel-page { display: none; }
+
+    .work-open { min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: var(--fg); font: inherit; cursor: pointer; white-space: nowrap; }
+    .work-overlay { position: fixed; inset: 0; z-index: 160; background: #0008; display: grid; place-items: center; padding: 16px; }
+    .work-overlay[hidden] { display: none; }
+    .work-panel { width: min(100%, 560px); max-height: calc(100dvh - 32px); overflow: auto; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 18px; padding: 24px; box-shadow: 0 20px 80px #0005; }
+    .work-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+    .work-heading h2 { margin: 0; font-size: 1.25rem; }
+    .work-panel label { display: grid; gap: 7px; margin: 16px 0; font-size: .85rem; }
+    .work-panel input, .work-panel select { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 9px; padding: 11px 12px; background: var(--bg); color: var(--fg); font: inherit; font-size: 16px; }
+    .work-project { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+    .work-project button { background: transparent; color: var(--fg); border: 0; padding: 11px 4px; cursor: pointer; font: inherit; min-height: 44px; }
+    .work-project .work-project-pick { flex: 1; text-align: left; min-width: 0; }
+    .work-project strong, .work-project small { display: block; overflow-wrap: anywhere; }
+    .work-project small { color: var(--muted); font-size: .75rem; margin-top: 4px; }
+    .work-agent-options { display: grid; gap: 8px; }
+    .work-agent-choice { display: flex; justify-content: space-between; gap: 12px; text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg); color: var(--fg); cursor: pointer; font: inherit; min-height: 48px; }
+    .work-agent-choice[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .work-agent-choice:disabled { opacity: .45; cursor: default; }
+    .work-agent-choice small { text-align: right; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
+    .work-note { color: var(--muted); font-size: .8rem; line-height: 1.5; margin: 12px 0; }
+    .work-status { font-size: .85rem; line-height: 1.5; overflow-wrap: anywhere; }
+    .work-submit { width: 100%; min-height: 46px; border: 0; border-radius: 10px; background: var(--accent); color: var(--bg); font: inherit; font-weight: 650; cursor: pointer; margin-top: 16px; }
+    .work-submit:disabled { opacity: .45; cursor: default; }
+    .work-panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    @media (max-width: 480px) { .brand > h1 { flex-shrink: 0; } .brand-actions { flex-wrap: wrap; } .brand-actions > * { flex-shrink: 0; } .work-overlay { padding: 8px; } .work-panel { padding: 18px; max-height: calc(100dvh - 16px); } .work-open { padding-inline: 8px; font-size: .75rem; } }
   </style>
 </head>
 <body class="is-loading">
@@ -2696,6 +2721,7 @@
       <div class="brand">
         <h1>Attention</h1>
         <div class="brand-actions">
+          <button type="button" class="work-open" id="work-open">＋ 開新工作</button>
           <div class="font-size-ctrl" id="font-size-ctrl" role="group" aria-label="調整字型大小">
             <button type="button" class="font-btn" id="font-dec" aria-label="縮小字型" title="縮小字型">−</button>
             <button type="button" class="font-btn font-reset" id="font-reset" aria-label="重設字型大小" title="重設字型大小 (100%)">A</button>
@@ -2874,6 +2900,23 @@
     </section>
   </div>
 
+
+  <div class="work-overlay" id="work-overlay" hidden>
+    <section class="work-panel" id="work-panel" role="dialog" aria-modal="true" aria-labelledby="work-title" tabindex="-1">
+      <div class="work-heading"><h2 id="work-title">開新工作</h2><button type="button" class="work-open" id="work-close" aria-label="關閉開新工作">✕</button></div>
+      <form id="work-form">
+        <label>主機<select id="work-host" required></select></label>
+        <label>專案路徑<input id="work-path" placeholder="搜尋最近專案，或輸入完整路徑" autocomplete="off" spellcheck="false" required></label>
+        <div id="work-projects" aria-label="已釘選與最近專案"></div>
+        <p class="work-note">Coding agent · 沿用專案上次的選擇，可隨時切換</p>
+        <div class="work-agent-options" id="work-agents" role="group" aria-label="選擇 Coding agent"></div>
+        <p class="work-note">會在指定目錄建立新的 tmux session，並開始全新對話。用量來自所選主機。</p>
+        <div class="work-status" id="work-status" role="status" aria-live="polite"></div>
+        <button type="submit" class="work-submit" id="work-submit" disabled>開新工作</button>
+      </form>
+    </section>
+  </div>
+
   <script>
     const SECTIONS = [
       ['wait', '等待回覆'],
@@ -2882,6 +2925,166 @@
       ['running', '進行中'],
       ['shell', '其他 pane'],
     ];
+
+    let workOpen = false;
+    let workBusy = false;
+    let workSequence = 0;
+    let workOptions = { projects: [], agents: [] };
+    let workAccounts = [];
+    let workAgent = '';
+    let workUsageLoading = false;
+    let workRequest = null;
+    let workLaunchTarget = null;
+    let workSucceeded = false;
+    function workQuotaText(id) {
+      const provider = ({agent: 'cursor', agy: 'antigravity'})[id] || id;
+      const accounts = workAccounts.filter(a => a.provider === provider);
+      const summaries = accounts.map(a => {
+        const windows = (a.windows || []).filter(w => typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent));
+        const text = windows.map(w => `${w.shortLabel || w.label || '額度'} 剩 ${remainingPercentForWindow(w)}%${w.resetsAt ? ' · ' + formatResetDetail(w.resetsAt) : ''}`).join(' / ');
+        return text ? `${accounts.length > 1 ? (a.account || '帳號') + '：' : ''}${text}${a.stale || (a.observed_at && Date.now() / 1000 - a.observed_at > 120) ? '（快取）' : ''}${a.observed_at ? ' · ' + new Date(a.observed_at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + ' 取樣' : ''}` : '';
+      }).filter(Boolean);
+      return summaries.join('；') || (workUsageLoading ? '讀取用量中…' : '暫無用量');
+    }
+    function renderWorkAgents() {
+      const focused = document.activeElement?.closest?.('[data-work-agent]')?.dataset.workAgent;
+      document.getElementById('work-agents').innerHTML = (workOptions.agents || []).map(a =>
+        `<button type="button" class="work-agent-choice" data-work-agent="${escapeHtml(a.id)}" aria-pressed="${workAgent === a.id}"${!a.available || workBusy ? ' disabled' : ''}><span>${escapeHtml(a.label || a.id)}</span><small>${escapeHtml(a.available ? workQuotaText(a.id) : '未安裝')}</small></button>`).join('');
+      if (focused) document.querySelector(`[data-work-agent="${CSS.escape(focused)}"]`)?.focus();
+      document.getElementById('work-submit').disabled = workBusy || workSucceeded || !workOptions.agents?.some(a => a.id === workAgent && a.available) || !document.getElementById('work-path').value.trim();
+    }
+    function renderWorkProjects() {
+      const focused = document.activeElement?.closest?.('[data-work-pin]')?.dataset.workPin;
+      const query = document.getElementById('work-path').value.trim().toLowerCase();
+      const projects = (workOptions.projects || []).filter(p => !query || p.path.toLowerCase().includes(query));
+      document.getElementById('work-projects').innerHTML = projects.slice(0, 12).map(p =>
+        `<div class="work-project"><button type="button" class="work-project-pick" data-work-path="${escapeHtml(p.path)}"${workBusy ? ' disabled' : ''}><strong>${escapeHtml(p.path.split('/').filter(Boolean).pop() || p.path)}</strong><small>${escapeHtml(p.path)} · ${escapeHtml(AGENT_LABELS[p.agent] || p.agent || '')}</small></button><button type="button" data-work-pin="${escapeHtml(p.path)}" aria-label="${p.pinned ? '取消釘選' : '釘選'} ${escapeHtml(p.path)}" aria-pressed="${!!p.pinned}"${workBusy ? ' disabled' : ''}>${p.pinned ? '★' : '☆'}</button></div>`).join('');
+      if (focused) document.querySelector(`[data-work-pin="${CSS.escape(focused)}"]`)?.focus();
+    }
+    async function loadWorkOptions() {
+      const seq = ++workSequence;
+      const host = document.getElementById('work-host').value;
+      workOptions = { projects: [], agents: [] }; workAgent = ''; workAccounts = []; workRequest = null; workSucceeded = false;
+      workUsageLoading = true;
+      document.getElementById('work-status').textContent = '正在讀取這台主機的專案與 agent…';
+      renderWorkProjects(); renderWorkAgents();
+      const quota = fetch('/api/work-usage?host=' + encodeURIComponent(host), { cache: 'no-store', signal: AbortSignal.timeout(25000) })
+        .then(r => r.json()).then(data => { if (seq === workSequence && workOpen) workAccounts = data.ok ? data.accounts || [] : []; })
+        .catch(() => {}).finally(() => { if (seq === workSequence && workOpen) { workUsageLoading = false; renderWorkAgents(); } });
+      try {
+        const response = await fetch('/api/work-options?host=' + encodeURIComponent(host), { cache: 'no-store', signal: AbortSignal.timeout(20000) });
+        const data = await response.json();
+        if (seq !== workSequence || !workOpen) return;
+        if (!response.ok || !data.ok) throw new Error(data.error || '無法讀取主機，請確認已更新來源主機');
+        workOptions = data;
+        const selected = data.projects?.find(p => p.path === document.getElementById('work-path').value.trim());
+        workAgent = [selected?.agent, data.default_agent, ...(data.agents || []).map(a => a.id)].find(id => data.agents?.some(a => a.id === id && a.available)) || '';
+        document.getElementById('work-status').textContent = workAgent ? '' : '這台主機未找到可用的 coding agent。';
+        renderWorkProjects(); renderWorkAgents();
+      } catch (error) {
+        if (seq === workSequence && workOpen) document.getElementById('work-status').textContent = error.message;
+      }
+      await quota;
+    }
+    function openWork(seed = null) {
+      workOpen = true;
+      const hosts = latestHosts.filter(h => !h.fleet_only);
+      const names = [...new Set(hosts.map(h => h.name).filter(Boolean))];
+      const chosen = seed?.host || (hostFilters.size === 1 ? [...hostFilters][0] : names[0]) || '';
+      if (chosen && !names.includes(chosen)) names.unshift(chosen);
+      document.getElementById('work-host').innerHTML = names.length ? names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('') : '<option value="">本機</option>';
+      document.getElementById('work-host').value = chosen;
+      document.getElementById('work-path').value = seed?.path || '';
+      document.getElementById('work-overlay').hidden = false;
+      document.getElementById('work-panel').focus();
+      loadWorkOptions();
+    }
+    function closeWork() {
+      if (workBusy) return;
+      workOpen = false; ++workSequence;
+      document.getElementById('work-overlay').hidden = true;
+      document.getElementById('work-open').focus();
+    }
+    function focusStartedWork() {
+      if (!workLaunchTarget) return false;
+      const a = latestAgents.find(a => a.pane === workLaunchTarget.pane && String(a.pid) === String(workLaunchTarget.pid) && (!workLaunchTarget.host || a.host === workLaunchTarget.host));
+      if (!a?.tracked) return false;
+      workLaunchTarget = null; openSheet(a); return true;
+    }
+    async function startWork(event) {
+      event.preventDefault();
+      if (workBusy || document.getElementById('work-submit').disabled) return;
+      const path = document.getElementById('work-path').value.trim();
+      const host = document.getElementById('work-host').value;
+      const key = JSON.stringify([host, path, workAgent]);
+      if (workRequest?.key !== key) workRequest = { key, id: globalThis.crypto?.randomUUID?.() || 'work-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) };
+      workBusy = true;
+      for (const id of ['work-host', 'work-path', 'work-close']) document.getElementById(id).disabled = true;
+      renderWorkAgents(); renderWorkProjects();
+      document.getElementById('work-status').textContent = '正在建立 tmux session 並啟動 agent…';
+      try {
+        const response = await fetch('/api/work/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host, path, agent: workAgent, request_id: workRequest.id}), signal: AbortSignal.timeout(25000) });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || '啟動失敗');
+        workLaunchTarget = data; workSucceeded = true;
+        document.getElementById('work-status').textContent = `已建立 ${data.session}，正在啟動 ${AGENT_LABELS[workAgent] || workAgent}。關閉此視窗即可在列表查看；agent 註冊後會自動開啟。`;
+        if (data.pane && focusStartedWork()) { workBusy = false; closeWork(); }
+      } catch (error) {
+        document.getElementById('work-status').textContent = `${error.message}。可重試；相同請求不會重複建立 session。`;
+      } finally {
+        workBusy = false;
+        for (const id of ['work-host', 'work-path', 'work-close']) document.getElementById(id).disabled = false;
+        renderWorkAgents(); renderWorkProjects();
+      }
+    }
+    document.getElementById('work-open').addEventListener('click', () => openWork());
+    document.getElementById('work-close').addEventListener('click', closeWork);
+    document.getElementById('work-overlay').addEventListener('click', event => { if (event.target === document.getElementById('work-overlay')) closeWork(); });
+    document.getElementById('work-panel').addEventListener('keydown', event => {
+      if (event.key !== 'Tab') return;
+      const nodes = [...document.getElementById('work-panel').querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')];
+      const first = nodes[0], last = nodes[nodes.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === document.getElementById('work-panel'))) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    });
+    document.getElementById('work-host').addEventListener('change', () => { document.getElementById('work-path').value = ''; loadWorkOptions(); });
+    document.getElementById('work-path').addEventListener('input', () => {
+      workRequest = null; workSucceeded = false;
+      const p = workOptions.projects?.find(p => p.path === document.getElementById('work-path').value.trim());
+      if (p && workOptions.agents?.some(a => a.id === p.agent && a.available)) workAgent = p.agent;
+      renderWorkProjects(); renderWorkAgents();
+    });
+    document.getElementById('work-agents').addEventListener('click', event => {
+      const button = event.target.closest('[data-work-agent]');
+      if (!button || workBusy || button.disabled) return;
+      workAgent = button.dataset.workAgent; workRequest = null; workSucceeded = false; renderWorkAgents();
+    });
+    document.getElementById('work-projects').addEventListener('click', async event => {
+      if (workBusy) return;
+      const pick = event.target.closest('[data-work-path]');
+      if (pick) {
+        document.getElementById('work-path').value = pick.dataset.workPath;
+        const project = workOptions.projects.find(p => p.path === pick.dataset.workPath);
+        if (workOptions.agents.some(a => a.id === project.agent && a.available)) workAgent = project.agent;
+        workRequest = null; workSucceeded = false; renderWorkProjects(); renderWorkAgents(); document.getElementById('work-path').focus(); return;
+      }
+      const pin = event.target.closest('[data-work-pin]');
+      if (!pin) return;
+      const project = workOptions.projects.find(p => p.path === pin.dataset.workPin);
+      const seq = workSequence;
+      pin.disabled = true;
+      try {
+        const response = await fetch('/api/work/pin', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host: document.getElementById('work-host').value, path: project.path, pinned: !project.pinned}), signal: AbortSignal.timeout(15000) });
+        const data = await response.json();
+        if (seq !== workSequence || !workOpen) return;
+        if (!response.ok || !data.ok) throw new Error(data.error || '釘選失敗');
+        project.pinned = data.pinned;
+        workOptions.projects.sort((a,b) => Number(b.pinned) - Number(a.pinned) || b.last_used - a.last_used);
+      } catch (error) { if (seq !== workSequence || !workOpen) return; document.getElementById('work-status').textContent = error.message; }
+      renderWorkProjects();
+    });
+    document.getElementById('work-form').addEventListener('submit', startWork);
+
     const SECTION_EMOJI = { wait: '🙋', review: '👀', running: '🏃', idle: '💤', shell: '💻' };
     // Reasons that only repeat what the emoji, badge and section title already say.
     const GENERIC_REASONS = new Set(['已完成，尚未查看', '已完成，已查看', '閒置，等待新任務', '正在工作']);
@@ -3729,7 +3932,7 @@
             }
             // App routes and ordinary web links keep their original destinations.
             if (/^\/(?:api|icons)\//.test(path) || !paths.includes(path)) return;
-            const url = outputFileUrl(path, fileContext.agent, fileContext.text);
+            const url = outputFilePreviewUrl(path, fileContext.agent, fileContext.text);
             if (url) token.href = url;
           } });
           return DOMPurify.sanitize(html, {
@@ -3789,14 +3992,20 @@
         .map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
       return '/api/output-file?' + params;
     }
-    function outputFilesHtml(text, agent) {
+    function outputFilePreviewUrl(path, agent, text = '') {
+      const url = outputFileUrl(path, agent, text);
+      return /\.(md|markdown|txt|json|csv|log|py|js|jsx|ts|tsx|css|sh|yaml|yml|toml|xml|sql|rs|go|c|h|cpp)$/i.test(path)
+        ? url.replace('/api/output-file?', '/api/output-preview?') : url;
+    }
+    function outputFilesHtml(text, agent, verifiedFiles = []) {
       if (!agent || !agent.pane || !agent.pid) return '';
-      const files = outputFilePaths(text);
+      const files = outputFilePaths(text).filter(path => Array.isArray(verifiedFiles) && verifiedFiles.includes(path));
       if (!files.length) return '';
       return '<div class="output-files" aria-label="輸出檔案">' + files.map(path => {
         const url = escapeHtml(outputFileUrl(path, agent, text));
+        const previewUrl = escapeHtml(outputFilePreviewUrl(path, agent, text));
         return `<div class="output-file"><span class="output-file-name" title="${escapeHtml(path)}">${escapeHtml(path.split('/').pop())}</span>` +
-          `<a href="${url}" target="_blank" rel="noopener noreferrer">預覽</a>` +
+          `<a href="${previewUrl}" target="_blank" rel="noopener noreferrer">預覽</a>` +
           `<a href="${url}&amp;download=1" target="_blank" rel="noopener noreferrer">下載</a></div>`;
       }).join('') + '<small>每次開啟皆讀取原檔最新內容</small></div>';
     }
@@ -3806,7 +4015,7 @@
       const fileContext = { agent, text: actionable ? preview?.agent : '' };
       document.getElementById('sheet-preview').innerHTML = (previewHtml(preview, { actionable, fileContext }) || emptyPreviewHtml())
         // The card's short summary may be clipped/escaped; file links need the source reply.
-        + (actionable ? outputFilesHtml(preview?.agent, agent) : '');
+        + (actionable ? outputFilesHtml(preview?.agent, agent, preview?.output_files) : '');
       markClippedPreviews();
     }
     // Questions the agent is waiting on (Codex queued questions, Claude AskUserQuestion), answered on the pane's host.
@@ -4499,7 +4708,7 @@
       else if (data.truncated) note = `<p class="reader-note">內容過長，僅顯示前 ${text.length} 字（共 ${Number(data.chars) || 0} 字）。</p>`;
       const fileContext = route?.role === 'agent' ? { agent: route, text } : null;
       return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text, fileContext)}</div></div>${note}`
-        + (route?.role === 'agent' ? outputFilesHtml(text, route) : '');
+        + (route?.role === 'agent' ? outputFilesHtml(text, route, data.output_files) : '');
     }
     function readerSnapshot(route, sig) {
       if (!sheetOpen || !sheetPreviewFull || sheetPreviewKey !== agentKey(route) || !sig) return null;
@@ -5096,6 +5305,7 @@
         }
       }
       latestAgents = mergedAgents;
+      if (workLaunchTarget && focusStartedWork()) closeWork();
       for (const k of [...expandedShellKeys]) {
         if (!mergedAgents.some(a => agentKey(a) === k)) expandedShellKeys.delete(k);
       }
@@ -5359,7 +5569,8 @@
     });
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
-      if (infoOpen) closeInfo({ focusToggle: true });
+      if (workOpen) closeWork();
+      else if (infoOpen) closeInfo({ focusToggle: true });
       else if (readerOpen) closeReader();
       else if (sheetOpen) closeSheet();
     });

@@ -5,6 +5,7 @@ import argparse
 import base64
 import binascii
 import curses
+import html
 import datetime
 import fcntl
 import hashlib
@@ -3365,6 +3366,7 @@ def _fleet_local_slice(now, stale_ttl):
     try:
         with closing(db()) as con:
             local = agents_payload(con)
+        remember_work_projects(local.get('agents', []))
         tagged, summary = tag_host(local, host)
         _remember_fleet_host(cache_key, now, tagged, summary)
         return {'name': host, 'ok': True, 'source': 'local', 'version': install_version()}, tagged, summary
@@ -5386,7 +5388,9 @@ def peer_message_reply(data):
             or not isinstance(data.get('text'), str) or type(data.get('chars')) is not int):
         return None
     return {'ok': True, 'role': data['role'], 'text': data['text'], 'chars': data['chars'],
-            'truncated': data.get('truncated') is True, 'partial': data.get('partial') is True}
+            'truncated': data.get('truncated') is True, 'partial': data.get('partial') is True,
+            **({'output_files': [p for p in data['output_files'] if isinstance(p, str)]}
+               if isinstance(data.get('output_files'), list) else {})}
 
 
 def dispatch_send(payload):
@@ -5565,6 +5569,9 @@ def dispatch_preview(payload):
         return 500, {'ok': False, 'error': f'{type(exc).__name__}'}
     if error:
         return 409, {'ok': False, 'error': error}
+    files = readable_output_files(snapshot['preview'].get('agent', ''))
+    if files:
+        snapshot['preview']['output_files'] = files
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, **snapshot}
 
 
@@ -5620,6 +5627,7 @@ def dispatch_message(payload):
         return 500, {'ok': False, 'error': f'{type(exc).__name__}'}
     if error:
         return 409, {'ok': False, 'error': error}
+    message['output_files'] = readable_output_files(message['text']) if role == 'agent' else []
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, **message}
 
 
@@ -5654,6 +5662,56 @@ def output_file_paths(text):
                 and '..' not in Path(candidate).parts and candidate not in paths):
             paths.append(candidate)
     return paths
+
+
+def readable_output_files(text):
+    """Offer controls only for existing, readable regular files on this host."""
+    files = []
+    for path in output_file_paths(text)[:100]:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, 'rb') as handle:
+                info = os.fstat(handle.fileno())
+                if stat.S_ISREG(info.st_mode) and info.st_size <= MAX_OUTPUT_FILE_BYTES:
+                    files.append(path)
+        except OSError:
+            continue
+    return files
+
+
+def output_preview_page(query):
+    """Trusted reader shell; file bytes still pass through the authorized live-file API."""
+    path = query.get('path', [''])[0]
+    params = {key: query.get(key, [''])[0] for key in ('host', 'pane', 'pid', 'path', 'sig')}
+    source = '/api/output-file?' + urlencode(params)
+    title = html.escape(Path(path).name)
+    # JSON string escaping also prevents an agent-controlled filename closing a script element.
+    source_json = json.dumps(source).replace('<', '\\u003c')
+    page = OUTPUT_PREVIEW_HTML.replace('__TITLE__', title).replace('__SOURCE__', source_json)
+    return page.encode()
+
+
+OUTPUT_PREVIEW_HTML = r'''<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>__TITLE__</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.5/dist/purify.min.js"></script>
+<style>
+:root{color-scheme:light dark;font:16px/1.65 system-ui;background:light-dark(#f5f6f8,#111214);color:light-dark(#202124,#e4e4e7)}
+*{box-sizing:border-box}body{margin:0}header{position:sticky;top:0;background:light-dark(#fff,#191a1d);border-bottom:1px solid #8884;padding:12px 20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}h1{font-size:16px;margin:0;flex:1;overflow-wrap:anywhere}button,a{font:inherit;color:inherit}button{padding:5px 12px;cursor:pointer}a{color:light-dark(#0f766e,#5eead4)}main{max-width:1000px;margin:auto;padding:24px;overflow-wrap:anywhere}pre{overflow:auto;padding:16px;background:#8881;border-radius:8px;font:14px/1.6 ui-monospace,monospace}code{background:#8881}pre code{background:none}table{border-collapse:collapse;display:block;overflow:auto}td,th{border:1px solid #8885;padding:8px 12px}blockquote{border-left:3px solid #8886;margin-left:0;padding-left:20px}img{max-width:100%}[hidden]{display:none!important}#status,#source-info{font-size:13px;color:light-dark(#555,#aaa);margin:0;padding:0 20px}main>:first-child{margin-top:0}@media(max-width:500px){main{padding:16px}header{padding:10px 16px}}
+</style>
+<header><h1>__TITLE__</h1><button id="toggle" type="button" aria-pressed="false">原文</button><button id="refresh" type="button">重新整理</button><a id="download">下載</a></header>
+<p id="source-info"></p><p id="status" role="status"></p><main id="content"></main><main id="raw" hidden><pre></pre></main>
+<script>
+const source=__SOURCE__, path=new URL(source,location.href).searchParams.get('path')||'';
+document.getElementById('source-info').textContent=(new URL(source,location.href).searchParams.get('host')||'本機')+' · '+path;
+let raw=false;
+const content=document.getElementById('content'), rawPanel=document.getElementById('raw'), status=document.getElementById('status');
+document.getElementById('download').href=source+'&download=1';
+document.getElementById('toggle').onclick=()=>{raw=!raw;content.hidden=raw;rawPanel.hidden=!raw;document.getElementById('toggle').textContent=raw?'預覽':'原文';document.getElementById('toggle').setAttribute('aria-pressed',String(raw))};
+function csvRows(text){const rows=[];let row=[],cell='',quoted=false;for(let i=0;i<text.length;i++){const c=text[i];if(c==='"'){if(quoted&&text[i+1]==='"'){cell+='"';i++}else quoted=!quoted}else if(c===','&&!quoted){row.push(cell);cell=''}else if((c==='\n'||c==='\r')&&!quoted){if(c==='\r'&&text[i+1]==='\n')i++;row.push(cell);rows.push(row);row=[];cell=''}else cell+=c}if(cell||row.length){row.push(cell);rows.push(row)}return rows}
+async function load(){const button=document.getElementById('refresh');button.disabled=true;status.textContent='載入中…';try{const res=await fetch(source,{cache:'no-store'});if(!res.ok)throw new Error(await res.text());let text=await res.text();rawPanel.querySelector('pre').textContent=text;content.replaceChildren();if(/\.(md|markdown)$/i.test(path)){if(typeof marked==='undefined'||typeof DOMPurify==='undefined')throw new Error('Markdown 排版元件未載入，可切換原文或重試。');content.innerHTML=DOMPurify.sanitize(marked.parse(text,{gfm:true,breaks:true}));content.querySelectorAll('a').forEach(a=>{const href=a.getAttribute('href')||'';if(!/^(https?:|mailto:|#)/i.test(href)){a.removeAttribute('href')}else{a.target='_blank';a.rel='noopener noreferrer'}})}else if(/\.csv$/i.test(path)){const table=document.createElement('table');csvRows(text).forEach((row,i)=>{const tr=table.insertRow();row.forEach(value=>{const cell=document.createElement(i?'td':'th');cell.textContent=value;tr.append(cell)})});content.append(table)}else{if(/\.json$/i.test(path)){try{text=JSON.stringify(JSON.parse(text),null,2)}catch(_){}}const pre=document.createElement('pre');pre.textContent=text;content.append(pre)}status.textContent='已讀取原檔最新內容'}catch(e){status.textContent='載入失敗：'+e.message}finally{button.disabled=false}}
+document.getElementById('refresh').onclick=load;load();
+</script></html>'''
 
 
 def output_file_response(query, fleet_only=False):
@@ -5718,6 +5776,7 @@ def output_file_response(query, fleet_only=False):
         return 500, b'Could not load the agent file', {}
     types = {'.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
              '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+             '.markdown': 'text/plain; charset=utf-8',
              '.json': 'text/plain; charset=utf-8', '.csv': 'text/plain; charset=utf-8',
              '.log': 'text/plain; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg',
              '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp'}
@@ -5898,6 +5957,246 @@ def server_info_payload(bind='0.0.0.0', port=7788, fleet_only=False):
     }
 
 
+
+WORK_AGENTS = {
+    'codex': ('Codex', ('codex',)),
+    'claude': ('Claude Code', ('claude',)),
+    'agent': ('Cursor', ('agent',)),
+    'pi': ('Pi', ('pi', 'pi-bolt', 'pi-bin', 'pi-agent')),
+    'opencode': ('OpenCode', ('opencode',)),
+    'agy': ('Antigravity', ('agy', 'antigravity', 'antigravity-cli')),
+}
+_WORK_DISCOVERY = {}
+_WORK_LOCK = threading.RLock()
+
+
+def work_db():
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    con = sqlite3.connect(STATE / 'work.sqlite3', timeout=3)
+    con.row_factory = sqlite3.Row
+    con.execute("""CREATE TABLE IF NOT EXISTS projects (
+        path TEXT PRIMARY KEY, agent TEXT, last_used REAL, pinned INTEGER DEFAULT 0)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS requests (
+        request_id TEXT PRIMARY KEY, signature TEXT NOT NULL, result TEXT)""")
+    return con
+
+
+def remember_work_projects(rows):
+    """Remember actual activity timestamps, never the time a dashboard was polled."""
+    records = []
+    for row in rows:
+        agent = command_cli(row.get('agent') or row.get('cli') or '')
+        path = row.get('path')
+        if (agent in WORK_AGENTS and isinstance(path, str) and Path(path).is_absolute()
+                and row.get('tracked', True)):
+            records.append((str(Path(path).resolve()), agent, float(row.get('updated') or 0)))
+    if not records:
+        return
+    try:
+        with closing(work_db()) as con, con:
+            con.executemany("""INSERT INTO projects(path,agent,last_used) VALUES(?,?,?)
+                ON CONFLICT(path) DO UPDATE SET agent=excluded.agent,last_used=excluded.last_used
+                WHERE excluded.last_used > projects.last_used""", records)
+    except (OSError, sqlite3.Error) as exc:
+        sys.stderr.write(f'work history: {type(exc).__name__}\n')
+
+
+def work_discovery(refresh=False):
+    """Resolve a bounded known CLI list, including the user's login-shell PATH."""
+    now = time.monotonic()
+    key = (str(user_home()), os.environ.get('PATH', ''), os.environ.get('SHELL', ''))
+    with _WORK_LOCK:
+        cached = _WORK_DISCOVERY.get(key)
+        if cached and not refresh and now - cached[0] < 30:
+            return cached[1]
+    paths = [os.environ.get('PATH', ''), str(user_home() / '.local/bin'),
+             str(user_home() / '.bun/bin'), '/opt/homebrew/bin', '/usr/local/bin', os.defpath]
+    shell = os.environ.get('SHELL') or '/bin/sh'
+    # Only fixed command names enter this script; no browser-supplied command is executed.
+    script = 'printf "__TMUX_ATTN_PATH__%s\\n" "$PATH"; '
+    for agent, (_, commands) in WORK_AGENTS.items():
+        for command in commands:
+            script += f'printf "__TMUX_ATTN_BIN__{agent} %s\\n" "$(command -v {command})"; '
+    resolved = {}
+    try:
+        result = subprocess.run([shell, '-lc', script], capture_output=True, text=True, timeout=4)
+        for line in result.stdout.splitlines():
+            if line.startswith('__TMUX_ATTN_PATH__'):
+                paths.insert(0, line[len('__TMUX_ATTN_PATH__'):])
+            elif line.startswith('__TMUX_ATTN_BIN__'):
+                agent, _, value = line[len('__TMUX_ATTN_BIN__'):].partition(' ')
+                if agent not in resolved and os.path.isabs(value) and os.access(value, os.X_OK):
+                    resolved[agent] = value
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    search_path = ':'.join(dict.fromkeys(part for path in paths for part in path.split(':') if part))
+    agents = []
+    for agent, (label, commands) in WORK_AGENTS.items():
+        executable = resolved.get(agent) or next((value for command in commands
+                                                  if (value := shutil.which(command, path=search_path))), '')
+        agents.append({'id': agent, 'label': label, 'available': bool(executable), 'executable': executable})
+    value = {'agents': agents, 'path': search_path}
+    with _WORK_LOCK:
+        _WORK_DISCOVERY[key] = (now, value)
+    return value
+
+
+def work_peer_request(host, endpoint, payload=None):
+    peer = next((row for row in load_peers() if row['name'] == host), None)
+    if not peer:
+        return 404, {'ok': False, 'error': 'Unknown host'}
+    forwarded = {key: value for key, value in (payload or {}).items() if key != 'host'}
+    request = Request(peer['url'].rstrip('/') + endpoint,
+                      data=json.dumps(forwarded).encode() if payload is not None else None,
+                      headers={'Content-Type': 'application/json', 'Accept': 'application/json'})
+    try:
+        with urlopen(request, timeout=20 if endpoint == '/api/work-usage' else 10) as response:
+            data = json.loads(response.read(2 * 1024 * 1024).decode())
+        if not isinstance(data, dict) or data.get('ok') is not True:
+            return 502, {'ok': False, 'error': 'Source host returned an invalid response'}
+        return 200, {**data, 'host': host}
+    except HTTPError as exc:
+        try:
+            data = json.loads(exc.read(4096).decode())
+            return exc.code, data if isinstance(data, dict) else {'ok': False, 'error': 'Host request failed'}
+        except (ValueError, UnicodeError):
+            return exc.code, {'ok': False, 'error': 'Update tmux-attn on the source host'}
+    except (OSError, ValueError):
+        return 502, {'ok': False, 'error': 'Source host unavailable; retry when it is online'}
+
+
+def work_options(host='', fleet_only=False):
+    local = local_host_name()
+    if host and host != local:
+        return work_peer_request(host, '/api/work-options')
+    if fleet_only:
+        return 400, {'ok': False, 'error': 'Source host required'}
+    try:
+        with closing(db()) as con:
+            observed = agents_payload(con)
+        remember_work_projects(observed.get('agents', []))
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass  # Recently saved projects remain usable even when tmux has no server yet.
+    discovery = work_discovery()
+    with closing(work_db()) as con:
+        projects = [{**dict(row), 'pinned': bool(row['pinned'])} for row in con.execute(
+            'SELECT * FROM projects ORDER BY pinned DESC,last_used DESC LIMIT 100')]
+    available = {row['id'] for row in discovery['agents'] if row['available']}
+    default = next((row['agent'] for row in sorted(projects, key=lambda row: -row['last_used'])
+                    if row['agent'] in available), next(iter(agent for agent in WORK_AGENTS if agent in available), ''))
+    return 200, {'ok': True, 'host': local, 'projects': projects, 'agents': discovery['agents'], 'default_agent': default}
+
+
+def work_usage(host='', fleet_only=False):
+    if host and host != local_host_name():
+        return work_peer_request(host, '/api/work-usage')
+    if fleet_only:
+        return 400, {'ok': False, 'error': 'Source host required'}
+    payload = usage_payload(USAGE_PROVIDERS)
+    now = time.time()
+    accounts = []
+    for account in payload.get('accounts', []):
+        cached = _USAGE_CACHE.get(account.get('provider'))
+        observed = float(cached[0]) if cached else None
+        accounts.append({**account, 'observed_at': observed,
+                         'stale': observed is None or now - observed > _USAGE_TTL})
+    return 200, {**payload, 'accounts': accounts, 'host': local_host_name()}
+
+
+def work_path(raw, require_exists=True):
+    if not isinstance(raw, str) or not raw or len(raw) > 4096 or any(ord(char) < 32 for char in raw):
+        raise ValueError('Enter an absolute project path')
+    path = Path(raw).expanduser()
+    try:
+        if not path.is_absolute() or (require_exists and (
+                not path.is_dir() or not os.access(path, os.R_OK | os.X_OK))):
+            raise ValueError('Project directory does not exist or cannot be opened')
+        return str(path.resolve())
+    except OSError as exc:
+        raise ValueError('Project directory cannot be opened') from exc
+
+
+def dispatch_work_pin(payload):
+    host = payload.get('host', '')
+    if host and host != local_host_name():
+        return work_peer_request(host, '/api/work/pin', payload)
+    if type(payload.get('pinned')) is not bool:
+        return 400, {'ok': False, 'error': 'pinned must be a boolean'}
+    try:
+        path = work_path(payload.get('path'))
+    except ValueError as exc:
+        return 400, {'ok': False, 'error': str(exc)}
+    with closing(work_db()) as con, con:
+        con.execute("""INSERT INTO projects(path,agent,last_used,pinned) VALUES(?,'',0,?)
+            ON CONFLICT(path) DO UPDATE SET pinned=excluded.pinned""", (path, int(payload['pinned'])))
+    return 200, {'ok': True, 'host': local_host_name(), 'path': path, 'pinned': payload['pinned']}
+
+
+def dispatch_work_start(payload):
+    host = payload.get('host', '')
+    if host and host != local_host_name():
+        return work_peer_request(host, '/api/work/start', payload)
+    agent, request_id = payload.get('agent'), payload.get('request_id')
+    if not isinstance(agent, str) or agent not in WORK_AGENTS:
+        return 400, {'ok': False, 'error': 'Choose a supported coding agent'}
+    if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', request_id):
+        return 400, {'ok': False, 'error': 'A request_id of 8–128 letters, digits, underscores or hyphens is required'}
+    try:
+        path = work_path(payload.get('path'), require_exists=False)
+    except ValueError as exc:
+        return 400, {'ok': False, 'error': str(exc)}
+    signature = json.dumps([path, agent])
+    session = 'work-' + hashlib.sha256(request_id.encode()).hexdigest()[:20]
+    # Serialize creation across threads and processes. Persist the identity before tmux
+    # so a timeout/restart can recover the existing session instead of creating another.
+    with _WORK_LOCK, closing(work_db()) as con:
+        con.execute('BEGIN IMMEDIATE')
+        previous = con.execute('SELECT * FROM requests WHERE request_id=?', (request_id,)).fetchone()
+        if previous:
+            if previous['signature'] != signature:
+                return 409, {'ok': False, 'error': 'request_id already used for another launch'}
+            if previous['result']:
+                return 200, json.loads(previous['result'])
+        else:
+            con.execute('INSERT INTO requests VALUES(?,?,NULL)', (request_id, signature))
+        try:
+            work_path(path)
+        except ValueError as exc:
+            con.rollback()
+            return 400, {'ok': False, 'error': str(exc)}
+        # Make request identity durable before a process can disappear after tmux creates it.
+        con.commit()
+        con.execute('BEGIN IMMEDIATE')
+        previous = con.execute('SELECT result FROM requests WHERE request_id=?', (request_id,)).fetchone()
+        if previous and previous['result']:
+            return 200, json.loads(previous['result'])
+        discovery = work_discovery(refresh=True)
+        executable = next((row['executable'] for row in discovery['agents'] if row['id'] == agent), '')
+        if not executable:
+            con.rollback()
+            return 409, {'ok': False, 'error': 'This coding agent is not installed on the source host'}
+        sock = os.environ.get('TMUX_ATTN_SOCKET') or os.environ.get('TMUX', '').split(',')[0] or None
+        try:
+            existing = tmux('display-message', '-p', '-t', '=' + session, '#{pane_id}\t#{pane_pid}', check=False, sock=sock)
+            if not re.fullmatch(r'%[0-9]+\t[0-9]+', existing):
+                # Multiple command arguments make tmux execute argv directly, avoiding shell parsing.
+                existing = tmux('new-session', '-d', '-P', '-F', '#{pane_id}\t#{pane_pid}',
+                                '-s', session, '-c', path, 'env', 'PATH=' + discovery['path'], executable, sock=sock)
+            if not re.fullmatch(r'%[0-9]+\t[0-9]+', existing):
+                raise RuntimeError('Could not confirm the new tmux pane')
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            con.commit()  # Keep request identity for a safe retry after an ambiguous timeout.
+            return 409, {'ok': False, 'error': 'Could not confirm session creation; retry to check the same session',
+                         'request_id': request_id}
+        pane, pid = existing.split('\t')
+        result = {'ok': True, 'host': local_host_name(), 'path': path, 'agent': agent,
+                  'session': session, 'pane': pane, 'pid': pid, 'request_id': request_id}
+        con.execute('UPDATE requests SET result=? WHERE request_id=?', (json.dumps(result), request_id))
+        con.execute("""INSERT INTO projects(path,agent,last_used) VALUES(?,?,?)
+            ON CONFLICT(path) DO UPDATE SET agent=excluded.agent,last_used=excluded.last_used""", (path, agent, time.time()))
+        con.commit()
+        return 200, result
+
 def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
     index = web_index_path()
     if not index.is_file():
@@ -5907,6 +6206,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
         '/api/kill': dispatch_kill, '/api/send': dispatch_send, '/api/upload': dispatch_upload,
         '/api/preview': dispatch_preview, '/api/message': dispatch_message, '/api/ack': dispatch_ack,
         '/api/answer': dispatch_answer,
+        '/api/work/start': dispatch_work_start, '/api/work/pin': dispatch_work_pin,
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -5915,17 +6215,26 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
         def log_message(self, format, *args):
             sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
-        def _send(self, code, body, content_type):
+        def _send(self, code, body, content_type, headers=None):
             payload = body if isinstance(body, bytes) else body.encode()
             self.send_response(code)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(payload)))
             self.send_header('Cache-Control', 'no-store')
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(payload)
 
         def do_GET(self):
             path = urlparse(self.path).path
+            if path == '/api/output-preview':
+                self._send(200, output_preview_page(parse_qs(urlparse(self.path).query)), 'text/html; charset=utf-8', {
+                    'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; "
+                        "style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; "
+                        "form-action 'none'; frame-ancestors 'none'",
+                    'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer'})
+                return
             if path == '/api/output-file':
                 code, body, headers = output_file_response(parse_qs(urlparse(self.path).query), fleet_only)
                 self.send_response(code)
@@ -5935,6 +6244,15 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                     self.send_header(key, value)
                 self.end_headers()
                 self.wfile.write(body)
+                return
+            if path in ('/api/work-options', '/api/work-usage'):
+                host = parse_qs(urlparse(self.path).query).get('host', [''])[0]
+                try:
+                    code, body = (work_options if path == '/api/work-options' else work_usage)(host, fleet_only)
+                except Exception as exc:
+                    sys.stderr.write(f'web {path}: {type(exc).__name__}: {exc}\n')
+                    code, body = 500, {'ok': False, 'error': 'Could not load work options'}
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             if path == '/api/health':
                 self._send(200, json.dumps({
@@ -5967,6 +6285,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 try:
                     with closing(db()) as con:
                         payload = {**agents_payload(con), 'version': install_version()}
+                    remember_work_projects(payload.get('agents', []))
                     self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
                     sys.stderr.write(f'web /api/agents: {type(exc).__name__}: {exc}\n')
@@ -6092,7 +6411,8 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 return
             action = actions.get(path)
             if action:
-                if fleet_only and not payload.get('host'):
+                if fleet_only and (not payload.get('host') or (path.startswith('/api/work/')
+                                    and payload.get('host') == local_host_name())):
                     self._send(400, json.dumps({'ok': False, 'error': 'host required in fleet mode'}),
                                'application/json; charset=utf-8')
                     return

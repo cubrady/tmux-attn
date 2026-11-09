@@ -52,6 +52,37 @@ class OutputFileTests(unittest.TestCase):
             r'[report](/Users/dev/report.html "Report title") [other](/home/me/a\(b\).html)'),
             ['/Users/dev/report.html', '/home/me/a(b).html'])
 
+    def test_only_existing_regular_readable_files_are_offered(self):
+        directory = Path(self.tmp.name) / 'project'
+        directory.mkdir()
+        missing = directory / 'example.md'
+        link = directory / 'link.md'
+        link.symlink_to(self.file)
+        fifo = directory / 'pipe'
+        os.mkfifo(fifo)
+        text = ' '.join(f'`{p}`' for p in (directory, missing, link, fifo, self.file))
+        self.assertEqual(a.readable_output_files(text), [str(self.file)])
+
+    def test_preview_shell_escapes_titles_and_preserves_authorized_source_query(self):
+        page = a.output_preview_page(self.query(path='/tmp/<script>alert(1).md', host='peer')).decode()
+        self.assertIn('&lt;script&gt;', page)
+        self.assertNotIn('<script>alert(1)</script>', page)
+        self.assertIn('/api/output-file?', page)
+        self.assertIn('host=peer', page)
+        self.assertIn('DOMPurify.sanitize', page)
+        self.assertIn('JSON.stringify(JSON.parse(text),null,2)', page)
+        self.assertIn('cell.textContent=value', page)
+        self.assertIn('download=1', page)
+
+    def test_preview_http_has_bounded_resource_policy(self):
+        url = self.serve().replace('/api/output-file?', '/api/output-preview?')
+        with urlopen(url + urlencode({key: values[0] for key, values in self.query().items()})) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn('text/html', response.headers['Content-Type'])
+            self.assertIn("connect-src 'self'", response.headers['Content-Security-Policy'])
+            self.assertIn("frame-ancestors 'none'", response.headers['Content-Security-Policy'])
+            self.assertIn('重新整理', response.read().decode())
+
     def test_http_reads_latest_bytes_and_sets_isolation_and_download_headers(self):
         url = self.serve() + urlencode({key: values[0] for key, values in self.query().items()})
         with urlopen(url) as response:

@@ -3299,7 +3299,7 @@ test('output file discovery handles spaces, Chinese punctuation, file URLs and d
 test('output links preserve host and original text while encoding and escaping paths', () => {
   const ui = dashboard();
   const text = '完成 `/Users/dev/報告 & <test>.html`';
-  const html = ui.context.outputFilesHtml(text, agent('peer', 'DONE'));
+  const html = ui.context.outputFilesHtml(text, agent('peer', 'DONE'), ['/Users/dev/報告 & <test>.html']);
   assert.ok(html.includes('host=peer&amp;pane=%251&amp;pid=123'));
   assert.ok(html.includes(encodeURIComponent('/Users/dev/報告 & <test>.html')));
   assert.ok(html.includes('報告 &amp; &lt;test&gt;.html'));
@@ -3314,7 +3314,7 @@ test('full reply offers output files while user messages remain ordinary message
   const ui = dashboard();
   const text = '完成 `/Users/dev/report.html`';
   const route = { ...agent('peer', 'DONE'), role: 'agent' };
-  assert.ok(ui.context.readerBodyHtml(text, {}, route).includes('輸出檔案'));
+  assert.ok(ui.context.readerBodyHtml(text, { output_files: ['/Users/dev/report.html'] }, route).includes('輸出檔案'));
   assert.ok(!ui.context.readerBodyHtml(text, {}, { ...route, role: 'user' }).includes('輸出檔案'));
   assert.equal(text, '完成 `/Users/dev/report.html`');
 });
@@ -3325,7 +3325,7 @@ test('file links wait for the full sheet preview instead of signing a clipped ca
   ui.render({ agents: [current] });
   ui.open(current);
   assert.ok(!ui.elements.get('sheet-preview').innerHTML.includes('輸出檔案'));
-  ui.context.renderSheetPreview({ agent: '完成 `/Users/dev/report.html`\n完整內容' }, true);
+  ui.context.renderSheetPreview({ agent: '完成 `/Users/dev/report.html`\n完整內容', output_files: ['/Users/dev/report.html'] }, true);
   assert.ok(ui.elements.get('sheet-preview').innerHTML.includes('輸出檔案'));
   assert.ok(ui.elements.get('sheet-preview').innerHTML.includes(encodeURIComponent('完成 `/Users/dev/report.html`\n完整內容')));
 });
@@ -4450,4 +4450,77 @@ test('project icons use only known host-provided types and leave unknown project
   }
   const html = context.cardHtml({ ...agent('local', 'RUNNING'), project: 'demo', project_technology: 'android' });
   assert.ok(html.indexOf('project-android.svg') < html.indexOf('class="card-title"'));
+});
+
+
+test('directories and missing example paths have no file controls without source validation', () => {
+  const ui = dashboard();
+  const text = '專案 `/Users/dev/proj/tmux-attn-starter`，範例 `/Users/dev/report.md`';
+  assert.equal(ui.context.outputFilesHtml(text, agent('peer', 'DONE')), '');
+  assert.equal(ui.context.outputFilesHtml(text, agent('peer', 'DONE'), []), '');
+  const valid = ui.context.outputFilesHtml(text, agent('peer', 'DONE'), ['/Users/dev/report.md']);
+  assert.ok(valid.includes('/api/output-preview?'));
+  assert.ok(!valid.includes('tmux-attn-starter</span>'));
+  assert.ok(valid.includes('/api/output-file?'));
+});
+
+test('Markdown and structured text preview routes retain raw download endpoints', () => {
+  const ui = markdownLinkDashboard();
+  const current = agent('peer', 'IDLE');
+  const text = '[報告](/home/dev/report.md)';
+  assert.ok(ui.context.renderMarkdown(text, { agent: current, text }).includes('/api/output-preview?'));
+  for (const suffix of ['md', 'markdown', 'json', 'csv', 'py', 'txt']) {
+    const html = ui.context.outputFilesHtml('`/home/dev/file.' + suffix + '`', current, ['/home/dev/file.' + suffix]);
+    assert.ok(html.includes('/api/output-preview?'));
+    assert.ok(html.includes('/api/output-file?'));
+  }
+});
+
+test('new work selects last project agent and keeps source-host quota separate', async () => {
+  const calls = [];
+  const ui = dashboard(async (url, options) => {
+    calls.push([url, options]);
+    if (url.startsWith('/api/work-options')) return {ok:true,json:async()=>({ok:true,host:'peer',default_agent:'codex',projects:[{path:'/project',agent:'claude',last_used:5,pinned:false}],agents:[{id:'codex',label:'Codex',available:true},{id:'claude',label:'Claude',available:true},{id:'pi',label:'Pi',available:false}]})};
+    return {ok:true,json:async()=>({ok:true,accounts:[{provider:'claude',windows:[{label:'Weekly',usedPercent:32}]}]})};
+  });
+  ui.renderUsage({accounts:[{provider:'claude',windows:[{label:'Wrong host',usedPercent:99}]}]});
+  vm.runInContext("workOpen=true;document.getElementById('work-host').value='peer';document.getElementById('work-path').value='/project'",ui.context);
+  await ui.context.loadWorkOptions();
+  assert.equal(vm.runInContext('workAgent',ui.context),'claude');
+  assert.match(ui.elements.get('work-agents').innerHTML,/Weekly 剩 68%/);
+  assert.doesNotMatch(ui.elements.get('work-agents').innerHTML,/Wrong host/);
+  assert.match(ui.elements.get('work-agents').innerHTML,/未安裝/);
+  assert.ok(calls.every(([url])=>url.includes('host=peer')));
+});
+
+test('new work rejects obsolete host responses and unknown quota is explicit', async () => {
+  let finish;
+  const ui = dashboard(url => url.startsWith('/api/work-options') ? new Promise(resolve => {finish=resolve}) : Promise.resolve({ok:true,json:async()=>({ok:true,accounts:[]})}));
+  vm.runInContext("workOpen=true;document.getElementById('work-host').value='old'",ui.context);
+  const pending=ui.context.loadWorkOptions();
+  vm.runInContext("workSequence++;workAgent='new-host-agent'",ui.context);
+  finish({ok:true,json:async()=>({ok:true,default_agent:'old-agent',agents:[{id:'old-agent',available:true}],projects:[]})});
+  await pending;
+  assert.equal(vm.runInContext('workAgent',ui.context),'new-host-agent');
+  vm.runInContext('workUsageLoading=false',ui.context);
+  assert.equal(ui.context.workQuotaText('pi'),'暫無用量');
+});
+
+test('successful new work prevents a second tap and timeout retry keeps request id', async () => {
+  const requests=[];
+  let fail=true;
+  const ui=dashboard(async (url,options)=>{
+    requests.push(JSON.parse(options.body));
+    if(fail) throw new Error('timeout');
+    return {ok:true,json:async()=>({ok:true,host:'peer',session:'work-demo',pane:'%900',pid:'900'})};
+  });
+  vm.runInContext("workOpen=true;workAgent='codex';workOptions={projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-host').value='peer';document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
+  await ui.context.startWork({preventDefault(){}});
+  assert.match(ui.elements.get('work-status').textContent,/timeout/);
+  fail=false;
+  await ui.context.startWork({preventDefault(){}});
+  await ui.context.startWork({preventDefault(){}});
+  assert.equal(requests.length,2);
+  assert.equal(requests[0].request_id,requests[1].request_id);
+  assert.equal(ui.elements.get('work-submit').disabled,true);
 });
