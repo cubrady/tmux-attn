@@ -4516,11 +4516,53 @@ test('successful new work prevents a second tap and timeout retry keeps request 
   });
   vm.runInContext("workOpen=true;workAgent='codex';workOptions={projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-host').value='peer';document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
   await ui.context.startWork({preventDefault(){}});
-  assert.match(ui.elements.get('work-status').textContent,/timeout/);
+  assert.match(ui.elements.get('work-progress-message').textContent,/timeout/);
   fail=false;
   await ui.context.startWork({preventDefault(){}});
   await ui.context.startWork({preventDefault(){}});
   assert.equal(requests.length,2);
   assert.equal(requests[0].request_id,requests[1].request_id);
   assert.equal(ui.elements.get('work-submit').disabled,true);
+});
+
+
+test('new work locks the dialog until registered agent arrives and shows slow waiting', async () => {
+  let complete, onWait;
+  const ui = dashboard({ fetchRequest: () => new Promise(resolve => { complete = resolve; }), globals: {setTimeout: fn => {onWait=fn; return 1;}} });
+  vm.runInContext("workOpen=true;workAgent='codex';workOptions={projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
+  const pending=ui.context.startWork({preventDefault(){}});
+  assert.equal(ui.elements.get('work-form').hidden,true);
+  assert.equal(ui.elements.get('work-progress').dataset.stage,'creating');
+  assert.equal(ui.elements.get('work-close').disabled,true);
+  ui.context.closeWork();
+  assert.equal(vm.runInContext('workOpen',ui.context),true);
+  complete({ok:true,json:async()=>({ok:true,host:'peer',session:'work-test',pane:'%9',pid:'9'})});
+  await pending;
+  assert.equal(ui.elements.get('work-progress').dataset.stage,'waiting');
+  assert.equal(ui.elements.get('work-close').disabled,true);
+  assert.equal(ui.elements.get('work-background').hidden,false);
+  assert.equal(ui.elements.get('work-step-session').dataset.state,'done');
+  onWait();
+  assert.equal(ui.elements.get('work-progress').dataset.stage,'slow');
+  vm.runInContext("latestAgents=[{host:'other',pane:'%9',pid:'9',tracked:true}]",ui.context);
+  assert.equal(ui.context.focusStartedWork(),false);
+  vm.runInContext("latestAgents=[{host:'peer',pane:'%9',pid:'9',tracked:false}]",ui.context);
+  assert.equal(ui.context.focusStartedWork(),false);
+  vm.runInContext("latestAgents=[{host:'peer',pane:'%9',pid:'9',tracked:true}];openSheet=function(a){globalThis.openedAgent=a}",ui.context);
+  assert.equal(ui.context.focusStartedWork(),true);
+  assert.equal(vm.runInContext('workOpen',ui.context),false);
+  assert.equal(vm.runInContext('openedAgent.host',ui.context),'peer');
+  assert.equal(ui.elements.get('work-host').disabled,false);
+});
+
+test('returning to list cancels pending automatic navigation and restores form', async () => {
+  const ui=dashboard(async()=>({ok:true,json:async()=>({ok:true,host:'peer',session:'work-test',pane:'%9',pid:'9'})}));
+  vm.runInContext("workOpen=true;workAgent='codex';workOptions={projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
+  await ui.context.startWork({preventDefault(){}});
+  ui.elements.get('work-background').listeners.click();
+  assert.equal(vm.runInContext('workLaunchTarget',ui.context),null);
+  assert.equal(vm.runInContext('workBusy',ui.context),false);
+  assert.equal(ui.elements.get('work-overlay').hidden,true);
+  assert.equal(ui.elements.get('work-path').disabled,false);
+  assert.equal(ui.elements.get('work-form').hidden,false);
 });

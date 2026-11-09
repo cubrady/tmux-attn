@@ -2722,6 +2722,24 @@
     .work-agent-choice:disabled { opacity: .45; cursor: default; }
     .work-agent-choice small { text-align: right; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
     .work-note { color: var(--muted); font-size: .8rem; line-height: 1.5; margin: 12px 0; }
+    .work-progress[hidden] { display: none; }
+    .work-progress { padding: 24px 0 4px; }
+    .work-progress-icon { width: 44px; height: 44px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; margin: 0 auto 24px; animation: work-spin 1s linear infinite; }
+    @keyframes work-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .work-progress-icon { animation: none; border-style: dotted; } }
+    .work-progress h3 { margin: 0; text-align: center; font-size: 1.1rem; }
+    .work-progress-context { white-space: pre-line; text-align: center; color: var(--muted); font-size: .8rem; line-height: 1.6; overflow-wrap: anywhere; margin: 10px 0 24px; }
+    .work-steps { list-style: none; padding: 0; margin: 0 0 24px; display: grid; gap: 14px; font-size: .85rem; }
+    .work-steps li { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+    .work-steps li::before { content: ''; width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--line); flex-shrink: 0; }
+    .work-steps li[data-state="active"] { color: var(--fg); }
+    .work-steps li[data-state="active"]::before { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
+    .work-steps li[data-state="done"]::before { border-color: var(--accent); background: var(--accent); }
+    .work-progress-message { font-size: .85rem; line-height: 1.65; color: var(--muted); min-height: 3.3em; }
+    .work-progress-actions { display: grid; gap: 8px; margin-top: 16px; }
+    .work-progress-actions button { min-height: 44px; }
+    .work-progress[data-stage="error"] .work-progress-icon { animation: none; border: 0; display: grid; place-items: center; background: var(--danger-bg); color: var(--danger); }
+    .work-progress[data-stage="error"] .work-progress-icon::before { content: '!'; font-size: 24px; }
     .work-status { font-size: .85rem; line-height: 1.5; overflow-wrap: anywhere; }
     .work-submit { width: 100%; min-height: 46px; border: 0; border-radius: 10px; background: var(--accent); color: var(--bg); font: inherit; font-weight: 650; cursor: pointer; margin-top: 16px; }
     .work-submit:disabled { opacity: .45; cursor: default; }
@@ -2929,6 +2947,21 @@
         <div class="work-status" id="work-status" role="status" aria-live="polite"></div>
         <button type="submit" class="work-submit" id="work-submit" disabled>開新工作</button>
       </form>
+      <div class="work-progress" id="work-progress" hidden>
+        <div class="work-progress-icon" aria-hidden="true"></div>
+        <h3 id="work-progress-title" tabindex="-1">正在開啟工作</h3>
+        <p class="work-progress-context" id="work-progress-context"></p>
+        <ol class="work-steps" aria-label="啟動進度">
+          <li id="work-step-session">建立工作階段</li>
+          <li id="work-step-agent">等待 Agent 連線</li>
+        </ol>
+        <p class="work-progress-message" id="work-progress-message" role="status" aria-live="polite"></p>
+        <div class="work-progress-actions">
+          <button type="button" class="work-submit" id="work-retry" hidden>重試啟動</button>
+          <button type="button" class="work-open" id="work-edit" hidden>返回設定</button>
+          <button type="button" class="work-open" id="work-background" hidden>返回列表，背景繼續啟動</button>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -2951,6 +2984,8 @@
     let workRequest = null;
     let workLaunchTarget = null;
     let workSucceeded = false;
+    let workStage = '';
+    let workWaitTimer = null;
     function workQuotaText(id) {
       const provider = ({agent: 'cursor', agy: 'antigravity'})[id] || id;
       const accounts = workAccounts.filter(a => a.provider === provider);
@@ -3023,7 +3058,33 @@
       }
       await quota;
     }
+    function setWorkStage(stage, message = '') {
+      workStage = stage;
+      const active = !!stage;
+      document.getElementById('work-form').hidden = active;
+      document.getElementById('work-progress').hidden = !active;
+      document.getElementById('work-progress').dataset.stage = stage;
+      document.getElementById('work-form').setAttribute('aria-busy', String(stage === 'creating' || stage === 'waiting'));
+      document.getElementById('work-close').disabled = workBusy;
+      document.getElementById('work-title').textContent = active ? '啟動工作' : '開新工作';
+      const titles = {creating: '正在建立工作階段', waiting: '正在等候 Agent 就緒', slow: 'Agent 啟動時間較長', error: '尚未確認啟動成功'};
+      document.getElementById('work-progress-title').textContent = titles[stage] || '';
+      document.getElementById('work-step-session').dataset.state = stage === 'creating' ? 'active' : stage === 'error' ? '' : 'done';
+      document.getElementById('work-step-agent').dataset.state = stage === 'waiting' || stage === 'slow' ? 'active' : '';
+      document.getElementById('work-progress-message').textContent = message || ({creating: '正在連線至主機並建立新的工作階段，請稍候…', waiting: '工作階段已建立。Agent 連線後會自動開啟，通常需要幾秒鐘。', slow: '工作階段已建立，但尚未收到 Agent 的連線訊號。你可以繼續等候，或返回列表查看啟動狀況。'})[stage] || '';
+      document.getElementById('work-retry').hidden = stage !== 'error';
+      document.getElementById('work-edit').hidden = stage !== 'error';
+      document.getElementById('work-background').hidden = stage !== 'waiting' && stage !== 'slow';
+    }
+    function resetWorkProgress() {
+      clearTimeout(workWaitTimer); workWaitTimer = null;
+      workLaunchTarget = null; workBusy = false;
+      for (const id of ['work-host', 'work-path', 'work-close']) document.getElementById(id).disabled = false;
+      setWorkStage('');
+    }
     function openWork(seed = null) {
+      if (workBusy) return;
+      resetWorkProgress();
       workOpen = true;
       const hosts = latestHosts.filter(h => !h.fleet_only);
       const names = [...new Set(hosts.map(h => h.name).filter(Boolean))];
@@ -3038,6 +3099,7 @@
     }
     function closeWork() {
       if (workBusy) return;
+      resetWorkProgress();
       workOpen = false; ++workSequence;
       document.getElementById('work-overlay').hidden = true;
       document.getElementById('work-open').focus();
@@ -3046,7 +3108,7 @@
       if (!workLaunchTarget) return false;
       const a = latestAgents.find(a => a.pane === workLaunchTarget.pane && String(a.pid) === String(workLaunchTarget.pid) && (!workLaunchTarget.host || a.host === workLaunchTarget.host));
       if (!a?.tracked) return false;
-      workLaunchTarget = null; openSheet(a); return true;
+      resetWorkProgress(); closeWork(); openSheet(a); return true;
     }
     async function startWork(event) {
       event.preventDefault();
@@ -3058,30 +3120,51 @@
       workBusy = true;
       for (const id of ['work-host', 'work-path', 'work-close']) document.getElementById(id).disabled = true;
       renderWorkAgents(); renderWorkProjects();
-      document.getElementById('work-status').textContent = '正在建立 tmux session 並啟動 agent…';
+      document.getElementById('work-progress-context').textContent = `${AGENT_LABELS[workAgent] || workAgent} · ${host || '本機'}\n${path}`;
+      setWorkStage('creating');
+      document.getElementById('work-progress-title').focus();
       try {
         const response = await fetch('/api/work/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host, path, agent: workAgent, request_id: workRequest.id}), signal: AbortSignal.timeout(25000) });
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.error || '啟動失敗');
         workLaunchTarget = data; workSucceeded = true;
-        document.getElementById('work-status').textContent = `已建立 ${data.session}，正在啟動 ${AGENT_LABELS[workAgent] || workAgent}。關閉此視窗即可在列表查看；agent 註冊後會自動開啟。`;
-        if (data.pane && focusStartedWork()) { workBusy = false; closeWork(); }
+        setWorkStage('waiting');
+        if (data.pane && focusStartedWork()) return;
+        workWaitTimer = setTimeout(() => {
+          if (workOpen && workStage === 'waiting') setWorkStage('slow');
+        }, 30000);
       } catch (error) {
-        document.getElementById('work-status').textContent = `${error.message}。可重試；相同請求不會重複建立 session。`;
-      } finally {
         workBusy = false;
-        for (const id of ['work-host', 'work-path', 'work-close']) document.getElementById(id).disabled = false;
+        const detail = error.name === 'TimeoutError' || error.name === 'AbortError' ? '主機回應逾時' : error.message;
+        setWorkStage('error', `${detail}。重試會確認同一個工作階段，不會重複建立。`);
+        document.getElementById('work-retry').focus();
+      } finally {
+        if (!workLaunchTarget) workBusy = false;
+        for (const id of ['work-host', 'work-path']) document.getElementById(id).disabled = workBusy;
+        document.getElementById('work-close').disabled = workBusy;
         renderWorkAgents(); renderWorkProjects();
       }
     }
     document.getElementById('work-open').addEventListener('click', () => openWork());
     document.getElementById('work-close').addEventListener('click', closeWork);
+    document.getElementById('work-background').addEventListener('click', () => {
+      resetWorkProgress(); closeWork();
+    });
+    document.getElementById('work-edit').addEventListener('click', () => {
+      resetWorkProgress();
+      document.getElementById('work-status').textContent = '原請求可能已建立工作階段；重試相同設定會確認同一階段。';
+      document.getElementById('work-path').focus();
+    });
+    document.getElementById('work-retry').addEventListener('click', event => {
+      workSucceeded = false; renderWorkAgents(); startWork(event);
+    });
     document.getElementById('work-overlay').addEventListener('click', event => { if (event.target === document.getElementById('work-overlay')) closeWork(); });
     document.getElementById('work-panel').addEventListener('keydown', event => {
       if (event.key !== 'Tab') return;
-      const nodes = [...document.getElementById('work-panel').querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')];
+      const nodes = [...document.getElementById('work-panel').querySelectorAll(workStage ? '#work-progress button:not([hidden]):not(:disabled)' : 'button:not([hidden]):not(:disabled),input:not(:disabled),select:not(:disabled)')];
+      if (!nodes.length) { event.preventDefault(); document.getElementById('work-progress-title').focus(); return; }
       const first = nodes[0], last = nodes[nodes.length - 1];
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === document.getElementById('work-panel'))) { event.preventDefault(); last?.focus(); }
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === document.getElementById('work-panel') || document.activeElement === document.getElementById('work-progress-title'))) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     });
     document.getElementById('work-host').addEventListener('change', () => { document.getElementById('work-path').value = ''; loadWorkOptions(); });
@@ -5342,7 +5425,7 @@
         }
       }
       latestAgents = mergedAgents;
-      if (workLaunchTarget && focusStartedWork()) closeWork();
+      if (workLaunchTarget) focusStartedWork();
       for (const k of [...expandedShellKeys]) {
         if (!mergedAgents.some(a => agentKey(a) === k)) expandedShellKeys.delete(k);
       }
