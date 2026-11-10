@@ -4583,3 +4583,57 @@ test('new work requires an existing session and defaults to the selected host se
   assert.equal(ui.elements.get('work-submit').disabled,false);
   assert.match(ui.elements.get('work-session').innerHTML,/two · 使用中/);
 });
+
+test('new work immediately reuses homepage quota and historical options without another quota request', async () => {
+  const calls=[]; let finish;
+  const data={ok:true,host:'local',sessions:[{id:'$1',name:'main'}],default_session:'$1',projects:[],agents:[{id:'codex',available:true}],default_agent:'codex',launch_presets:[{id:'preset-full',agent:'codex',label:'codex-full',count:42}],default_launch_preset:'preset-full'};
+  const ui=dashboard(url=>{calls.push(url); return new Promise(resolve=>{finish=resolve});});
+  ui.renderUsage({ok:true,host:'local',providers:['codex','claude','cursor','antigravity'],accounts:[{provider:'codex',windows:[{label:'Weekly',usedPercent:20}]}]});
+  vm.runInContext("workOpen=true;document.getElementById('work-host').value='local';document.getElementById('work-path').value='/project'",ui.context);
+  ui.context.workOptionsCacheSeed=data;
+  vm.runInContext("workOptionsCache.set('local',workOptionsCacheSeed)",ui.context);
+  const pending=ui.context.loadWorkOptions();
+  assert.match(ui.elements.get('work-agents').innerHTML,/Weekly 剩 80%/);
+  assert.match(ui.elements.get('work-launch').innerHTML,/codex-full/);
+  assert.equal(ui.elements.get('work-launch').value,'preset-full');
+  assert.equal(ui.elements.get('work-submit').disabled,true);
+  assert.equal(calls.some(url=>url.startsWith('/api/work-usage')),false);
+  finish({ok:true,json:async()=>data}); await pending;
+  assert.equal(ui.elements.get('work-submit').disabled,false);
+});
+
+test('quota refresh failure retains cached data and never reuses another host quota', async () => {
+  const ui=dashboard(async()=>{throw new Error('offline')});
+  ui.context.cacheWorkUsage({host:'one',providers:['codex'],accounts:[{provider:'codex',windows:[{label:'Weekly',usedPercent:20}]}]});
+  vm.runInContext("workUsageCache.get('one').stamps.codex=1",ui.context);
+  await ui.context.loadWorkUsage('one');
+  assert.equal(ui.context.cachedWorkAccounts('one')[0].windows[0].usedPercent,20);
+  assert.equal(ui.context.cachedWorkAccounts('one')[0].stale,true);
+  assert.equal(ui.context.cachedWorkAccounts('two').length,0);
+});
+
+test('concurrent quota requests share a single host fetch and selected preset is sent by id', async () => {
+  let finish;const calls=[];
+  const ui=dashboard((url,options)=>{
+    calls.push([url,options]);
+    if(url.startsWith('/api/work-usage')) return new Promise(resolve=>{finish=resolve});
+    return Promise.resolve({ok:true,json:async()=>({ok:true,host:'peer',pane:'%9',pid:'9'})});
+  });
+  const first=ui.context.loadWorkUsage('peer'), second=ui.context.loadWorkUsage('peer');
+  assert.equal(calls.length,1);
+  finish({json:async()=>({ok:true,host:'peer',providers:['codex'],accounts:[]})});await Promise.all([first,second]);
+  vm.runInContext("workOpen=true;workAgent='codex';workOptions={sessions:[{id:'$1'}],projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-session').value='$1';document.getElementById('work-path').value='/project';document.getElementById('work-launch').value='preset-full';renderWorkAgents()",ui.context);
+  await ui.context.startWork({preventDefault(){}});
+  const body=JSON.parse(calls.find(([url])=>url==='/api/work/start')[1].body);
+  assert.equal(body.launch_preset,'preset-full');
+  assert.equal('argv' in body,false);
+});
+
+test('editing project path preserves an explicitly selected launch profile and saved base command', () => {
+  const ui=dashboard();
+  vm.runInContext("workAgent='codex';workLaunchTouched=true;workOptions={projects:[],agents:[{id:'codex',available:true}],launch_presets:[{id:'one',agent:'codex',label:'full'},{id:'two',agent:'codex',label:'profile'}]};document.getElementById('work-launch').value='two';document.getElementById('work-path').value='/project'",ui.context);
+  ui.elements.get('work-path').listeners.input();
+  assert.equal(ui.elements.get('work-launch').value,'two');
+  vm.runInContext("workLaunchTouched=false;workOptions.projects=[{path:'/project',agent:'codex',launch_preset:''}];renderWorkLaunches(null)",ui.context);
+  assert.equal(ui.elements.get('work-launch').value,'');
+});

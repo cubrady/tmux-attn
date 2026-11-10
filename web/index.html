@@ -2943,6 +2943,7 @@
         <div id="work-projects" aria-label="已釘選與最近專案"></div>
         <p class="work-note">Coding agent <span style="float:right">剩餘用量</span></p>
         <div class="work-agent-options" id="work-agents" role="group" aria-label="選擇 Coding agent"></div>
+        <label>啟動方式<select id="work-launch"><option value="">預設指令</option></select></label>
         <details class="work-quota-detail" id="work-quota-detail" hidden><summary>用量詳情</summary><p id="work-quota-description"></p></details>
         <p class="work-note">會在所選 session 新增分頁（window），進入指定目錄並開始全新對話。用量來自所選主機。</p>
         <div class="work-status" id="work-status" role="status" aria-live="polite"></div>
@@ -2981,6 +2982,15 @@
     let workOptions = { projects: [], agents: [], sessions: [] };
     const workSessionByHost = new Map();
     let workAccounts = [];
+    let workOptionsLoading = false;
+    const workOptionsCache = new Map();
+    let workLaunchTouched = false;
+    try {
+      for (const [host, data] of Object.entries(JSON.parse(sessionStorage.getItem('tmux-attn:work-options-cache') || '{}'))) {
+        if (Array.isArray(data?.sessions) && Array.isArray(data?.agents)) workOptionsCache.set(host, data);
+      }
+    } catch (_) {}
+
     let workAgent = '';
     let workUsageLoading = false;
     let workRequest = null;
@@ -2988,6 +2998,48 @@
     let workSucceeded = false;
     let workStage = '';
     let workWaitTimer = null;
+    const WORK_USAGE_CACHE_STORE = 'tmux-attn:work-usage-cache';
+    const workUsageCache = new Map();
+    const workUsageRequests = new Map();
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(WORK_USAGE_CACHE_STORE) || '{}');
+      for (const [host, entry] of Object.entries(saved)) {
+        if (Array.isArray(entry?.accounts) && Array.isArray(entry?.providers) && entry.stamps && typeof entry.stamps === 'object') workUsageCache.set(host, entry);
+      }
+    } catch (_) { /* storage unavailable */ }
+    function cacheWorkUsage(data, fallbackHost = '', receivedAt = Date.now()) {
+      if (!data || !Array.isArray(data.accounts)) return;
+      const host = data.host || fallbackHost;
+      if (!host) return;
+      const previous = workUsageCache.get(host);
+      const providers = data.providers?.length ? data.providers : [...new Set(data.accounts.map(a => a.provider))];
+      const stamps = {...previous?.stamps};
+      for (const provider of providers) stamps[provider] = receivedAt;
+      const entry = {accounts: [...(previous?.accounts || []).filter(a => !providers.includes(a.provider)), ...data.accounts],
+        providers: [...new Set([...(previous?.providers || []), ...providers])], stamps};
+      workUsageCache.set(host, entry);
+      try { sessionStorage.setItem(WORK_USAGE_CACHE_STORE, JSON.stringify(Object.fromEntries(workUsageCache))); } catch (_) {}
+    }
+    function cachedWorkAccounts(host) {
+      if (!workUsageCache.has(host) && serverInfo?.host === host && !serverInfo.fleet_only && usageByProvider.size) {
+        cacheWorkUsage({host, providers: [...usageByProvider.keys()], accounts: [...usageByProvider.values()].flat()});
+        const imported = workUsageCache.get(host);
+        for (const p of imported.providers) imported.stamps[p] = usageFetchedAt.get(p) || 0;
+      }
+      const entry = workUsageCache.get(host);
+      if (!entry) return [];
+      return entry.accounts.map(a => ({...a, stale: !!a.stale || !entry.stamps[a.provider] || Date.now() - entry.stamps[a.provider] > USAGE_POLL_MS}));
+    }
+    function loadWorkUsage(host) {
+      const entry = workUsageCache.get(host);
+      if (entry && USAGE_PROVIDERS.every(p => entry.stamps[p] && Date.now() - entry.stamps[p] < USAGE_POLL_MS)) return Promise.resolve();
+      if (workUsageRequests.has(host)) return workUsageRequests.get(host);
+      const request = fetch('/api/work-usage?host=' + encodeURIComponent(host), {cache: 'no-store', signal: AbortSignal.timeout(25000)})
+        .then(r => r.json()).then(data => { if (data?.ok) cacheWorkUsage(data, host); })
+        .catch(() => {}).finally(() => workUsageRequests.delete(host));
+      workUsageRequests.set(host, request);
+      return request;
+    }
     function workQuotaText(id) {
       const provider = ({agent: 'cursor', agy: 'antigravity'})[id] || id;
       const accounts = workAccounts.filter(a => a.provider === provider);
@@ -3018,6 +3070,28 @@
       const note = [windows.length > 2 ? `+${windows.length - 2} 項` : '', cached ? '快取' : ''].filter(Boolean).join(' · ');
       return `<span class="work-quota">${meters}${note ? `<span class="work-quota-more">${escapeHtml(note)}</span>` : ''}</span>`;
     }
+    function renderWorkLaunches(preferred) {
+      const select = document.getElementById('work-launch');
+      const presets = (workOptions.launch_presets || []).filter(p => p.agent === workAgent);
+      const current = preferred === undefined ? select.value : preferred;
+      const project = workOptions.projects?.find(p => p.path === document.getElementById('work-path').value.trim());
+      const chosen = [current, project?.launch_preset, workOptions.default_launch_preset, presets[0]?.id].find(id => presets.some(p => p.id === id));
+      select.innerHTML = `<option value="">預設指令 · ${escapeHtml(AGENT_LABELS[workAgent] || workAgent || 'Agent')}</option>` + presets.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.label)}${p.count ? ' · 用過 ' + Number(p.count) + ' 次' : ''}</option>`).join('');
+      select.value = current === '' || (current == null && project?.launch_preset === '') ? '' : chosen || '';
+      select.disabled = workBusy || !workAgent;
+    }
+    function applyWorkOptions(data, host) {
+      workOptions = data;
+      const sessions = data.sessions;
+      const sessionSelect = document.getElementById('work-session');
+      const prior = sessionSelect.value;
+      sessionSelect.innerHTML = sessions.length ? sessions.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}${s.attached ? ' · 使用中' : ''}</option>`).join('') : '<option value="">沒有可用的 tmux session</option>';
+      sessionSelect.value = [prior, workSessionByHost.get(host), data.default_session, sessions[0]?.id].find(id => sessions.some(s => s.id === id)) || '';
+      sessionSelect.disabled = !sessions.length || workBusy;
+      const selected = data.projects?.find(p => p.path === document.getElementById('work-path').value.trim());
+      workAgent = [workAgent, selected?.agent, data.default_agent, ...(data.agents || []).map(a => a.id)].find(id => data.agents?.some(a => a.id === id && a.available)) || '';
+      renderWorkProjects(); renderWorkAgents(); renderWorkLaunches(workLaunchTouched ? document.getElementById('work-launch').value : null);
+    }
     function renderWorkAgents() {
       const focused = document.activeElement?.closest?.('[data-work-agent]')?.dataset.workAgent;
       document.getElementById('work-agents').innerHTML = (workOptions.agents || []).map(a =>
@@ -3025,7 +3099,7 @@
       document.getElementById('work-quota-description').textContent = workQuotaText(workAgent);
       document.getElementById('work-quota-detail').hidden = !workAgent;
       if (focused) document.querySelector(`[data-work-agent="${CSS.escape(focused)}"]`)?.focus();
-      document.getElementById('work-submit').disabled = workBusy || workSucceeded || !workOptions.sessions?.some(s => s.id === document.getElementById('work-session').value) || !workOptions.agents?.some(a => a.id === workAgent && a.available) || !document.getElementById('work-path').value.trim();
+      document.getElementById('work-submit').disabled = workBusy || workOptionsLoading || workSucceeded || !workOptions.sessions?.some(s => s.id === document.getElementById('work-session').value) || !workOptions.agents?.some(a => a.id === workAgent && a.available) || !document.getElementById('work-path').value.trim();
     }
     function renderWorkProjects() {
       const focused = document.activeElement?.closest?.('[data-work-pin]')?.dataset.workPin;
@@ -3038,35 +3112,33 @@
     async function loadWorkOptions() {
       const seq = ++workSequence;
       const host = document.getElementById('work-host').value;
+      workOptionsLoading = true; workLaunchTouched = false;
       workOptions = { projects: [], agents: [], sessions: [] };
       document.getElementById('work-session').innerHTML = '<option value="">讀取中…</option>';
       document.getElementById('work-session').value = '';
       document.getElementById('work-session').disabled = true;
-      workAgent = ''; workAccounts = []; workRequest = null; workSucceeded = false;
+      workAgent = ''; workAccounts = cachedWorkAccounts(host); workRequest = null; workSucceeded = false;
       workUsageLoading = true;
       document.getElementById('work-status').textContent = '正在讀取這台主機的專案與 agent…';
-      renderWorkProjects(); renderWorkAgents();
-      const quota = fetch('/api/work-usage?host=' + encodeURIComponent(host), { cache: 'no-store', signal: AbortSignal.timeout(25000) })
-        .then(r => r.json()).then(data => { if (seq === workSequence && workOpen) workAccounts = data.ok ? data.accounts || [] : []; })
-        .catch(() => {}).finally(() => { if (seq === workSequence && workOpen) { workUsageLoading = false; renderWorkAgents(); } });
+      const cached = workOptionsCache.get(host);
+      if (cached) applyWorkOptions(cached, host);
+      else { renderWorkProjects(); renderWorkAgents(); renderWorkLaunches(null); }
+      const quota = loadWorkUsage(host).finally(() => {
+        if (seq === workSequence && workOpen) { workAccounts = cachedWorkAccounts(host); workUsageLoading = false; renderWorkAgents(); }
+      });
       try {
         const response = await fetch('/api/work-options?host=' + encodeURIComponent(host), { cache: 'no-store', signal: AbortSignal.timeout(20000) });
         const data = await response.json();
         if (seq !== workSequence || !workOpen) return;
         if (!response.ok || !data.ok) throw new Error(data.error || '無法讀取主機，請確認已更新來源主機');
         if (!Array.isArray(data.sessions)) throw new Error('來源主機尚未支援 Session 選擇，請先更新來源主機。');
-        workOptions = data;
-        const sessions = data.sessions;
-        const sessionSelect = document.getElementById('work-session');
-        sessionSelect.innerHTML = sessions.length ? sessions.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}${s.attached ? ' · 使用中' : ''}</option>`).join('') : '<option value="">沒有可用的 tmux session</option>';
-        sessionSelect.value = [workSessionByHost.get(host), data.default_session, sessions[0]?.id].find(id => sessions.some(s => s.id === id)) || '';
-        sessionSelect.disabled = !sessions.length;
-        const selected = data.projects?.find(p => p.path === document.getElementById('work-path').value.trim());
-        workAgent = [selected?.agent, data.default_agent, ...(data.agents || []).map(a => a.id)].find(id => data.agents?.some(a => a.id === id && a.available)) || '';
-        document.getElementById('work-status').textContent = !sessions.length ? '請先在這台主機開啟 tmux session，再重新開啟此視窗。' : workAgent ? '' : '這台主機未找到可用的 coding agent。';
-        renderWorkProjects(); renderWorkAgents();
+        workOptionsLoading = false;
+        workOptionsCache.set(host, data);
+        try { sessionStorage.setItem('tmux-attn:work-options-cache', JSON.stringify(Object.fromEntries(workOptionsCache))); } catch (_) {}
+        applyWorkOptions(data, host);
+        document.getElementById('work-status').textContent = !data.sessions.length ? '請先在這台主機開啟 tmux session，再重新開啟此視窗。' : workAgent ? '' : '這台主機未找到可用的 coding agent。';
       } catch (error) {
-        if (seq === workSequence && workOpen) document.getElementById('work-status').textContent = error.message;
+        if (seq === workSequence && workOpen) { document.getElementById('work-status').textContent = error.message; workOptionsLoading = true; renderWorkAgents(); }
       }
       await quota;
     }
@@ -3091,7 +3163,7 @@
     function resetWorkProgress() {
       clearTimeout(workWaitTimer); workWaitTimer = null;
       workLaunchTarget = null; workBusy = false;
-      for (const id of ['work-host', 'work-session', 'work-path', 'work-close']) document.getElementById(id).disabled = false;
+      for (const id of ['work-host', 'work-session', 'work-path', 'work-launch', 'work-close']) document.getElementById(id).disabled = false;
       setWorkStage('');
     }
     function openWork(seed = null) {
@@ -3129,16 +3201,17 @@
       const host = document.getElementById('work-host').value;
       const session = document.getElementById('work-session').value;
       workSessionByHost.set(host, session);
-      const key = JSON.stringify([host, session, path, workAgent]);
+      const launchPreset = document.getElementById('work-launch').value;
+      const key = JSON.stringify([host, session, path, workAgent, launchPreset]);
       if (workRequest?.key !== key) workRequest = { key, id: globalThis.crypto?.randomUUID?.() || 'work-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) };
       workBusy = true;
-      for (const id of ['work-host', 'work-session', 'work-path', 'work-close']) document.getElementById(id).disabled = true;
+      for (const id of ['work-host', 'work-session', 'work-path', 'work-launch', 'work-close']) document.getElementById(id).disabled = true;
       renderWorkAgents(); renderWorkProjects();
       document.getElementById('work-progress-context').textContent = `${AGENT_LABELS[workAgent] || workAgent} · ${host || '本機'} · ${workOptions.sessions?.find(s => s.id === session)?.name || session}\n${path}`;
       setWorkStage('creating');
       document.getElementById('work-progress-title').focus();
       try {
-        const response = await fetch('/api/work/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host, session, path, agent: workAgent, request_id: workRequest.id}), signal: AbortSignal.timeout(25000) });
+        const response = await fetch('/api/work/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host, session, path, agent: workAgent, request_id: workRequest.id, ...(launchPreset ? {launch_preset: launchPreset} : {})}), signal: AbortSignal.timeout(25000) });
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.error || '啟動失敗');
         workLaunchTarget = data; workSucceeded = true;
@@ -3154,7 +3227,7 @@
         document.getElementById('work-retry').focus();
       } finally {
         if (!workLaunchTarget) workBusy = false;
-        for (const id of ['work-host', 'work-session', 'work-path']) document.getElementById(id).disabled = workBusy;
+        for (const id of ['work-host', 'work-session', 'work-path', 'work-launch']) document.getElementById(id).disabled = workBusy;
         document.getElementById('work-close').disabled = workBusy;
         renderWorkAgents(); renderWorkProjects();
       }
@@ -3181,18 +3254,19 @@
       if (event.shiftKey && (document.activeElement === first || document.activeElement === document.getElementById('work-panel') || document.activeElement === document.getElementById('work-progress-title'))) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     });
+    document.getElementById('work-launch').addEventListener('change', () => { workLaunchTouched = true; workRequest = null; workSucceeded = false; renderWorkAgents(); });
     document.getElementById('work-session').addEventListener('change', () => { workRequest = null; workSucceeded = false; renderWorkAgents(); });
     document.getElementById('work-host').addEventListener('change', () => { document.getElementById('work-path').value = ''; loadWorkOptions(); });
     document.getElementById('work-path').addEventListener('input', () => {
       workRequest = null; workSucceeded = false;
       const p = workOptions.projects?.find(p => p.path === document.getElementById('work-path').value.trim());
-      if (p && workOptions.agents?.some(a => a.id === p.agent && a.available)) workAgent = p.agent;
-      renderWorkProjects(); renderWorkAgents();
+      if (!workLaunchTouched && p && workOptions.agents?.some(a => a.id === p.agent && a.available)) workAgent = p.agent;
+      renderWorkProjects(); renderWorkAgents(); renderWorkLaunches(workLaunchTouched ? document.getElementById('work-launch').value : p?.launch_preset ?? null);
     });
     document.getElementById('work-agents').addEventListener('click', event => {
       const button = event.target.closest('[data-work-agent]');
       if (!button || workBusy || button.disabled) return;
-      workAgent = button.dataset.workAgent; workRequest = null; workSucceeded = false; renderWorkAgents();
+      workLaunchTouched = true; workAgent = button.dataset.workAgent; workRequest = null; workSucceeded = false; renderWorkAgents(); renderWorkLaunches(null);
     });
     document.getElementById('work-projects').addEventListener('click', async event => {
       if (workBusy) return;
@@ -3201,7 +3275,7 @@
         document.getElementById('work-path').value = pick.dataset.workPath;
         const project = workOptions.projects.find(p => p.path === pick.dataset.workPath);
         if (workOptions.agents.some(a => a.id === project.agent && a.available)) workAgent = project.agent;
-        workRequest = null; workSucceeded = false; renderWorkProjects(); renderWorkAgents(); document.getElementById('work-path').focus(); return;
+        workRequest = null; workSucceeded = false; workLaunchTouched = false; renderWorkProjects(); renderWorkAgents(); renderWorkLaunches(project.launch_preset ?? null); document.getElementById('work-path').focus(); return;
       }
       const pin = event.target.closest('[data-work-pin]');
       if (!pin) return;
@@ -3230,7 +3304,7 @@
     let hostFilters = new Set(); // empty = show all hosts
     const refreshPendingHosts = new Set();
     const AGENT_FILTER_STORE = 'tmux-attn:agent-filter';
-    const AGENT_LABELS = { codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode', agy: 'Antigravity', antigravity: 'Antigravity' };
+    const AGENT_LABELS = { agent: 'Cursor', codex: 'Codex', claude: 'Claude', pi: 'Pi', cursor: 'Cursor', opencode: 'OpenCode', agy: 'Antigravity', antigravity: 'Antigravity' };
     const USAGE_PROVIDERS = ['codex', 'claude', 'cursor', 'antigravity'];
     const USAGE_POLL_MS = 60_000;
     const USAGE_CACHE_STORE = 'tmux-attn:usage-cache';
@@ -3868,7 +3942,11 @@
       } else {
         usageUpdatedAt = Math.floor(now / 1000);
       }
-      if (persist) saveUsageCache(data);
+      cacheWorkUsage(data, '', persist ? Date.now() : (Number(data.updated_at) || 0) * 1000);
+      if (persist) saveUsageCache({...data, providers: [...usageByProvider.keys()], accounts: [...usageByProvider.values()].flat()});
+      if (workOpen && data.host && document.getElementById('work-host').value === data.host) {
+        workAccounts = cachedWorkAccounts(data.host); renderWorkAgents();
+      }
       renderAgentUsage();
     }
     async function syncAgentUsage({ force = false } = {}) {

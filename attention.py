@@ -6001,6 +6001,265 @@ def remember_work_projects(rows):
         sys.stderr.write(f'work history: {type(exc).__name__}\n')
 
 
+WORK_PROFILE_ENV = {'CODEX_HOME': 'codex', 'CLAUDE_CONFIG_DIR': 'claude', 'PI_CODING_AGENT_DIR': 'pi'}
+WORK_HISTORY_BYTES = 1024 * 1024
+WORK_LAUNCH_FLAGS = {
+    'codex': ({'--full-auto', '--no-alt-screen', '--oss', '--search',
+               '--dangerously-bypass-approvals-and-sandbox'},
+              {'--sandbox': {'read-only', 'workspace-write', 'danger-full-access'},
+               '-s': {'read-only', 'workspace-write', 'danger-full-access'},
+               '--ask-for-approval': {'untrusted', 'on-failure', 'on-request', 'never'},
+               '-a': {'untrusted', 'on-failure', 'on-request', 'never'},
+               '--model': None, '-m': None, '--profile': None, '-p': None,
+               '--local-provider': {'ollama', 'lmstudio'}}),
+    'claude': ({'--dangerously-skip-permissions', '--allow-dangerously-skip-permissions',
+                '--ide', '--verbose', '--chrome', '--no-chrome'},
+               {'--model': None, '--permission-mode': {'default', 'acceptEdits', 'bypassPermissions',
+                                                     'dontAsk', 'plan', 'auto'},
+                '--effort': {'low', 'medium', 'high', 'max'}}),
+    'agent': ({'--force', '--approve-mcps'}, {'--model': None, '-m': None}),
+    'pi': ({'--no-session'}, {'--provider': None, '--model': None,
+                            '--thinking': {'off', 'minimal', 'low', 'medium', 'high', 'xhigh'}}),
+    'opencode': ({'--print-logs'}, {'--model': None, '-m': None, '--agent': None}),
+    'agy': ({'--dangerously-skip-permissions'}, {'--model': None}),
+}
+
+
+def work_history_text(path, limit=WORK_HISTORY_BYTES):
+    """Read a bounded tail only; histories and shell startup files are never executed."""
+    try:
+        with path.open('rb') as handle:
+            size = path.stat().st_size
+            handle.seek(max(0, size - limit))
+            text = handle.read(limit).decode('utf-8', errors='replace')
+        return text.split('\n', 1)[-1] if size > limit else text
+    except OSError:
+        return ''
+
+
+def work_launch_aliases(home):
+    aliases = {}
+    for name in ('.zshrc', '.zprofile', '.zsh_aliases', '.aliases', '.bashrc', '.bash_profile'):
+        for line in work_history_text(home / name, 128 * 1024).splitlines():
+            if not re.match(r'^\s*alias\s+[A-Za-z_][\w.-]*=', line):
+                continue
+            try:
+                tokens = shlex.split(line, comments=True)
+            except ValueError:
+                continue
+            if len(tokens) == 2:
+                name, _, body = tokens[1].partition('=')
+                aliases[name] = body
+    return aliases
+
+
+def work_profile_path(value, home):
+    for prefix in ('$HOME/', '${HOME}/', '~/'):
+        if value.startswith(prefix):
+            value = str(home / value[len(prefix):])
+            break
+    if (not value.startswith('/') or len(value) > 4096
+            or re.search(r'[\x00-\x1f$`;&|<>]', value)):
+        return None
+    try:
+        return str(Path(value).resolve())
+    except (OSError, ValueError):
+        return None
+
+
+def parse_work_launch(command, aliases=None, home=None):
+    """Recognize a complete simple launch, never approximate or replay shell source."""
+    home = Path(home or user_home())
+    aliases = aliases or {}
+    if not isinstance(command, str) or len(command) > 8192 or '\n' in command or '\r' in command:
+        return None
+    try:
+        tokens = shlex.split(command, comments=True)
+    except ValueError:
+        return None
+    env = {}
+    alias_label = ''
+    expanded = set()
+    last_alias = ''
+    for depth in range(4):
+        if tokens and tokens[0] == 'env':
+            tokens = tokens[1:]
+        while tokens and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[0]):
+            name, _, value = tokens.pop(0).partition('=')
+            if name not in WORK_PROFILE_ENV or (value := work_profile_path(value, home)) is None:
+                return None
+            env[name] = value
+        if not tokens:
+            return None
+        if tokens[0] not in aliases:
+            break
+        if tokens[0] in expanded:
+            # Shells suppress a direct self-alias after expanding it once. Longer
+            # alias cycles are ambiguous and are not offered as launch presets.
+            if tokens[0] == last_alias and any(tokens[0] in commands for _, commands in WORK_AGENTS.values()):
+                break
+            return None
+        if depth == 3:
+            return None
+        alias_label = alias_label or tokens[0]
+        last_alias = tokens[0]
+        expanded.add(last_alias)
+        try:
+            tokens = shlex.split(aliases[tokens[0]], comments=True) + tokens[1:]
+        except ValueError:
+            return None
+    command_name = tokens[0]
+    if re.search(r'[\x00-\x1f$`;&|<>()]', command_name):
+        return None
+    agent = next((agent for agent, (_, commands) in WORK_AGENTS.items()
+                  if Path(command_name).name in commands), None)
+    if not agent or any(WORK_PROFILE_ENV[name] != agent for name in env):
+        return None
+    if command_name != Path(command_name).name and not Path(command_name).is_absolute():
+        return None
+    booleans, values = WORK_LAUNCH_FLAGS[agent]
+    args = tokens[1:]
+    index = 0
+    while index < len(args):
+        flag, equal, value = args[index].partition('=')
+        if flag in booleans and not equal:
+            index += 1
+            continue
+        if flag not in values:
+            return None
+        if not equal:
+            index += 1
+            if index >= len(args):
+                return None
+            value = args[index]
+        allowed = values[flag]
+        if not value or len(value) > 200 or (allowed is not None and value not in allowed):
+            return None
+        if allowed is None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/+-]*', value):
+            return None
+        index += 1
+    label = alias_label or shlex.join([Path(command_name).name, *args])
+    identity = json.dumps([agent, Path(command_name).name, args, sorted(env.items())], ensure_ascii=True)
+    return {'id': 'history-' + hashlib.sha256(identity.encode()).hexdigest()[:24],
+            'agent': agent, 'label': label, 'command': command_name, 'argv': args, 'env': env}
+
+
+def work_launch_history(home=None):
+    home = Path(home or user_home())
+    aliases = work_launch_aliases(home)
+    presets = {}
+    for name in ('.zsh_history', '.bash_history'):
+        file = home / name
+        text = work_history_text(file)
+        try:
+            modified = file.stat().st_mtime
+        except OSError:
+            continue
+        cwd = None
+        timestamp = None
+        heredoc_end = None
+        continued = False
+        block_end = None
+        lines = text.splitlines()[-20000:]
+        extended_zsh = name == '.zsh_history' and any(re.match(r'^: \d+:\d+;', line) for line in lines)
+        for position, line in enumerate(lines):
+            match = re.match(r'^: (\d+):\d+;(.*)$', line)
+            if extended_zsh and not match:
+                # Multiline shell fragments have no trustworthy standalone invocation boundary.
+                continue
+            if match:
+                if extended_zsh:
+                    heredoc_end = block_end = None
+                    continued = False
+                timestamp, line = float(match[1]), match[2]
+            elif name == '.bash_history' and re.fullmatch(r'#\d{9,}', line):
+                timestamp = float(line[1:])
+                continue
+            else:
+                timestamp = None if name == '.zsh_history' else timestamp
+            if heredoc_end:
+                if line.strip() == heredoc_end:
+                    heredoc_end = None
+                continue
+            if block_end:
+                if line.strip() == block_end:
+                    block_end = None
+                continue
+            if continued:
+                continued = line.endswith('\\')
+                continue
+            if line.endswith('\\'):
+                continued = True
+                cwd = None
+                continue
+            heredoc = re.search(r'''<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?''', line)
+            if heredoc:
+                heredoc_end = heredoc[1]
+                cwd = None
+                continue
+            if re.search(r'\{\s*$', line):
+                block_end = '}'
+                cwd = None
+                continue
+            if re.match(r'^\s*(for|while|until)\b', line):
+                block_end = 'done'
+                cwd = None
+                continue
+            # Histories can interleave multiple terminals. Only a literal cd and launch
+            # within the same entry establishes cwd; preceding entries are not reliable.
+            cwd = None
+            launch_line = line
+            cd = re.match(r'^\s*cd\s+(.+?)(?:\s*&&\s*(.+))?$', line)
+            if cd:
+                try:
+                    parts = shlex.split(cd[1])
+                except ValueError:
+                    parts = []
+                cwd = work_profile_path(parts[0], home) if len(parts) == 1 else None
+                if cd[2] is None:
+                    continue
+                launch_line = cd[2]
+            record = parse_work_launch(launch_line, aliases, home)
+            if not record:
+                cwd = None
+                continue
+            last_used = timestamp if timestamp is not None else modified - (len(lines) - position) * .001
+            previous = presets.get(record['id'])
+            if previous is None:
+                previous = {**record, 'last_used': last_used, 'count': 0,
+                            'source': 'shell_history', 'project_last_used': {}}
+                presets[record['id']] = previous
+            previous['count'] += 1
+            if last_used >= previous['last_used']:
+                previous.update(label=record['label'], last_used=last_used)
+                if cwd:
+                    previous['path'] = cwd
+            if cwd:
+                previous['project_last_used'][cwd] = max(last_used, previous['project_last_used'].get(cwd, 0))
+    return sorted(presets.values(), key=lambda record: (-record['last_used'], -record['count'], record['label']))[:100]
+
+
+def public_work_preset(record):
+    return {key: record[key] for key in ('id', 'agent', 'label', 'last_used', 'count', 'source', 'path') if key in record}
+
+
+def work_preset_executable(record, discovery):
+    available = next((row for row in discovery['agents'] if row['id'] == record['agent'] and row['available']), None)
+    if not available:
+        return ''
+    command = record['command']
+    if Path(command).name == Path(available['executable']).name:
+        executable = available['executable']
+    else:
+        executable = shutil.which(Path(command).name, path=discovery['path']) or ''
+    try:
+        if Path(command).is_absolute() and executable and Path(command).resolve() != Path(executable).resolve():
+            return ''
+    except (OSError, ValueError):
+        return ''
+    return executable
+
+
 def work_discovery(refresh=False):
     """Resolve a bounded known CLI list, including the user's login-shell PATH."""
     now = time.monotonic()
@@ -6102,24 +6361,67 @@ def work_options(host='', fleet_only=False):
     except (OSError, RuntimeError, subprocess.SubprocessError):
         pass  # Recently saved projects remain usable even when tmux has no server yet.
     discovery = work_discovery()
+    history = [record for record in work_launch_history() if work_preset_executable(record, discovery)]
     with closing(work_db()) as con:
         projects = [{**dict(row), 'pinned': bool(row['pinned'])} for row in con.execute(
             'SELECT * FROM projects ORDER BY pinned DESC,last_used DESC LIMIT 100')]
-    available = {row['id'] for row in discovery['agents'] if row['available']}
+        launches = list(con.execute('SELECT result FROM requests WHERE result IS NOT NULL ORDER BY rowid DESC LIMIT 1000'))
+    existing_paths = {project['path'] for project in projects}
+    for record in history:
+        for path, last_used in record['project_last_used'].items():
+            if path not in existing_paths and Path(path).is_dir():
+                projects.append({'path': path, 'agent': record['agent'], 'last_used': last_used,
+                                 'pinned': False, 'launch_preset': record['id']})
+                existing_paths.add(path)
+    for project in projects:
+        matching = [record for record in history if record['agent'] == project['agent']
+                    and project['path'] in record['project_last_used']]
+        if matching:
+            project['launch_preset'] = max(matching, key=lambda record: record['project_last_used'][project['path']])['id']
+    presets_by_id = {record['id']: record for record in history}
+    latest_launches = {}
+    for row in launches:
+        try:
+            launch = json.loads(row['result'])
+        except (ValueError, TypeError):
+            continue
+        if isinstance(launch, dict):
+            latest_launches.setdefault((launch.get('path'), launch.get('agent')), launch.get('launch_preset', ''))
+    for project in projects:
+        key = (project['path'], project['agent'])
+        if key in latest_launches:
+            preset_id = latest_launches[key]
+            if preset_id in presets_by_id:
+                project['launch_preset'] = preset_id
+            elif not preset_id:
+                project['launch_preset'] = ''
+    projects.sort(key=lambda project: (not project['pinned'], -project['last_used']))
+    projects = projects[:100]
+    history_rank = {}
+    for record in history:
+        history_rank.setdefault(record['agent'], len(history_rank))
+    agents = sorted(discovery['agents'], key=lambda row: (not row['available'],
+                    history_rank.get(row['id'], len(WORK_AGENTS)), list(WORK_AGENTS).index(row['id'])))
+    available = {row['id'] for row in agents if row['available']}
+    fallback = next((record['agent'] for record in history if record['agent'] in available),
+                    next(iter(agent for agent in WORK_AGENTS if agent in available), ''))
     default = next((row['agent'] for row in sorted(projects, key=lambda row: -row['last_used'])
-                    if row['agent'] in available), next(iter(agent for agent in WORK_AGENTS if agent in available), ''))
+                    if row['agent'] in available), fallback)
     sessions = work_sessions()
-    return 200, {'ok': True, 'host': local, 'projects': projects, 'agents': discovery['agents'],
+    default_preset = next((record['id'] for record in history if record['agent'] == default), '')
+    return 200, {'ok': True, 'host': local, 'projects': projects, 'agents': agents,
                  'default_agent': default, 'sessions': sessions,
+                 'launch_presets': [public_work_preset(record) for record in history],
+                 'default_launch_preset': default_preset,
                  'default_session': sessions[0]['id'] if sessions else ''}
 
 
-def work_usage(host='', fleet_only=False):
+def work_usage(host='', fleet_only=False, providers=None, force_refresh=False):
     if host and host != local_host_name():
         return work_peer_request(host, '/api/work-usage')
     if fleet_only:
         return 400, {'ok': False, 'error': 'Source host required'}
-    payload = usage_payload(USAGE_PROVIDERS)
+    payload = usage_payload(USAGE_PROVIDERS if providers is None else providers, force_refresh=force_refresh)
     now = time.time()
     accounts = []
     for account in payload.get('accounts', []):
@@ -6175,7 +6477,10 @@ def dispatch_work_start(payload):
     session_id = payload.get('session')
     if not isinstance(session_id, str) or not re.fullmatch(r'\$[0-9]+', session_id):
         return 400, {'ok': False, 'error': 'Choose an existing tmux session'}
-    signature = json.dumps([path, agent, session_id])
+    preset_id = payload.get('launch_preset') or ''
+    if not isinstance(preset_id, str) or (preset_id and not re.fullmatch(r'history-[0-9a-f]{24}', preset_id)):
+        return 400, {'ok': False, 'error': 'Choose a launch command from this host’s history'}
+    signature = json.dumps([path, agent, session_id] + ([preset_id] if preset_id else []))
     window = 'work-' + hashlib.sha256(request_id.encode()).hexdigest()[:20]
     # Serialize creation across threads and processes. Persist the identity before tmux
     # so a timeout/restart can recover the existing session instead of creating another.
@@ -6205,6 +6510,15 @@ def dispatch_work_start(payload):
         if not executable:
             con.rollback()
             return 409, {'ok': False, 'error': 'This coding agent is not installed on the source host'}
+        launch_args = []
+        launch_env = []
+        if preset_id:
+            preset = next((record for record in work_launch_history() if record['id'] == preset_id), None)
+            if not preset or preset['agent'] != agent or not (executable := work_preset_executable(preset, discovery)):
+                con.rollback()
+                return 409, {'ok': False, 'error': 'The historical launch command is no longer available; choose another command'}
+            launch_args = preset['argv']
+            launch_env = [key + '=' + value for key, value in sorted(preset['env'].items())]
         session = next((row for row in work_sessions() if row['id'] == session_id), None)
         if not session:
             con.rollback()
@@ -6221,7 +6535,7 @@ def dispatch_work_start(payload):
                 # Multiple command arguments make tmux execute argv directly, avoiding shell parsing.
                 existing = tmux('new-window', '-d', '-P', '-F', '#{window_id}\t#{pane_id}\t#{pane_pid}',
                                 '-t', session_id + ':', '-n', window, '-c', path,
-                                'env', 'PATH=' + discovery['path'], executable, sock=sock)
+                                'env', 'PATH=' + discovery['path'], *launch_env, executable, *launch_args, sock=sock)
             if not re.fullmatch(r'@[0-9]+\t%[0-9]+\t[0-9]+', existing):
                 raise RuntimeError('Could not confirm the new tmux window')
         except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -6232,6 +6546,8 @@ def dispatch_work_start(payload):
         result = {'ok': True, 'host': local_host_name(), 'path': path, 'agent': agent,
                   'session': session['name'], 'session_id': session_id, 'window': window,
                   'window_id': window_id, 'pane': pane, 'pid': pid, 'request_id': request_id}
+        if preset_id:
+            result['launch_preset'] = preset_id
         con.execute('UPDATE requests SET result=? WHERE request_id=?', (json.dumps(result), request_id))
         con.execute("""INSERT INTO projects(path,agent,last_used) VALUES(?,?,?)
             ON CONFLICT(path) DO UPDATE SET agent=excluded.agent,last_used=excluded.last_used""", (path, agent, time.time()))
@@ -6368,7 +6684,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 raw_providers = ','.join(query.get('providers', []))
                 force_refresh = query.get('refresh', [''])[0].lower() in ('1', 'true', 'yes')
                 try:
-                    payload = usage_payload(raw_providers, force_refresh=force_refresh)
+                    _, payload = work_usage(providers=raw_providers, force_refresh=force_refresh)
                     self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
                     sys.stderr.write(f'web /api/usage: {type(exc).__name__}: {exc}\n')

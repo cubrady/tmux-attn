@@ -30,7 +30,8 @@ class WorkTests(unittest.TestCase):
         for mock in (patch.object(a, 'work_sessions', side_effect=lambda: self.sessions),
                      patch.object(a, 'STATE', self.root / 'state'),
                      patch.object(a, 'local_host_name', return_value='local'),
-                     patch.object(a, 'work_discovery', return_value=self.discovery)):
+                     patch.object(a, 'work_discovery', return_value=self.discovery),
+                     patch.object(a, 'work_launch_history', return_value=[])):
             mock.start()
             self.addCleanup(mock.stop)
 
