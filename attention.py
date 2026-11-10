@@ -6065,6 +6065,30 @@ def work_peer_request(host, endpoint, payload=None):
         return 502, {'ok': False, 'error': 'Source host unavailable; retry when it is online'}
 
 
+def work_socket():
+    """Use one socket policy for session discovery and new-window creation."""
+    return os.environ.get('TMUX_ATTN_SOCKET') or os.environ.get('TMUX', '').split(',')[0] or None
+
+
+def work_sessions():
+    try:
+        output = tmux('list-sessions', '-F',
+                      '#{session_id}\t#{session_name}\t#{session_attached}\t#{session_windows}',
+                      check=False, sock=work_socket())
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return []
+    sessions = []
+    for line in output.splitlines():
+        session_id, _, rest = line.partition('\t')
+        parts = rest.rsplit('\t', 2)
+        if re.fullmatch(r'\$[0-9]+', session_id) and len(parts) == 3:
+            name, attached, windows = parts
+            if attached.isdigit() and windows.isdigit():
+                sessions.append({'id': session_id, 'name': clean(name),
+                                 'attached': int(attached), 'windows': int(windows)})
+    return sorted(sessions, key=lambda session: (-session['attached'], session['name'], session['id']))
+
+
 def work_options(host='', fleet_only=False):
     local = local_host_name()
     if host and host != local:
@@ -6084,7 +6108,10 @@ def work_options(host='', fleet_only=False):
     available = {row['id'] for row in discovery['agents'] if row['available']}
     default = next((row['agent'] for row in sorted(projects, key=lambda row: -row['last_used'])
                     if row['agent'] in available), next(iter(agent for agent in WORK_AGENTS if agent in available), ''))
-    return 200, {'ok': True, 'host': local, 'projects': projects, 'agents': discovery['agents'], 'default_agent': default}
+    sessions = work_sessions()
+    return 200, {'ok': True, 'host': local, 'projects': projects, 'agents': discovery['agents'],
+                 'default_agent': default, 'sessions': sessions,
+                 'default_session': sessions[0]['id'] if sessions else ''}
 
 
 def work_usage(host='', fleet_only=False):
@@ -6145,8 +6172,11 @@ def dispatch_work_start(payload):
         path = work_path(payload.get('path'), require_exists=False)
     except ValueError as exc:
         return 400, {'ok': False, 'error': str(exc)}
-    signature = json.dumps([path, agent])
-    session = 'work-' + hashlib.sha256(request_id.encode()).hexdigest()[:20]
+    session_id = payload.get('session')
+    if not isinstance(session_id, str) or not re.fullmatch(r'\$[0-9]+', session_id):
+        return 400, {'ok': False, 'error': 'Choose an existing tmux session'}
+    signature = json.dumps([path, agent, session_id])
+    window = 'work-' + hashlib.sha256(request_id.encode()).hexdigest()[:20]
     # Serialize creation across threads and processes. Persist the identity before tmux
     # so a timeout/restart can recover the existing session instead of creating another.
     with _WORK_LOCK, closing(work_db()) as con:
@@ -6175,22 +6205,33 @@ def dispatch_work_start(payload):
         if not executable:
             con.rollback()
             return 409, {'ok': False, 'error': 'This coding agent is not installed on the source host'}
-        sock = os.environ.get('TMUX_ATTN_SOCKET') or os.environ.get('TMUX', '').split(',')[0] or None
+        session = next((row for row in work_sessions() if row['id'] == session_id), None)
+        if not session:
+            con.rollback()
+            return 409, {'ok': False, 'error': 'The selected tmux session is no longer available; choose another session'}
+        sock = work_socket()
         try:
-            existing = tmux('display-message', '-p', '-t', '=' + session, '#{pane_id}\t#{pane_pid}', check=False, sock=sock)
-            if not re.fullmatch(r'%[0-9]+\t[0-9]+', existing):
+            # Match the deterministic window name within this exact session. A retry after
+            # an uncertain response reuses that window rather than creating another one.
+            listed = tmux('list-windows', '-t', session_id, '-F',
+                          '#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}', sock=sock)
+            existing = next((line.partition('\t')[2] for line in listed.splitlines()
+                             if line.partition('\t')[0] == window), '')
+            if not re.fullmatch(r'@[0-9]+\t%[0-9]+\t[0-9]+', existing):
                 # Multiple command arguments make tmux execute argv directly, avoiding shell parsing.
-                existing = tmux('new-session', '-d', '-P', '-F', '#{pane_id}\t#{pane_pid}',
-                                '-s', session, '-c', path, 'env', 'PATH=' + discovery['path'], executable, sock=sock)
-            if not re.fullmatch(r'%[0-9]+\t[0-9]+', existing):
-                raise RuntimeError('Could not confirm the new tmux pane')
+                existing = tmux('new-window', '-d', '-P', '-F', '#{window_id}\t#{pane_id}\t#{pane_pid}',
+                                '-t', session_id + ':', '-n', window, '-c', path,
+                                'env', 'PATH=' + discovery['path'], executable, sock=sock)
+            if not re.fullmatch(r'@[0-9]+\t%[0-9]+\t[0-9]+', existing):
+                raise RuntimeError('Could not confirm the new tmux window')
         except (OSError, RuntimeError, subprocess.SubprocessError):
             con.commit()  # Keep request identity for a safe retry after an ambiguous timeout.
-            return 409, {'ok': False, 'error': 'Could not confirm session creation; retry to check the same session',
+            return 409, {'ok': False, 'error': 'Could not confirm window creation; retry to check the same window',
                          'request_id': request_id}
-        pane, pid = existing.split('\t')
+        window_id, pane, pid = existing.split('\t')
         result = {'ok': True, 'host': local_host_name(), 'path': path, 'agent': agent,
-                  'session': session, 'pane': pane, 'pid': pid, 'request_id': request_id}
+                  'session': session['name'], 'session_id': session_id, 'window': window,
+                  'window_id': window_id, 'pane': pane, 'pid': pid, 'request_id': request_id}
         con.execute('UPDATE requests SET result=? WHERE request_id=?', (json.dumps(result), request_id))
         con.execute("""INSERT INTO projects(path,agent,last_used) VALUES(?,?,?)
             ON CONFLICT(path) DO UPDATE SET agent=excluded.agent,last_used=excluded.last_used""", (path, agent, time.time()))

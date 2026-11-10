@@ -25,21 +25,27 @@ class WorkTests(unittest.TestCase):
         self.project.mkdir()
         self.discovery = {'agents': [{'id': 'codex', 'label': 'Codex', 'available': True,
                                       'executable': '/fake/bin/codex'}], 'path': '/fake/bin:/usr/bin'}
-        for mock in (patch.object(a, 'STATE', self.root / 'state'),
+        self.real_work_sessions = a.work_sessions
+        self.sessions = [{'id': '$1', 'name': 'existing', 'attached': 1, 'windows': 1}]
+        for mock in (patch.object(a, 'work_sessions', side_effect=lambda: self.sessions),
+                     patch.object(a, 'STATE', self.root / 'state'),
                      patch.object(a, 'local_host_name', return_value='local'),
                      patch.object(a, 'work_discovery', return_value=self.discovery)):
             mock.start()
             self.addCleanup(mock.stop)
 
     def payload(self, **overrides):
-        return {'path': str(self.project), 'agent': 'codex', 'request_id': 'request_123456', **overrides}
+        return {'path': str(self.project), 'agent': 'codex', 'request_id': 'request_123456', 'session': '$1', **overrides}
 
     def test_start_direct_argv_and_idempotence(self):
-        with patch.object(a, 'tmux', side_effect=['', '%42\t987']) as tmux:
+        with patch.object(a, 'tmux', side_effect=['', '@7\t%42\t987']) as tmux:
             code, result = a.dispatch_work_start(self.payload())
             self.assertEqual(code, 200)
             args = tmux.call_args.args
-            self.assertEqual(args[0], 'new-session')
+            self.assertEqual(args[0], 'new-window')
+            self.assertEqual(args[args.index('-t') + 1], '$1:')
+            self.assertEqual(result['session_id'], '$1')
+            self.assertEqual(result['window_id'], '@7')
             self.assertIn(str(self.project), args)
             self.assertEqual(args[-3:], ('env', 'PATH=/fake/bin:/usr/bin', '/fake/bin/codex'))
             self.assertEqual(a.dispatch_work_start(self.payload()), (code, result))
@@ -50,7 +56,7 @@ class WorkTests(unittest.TestCase):
             self.assertEqual(con.execute('SELECT agent FROM projects').fetchone()['agent'], 'codex')
 
     def test_completed_retry_survives_removed_directory_and_agent(self):
-        with patch.object(a, 'tmux', side_effect=['', '%1\t123']):
+        with patch.object(a, 'tmux', side_effect=['', '@2\t%1\t123']):
             first = a.dispatch_work_start(self.payload())
         self.project.rmdir()
         self.discovery['agents'][0]['executable'] = ''
@@ -72,18 +78,19 @@ class WorkTests(unittest.TestCase):
     def test_timeout_recovery_uses_same_session(self):
         with patch.object(a, 'tmux', side_effect=['', subprocess.TimeoutExpired('tmux', 4)]) as tmux:
             self.assertEqual(a.dispatch_work_start(self.payload())[0], 409)
-            attempted_session = tmux.call_args.args[tmux.call_args.args.index('-s') + 1]
-        with patch.object(a, 'tmux', return_value='%1\t123') as tmux:
+            attempted_window = tmux.call_args.args[tmux.call_args.args.index('-n') + 1]
+        with patch.object(a, 'tmux', return_value=attempted_window + '\t@2\t%1\t123') as tmux:
             code, result = a.dispatch_work_start(self.payload())
             self.assertEqual(code, 200)
-            self.assertEqual(result['session'], attempted_session)
+            self.assertEqual(result['window'], attempted_window)
             self.assertEqual(tmux.call_count, 1)
 
     def test_rejects_arbitrary_commands_bad_paths_and_unavailable_agents(self):
         with patch.object(a, 'tmux') as tmux:
             for payload in (self.payload(agent='codex; touch /tmp/attack'), self.payload(path='/missing/project'),
                             self.payload(path='relative/path'), self.payload(request_id='bad'),
-                            self.payload(path='\x00bad')):
+                            self.payload(path='\x00bad'), self.payload(session='existing'),
+                            self.payload(session='$1; new-session'), self.payload(session='')):
                 self.assertEqual(a.dispatch_work_start(payload)[0], 400)
             self.discovery['agents'][0]['executable'] = ''
             self.assertEqual(a.dispatch_work_start(self.payload())[0], 409)
@@ -140,16 +147,47 @@ class WorkTests(unittest.TestCase):
             return result.stdout.strip()
 
         self.addCleanup(lambda: isolated_tmux('kill-server', check=False))
-        with patch.object(a, 'tmux', side_effect=isolated_tmux):
-            code, result = a.dispatch_work_start(self.payload())
+        isolated_tmux('new-session', '-d', '-s', 'existing', 'sleep', '30')
+        session_id = isolated_tmux('list-sessions', '-F', '#{session_id}')
+        with patch.object(a, 'tmux', side_effect=isolated_tmux), \
+             patch.object(a, 'work_sessions', side_effect=self.real_work_sessions):
+            code, result = a.dispatch_work_start(self.payload(session=session_id))
             self.assertEqual(code, 200, result)
             deadline = time.monotonic() + 3
             while not output.exists() and time.monotonic() < deadline:
                 time.sleep(.02)
             self.assertEqual(output.read_text().strip(), str(self.project))
-            self.assertEqual(a.dispatch_work_start(self.payload())[1]['pane'], result['pane'])
-            self.assertEqual(isolated_tmux('list-sessions', '-F', '#{session_name}').splitlines(), [result['session']])
+            self.assertEqual(a.dispatch_work_start(self.payload(session=session_id))[1]['pane'], result['pane'])
+            self.assertEqual(isolated_tmux('list-sessions', '-F', '#{session_name}').splitlines(), ['existing'])
+            self.assertEqual(len(isolated_tmux('list-windows', '-t', session_id, '-F', '#{window_id}').splitlines()), 2)
         self.assertFalse((self.project / 'injected').exists())
+
+    def test_session_discovery_and_default_use_attached_session(self):
+        with patch.object(a, 'tmux', return_value='$2\tother\t0\t3\n$1\texisting\t1\t2') as tmux, \
+             patch.dict(os.environ, {'TMUX_ATTN_SOCKET': '/custom/socket'}):
+            sessions = self.real_work_sessions()
+        self.assertEqual(sessions[0], {'id': '$1', 'name': 'existing', 'attached': 1, 'windows': 2})
+        self.assertEqual(tmux.call_args.kwargs['sock'], '/custom/socket')
+
+    def test_removed_target_session_never_creates_new_session(self):
+        self.sessions.clear()
+        with patch.object(a, 'tmux') as tmux:
+            code, result = a.dispatch_work_start(self.payload())
+            self.assertEqual(code, 409)
+            self.assertIn('session', result['error'])
+            tmux.assert_not_called()
+        with patch.object(a, 'db', return_value=io.StringIO()), \
+             patch.object(a, 'agents_payload', return_value={'agents': []}):
+            options = a.work_options()[1]
+        self.assertEqual(options['sessions'], [])
+        self.assertEqual(options['default_session'], '')
+
+    def test_request_identity_includes_target_session(self):
+        with patch.object(a, 'tmux', side_effect=['', '@1\t%1\t123']):
+            self.assertEqual(a.dispatch_work_start(self.payload())[0], 200)
+        with patch.object(a, 'tmux') as tmux:
+            self.assertEqual(a.dispatch_work_start(self.payload(session='$2'))[0], 409)
+            tmux.assert_not_called()
 
     def test_http_host_usage_and_start_routes(self):
         class Quiet(a.make_web_handler(fleet_only=True)):

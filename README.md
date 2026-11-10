@@ -228,9 +228,10 @@ Word（`.doc`、`.docx`）、Excel（`.xls`、`.xlsx`）、PowerPoint（`.ppt`�
 文字與 Office 檔案送出後以路徑交給 agent，能否解析取決於該 agent 的工具。
 多主機時，hub 與每台 client 都要更新到同一版才能使用新增的檔案附件。
 
-**開新工作**：Web 右上角「＋ 開新工作」可選主機、最近專案或輸入完整目錄路徑，並釘選常用專案。
+**開新工作**：Web 右上角「＋ 開新工作」可選主機、既有 tmux session、最近專案或輸入完整目錄路徑，並釘選常用專案。
 每台來源主機保存自己的近期紀錄與上次使用的 agent；選擇專案時帶入可用的上次選項，也能切換其他已安裝的 agent。
-可偵測 Codex、Claude Code、Cursor、Pi、OpenCode 與 Antigravity 的 CLI。建立新的 tmux session 後啟動全新對話，不恢復舊對話。
+可偵測 Codex、Claude Code、Cursor、Pi、OpenCode 與 Antigravity 的 CLI。在所選既有 tmux session 新增 window（分頁）後啟動全新對話，不恢復舊對話。
+預設選擇有連線使用者的 session；該主機尚無 session 時，需先建立一個 session 才能開新工作。
 Agent 選項旁顯示所選主機可取得的各週期剩餘用量、取樣時間與快取狀態；沒有資料則顯示「暫無用量」。
 重試使用相同請求識別，避免連線逾時重複建立。多主機使用時需更新來源 client。
 

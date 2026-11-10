@@ -4480,7 +4480,7 @@ test('new work selects last project agent and keeps source-host quota separate',
   const calls = [];
   const ui = dashboard(async (url, options) => {
     calls.push([url, options]);
-    if (url.startsWith('/api/work-options')) return {ok:true,json:async()=>({ok:true,host:'peer',default_agent:'codex',projects:[{path:'/project',agent:'claude',last_used:5,pinned:false}],agents:[{id:'codex',label:'Codex',available:true},{id:'claude',label:'Claude',available:true},{id:'pi',label:'Pi',available:false}]})};
+    if (url.startsWith('/api/work-options')) return {ok:true,json:async()=>({ok:true,host:'peer',default_agent:'codex',sessions:[{id:'$1',name:'main',attached:1,windows:2}],default_session:'$1',projects:[{path:'/project',agent:'claude',last_used:5,pinned:false}],agents:[{id:'codex',label:'Codex',available:true},{id:'claude',label:'Claude',available:true},{id:'pi',label:'Pi',available:false}]})};
     return {ok:true,json:async()=>({ok:true,accounts:[{provider:'claude',windows:[{label:'Weekly',usedPercent:32}]}]})};
   });
   ui.renderUsage({accounts:[{provider:'claude',windows:[{label:'Wrong host',usedPercent:99}]}]});
@@ -4514,13 +4514,14 @@ test('successful new work prevents a second tap and timeout retry keeps request 
     if(fail) throw new Error('timeout');
     return {ok:true,json:async()=>({ok:true,host:'peer',session:'work-demo',pane:'%900',pid:'900'})};
   });
-  vm.runInContext("workOpen=true;workAgent='codex';workOptions={projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-host').value='peer';document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
+  vm.runInContext("workOpen=true;workAgent='codex';workOptions={sessions:[{id:'$1',name:'main'}],projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-session').value='$1';document.getElementById('work-host').value='peer';document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
   await ui.context.startWork({preventDefault(){}});
   assert.match(ui.elements.get('work-progress-message').textContent,/timeout/);
   fail=false;
   await ui.context.startWork({preventDefault(){}});
   await ui.context.startWork({preventDefault(){}});
   assert.equal(requests.length,2);
+  assert.equal(requests[0].session,'$1');
   assert.equal(requests[0].request_id,requests[1].request_id);
   assert.equal(ui.elements.get('work-submit').disabled,true);
 });
@@ -4529,7 +4530,7 @@ test('successful new work prevents a second tap and timeout retry keeps request 
 test('new work locks the dialog until registered agent arrives and shows slow waiting', async () => {
   let complete, onWait;
   const ui = dashboard({ fetchRequest: () => new Promise(resolve => { complete = resolve; }), globals: {setTimeout: fn => {onWait=fn; return 1;}} });
-  vm.runInContext("workOpen=true;workAgent='codex';workOptions={projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
+  vm.runInContext("workOpen=true;workAgent='codex';workOptions={sessions:[{id:'$1',name:'main'}],projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-session').value='$1';document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
   const pending=ui.context.startWork({preventDefault(){}});
   assert.equal(ui.elements.get('work-form').hidden,true);
   assert.equal(ui.elements.get('work-progress').dataset.stage,'creating');
@@ -4557,7 +4558,7 @@ test('new work locks the dialog until registered agent arrives and shows slow wa
 
 test('returning to list cancels pending automatic navigation and restores form', async () => {
   const ui=dashboard(async()=>({ok:true,json:async()=>({ok:true,host:'peer',session:'work-test',pane:'%9',pid:'9'})}));
-  vm.runInContext("workOpen=true;workAgent='codex';workOptions={projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
+  vm.runInContext("workOpen=true;workAgent='codex';workOptions={sessions:[{id:'$1',name:'main'}],projects:[],agents:[{id:'codex',available:true}]};document.getElementById('work-session').value='$1';document.getElementById('work-path').value='/project';renderWorkAgents()",ui.context);
   await ui.context.startWork({preventDefault(){}});
   ui.elements.get('work-background').listeners.click();
   assert.equal(vm.runInContext('workLaunchTarget',ui.context),null);
@@ -4565,4 +4566,20 @@ test('returning to list cancels pending automatic navigation and restores form',
   assert.equal(ui.elements.get('work-overlay').hidden,true);
   assert.equal(ui.elements.get('work-path').disabled,false);
   assert.equal(ui.elements.get('work-form').hidden,false);
+});
+
+test('new work requires an existing session and defaults to the selected host session', async () => {
+  let sessions=[];
+  const ui=dashboard(async url=>({ok:true,json:async()=>url.startsWith('/api/work-options') ? {ok:true,projects:[],agents:[{id:'codex',available:true}],sessions,default_session:'$2',default_agent:'codex'} : {ok:true,accounts:[]}}));
+  vm.runInContext("workOpen=true;document.getElementById('work-path').value='/project'",ui.context);
+  await ui.context.loadWorkOptions();
+  assert.equal(ui.elements.get('work-submit').disabled,true);
+  assert.equal(ui.elements.get('work-session').disabled,true);
+  assert.match(ui.elements.get('work-status').textContent,/請先.*tmux session/);
+  sessions=[{id:'$1',name:'one',attached:0},{id:'$2',name:'two',attached:1}];
+  await ui.context.loadWorkOptions();
+  assert.equal(ui.elements.get('work-session').value,'$2');
+  assert.equal(ui.elements.get('work-session').disabled,false);
+  assert.equal(ui.elements.get('work-submit').disabled,false);
+  assert.match(ui.elements.get('work-session').innerHTML,/two · 使用中/);
 });

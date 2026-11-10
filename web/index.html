@@ -2938,12 +2938,13 @@
       <div class="work-heading"><h2 id="work-title">開新工作</h2><button type="button" class="work-open" id="work-close" aria-label="關閉開新工作">✕</button></div>
       <form id="work-form">
         <label>主機<select id="work-host" required></select></label>
+        <label>加入 tmux session<select id="work-session" required disabled><option value="">讀取中…</option></select></label>
         <label>專案路徑<input id="work-path" placeholder="搜尋最近專案，或輸入完整路徑" autocomplete="off" spellcheck="false" required></label>
         <div id="work-projects" aria-label="已釘選與最近專案"></div>
         <p class="work-note">Coding agent <span style="float:right">剩餘用量</span></p>
         <div class="work-agent-options" id="work-agents" role="group" aria-label="選擇 Coding agent"></div>
         <details class="work-quota-detail" id="work-quota-detail" hidden><summary>用量詳情</summary><p id="work-quota-description"></p></details>
-        <p class="work-note">會在指定目錄建立新的 tmux session，並開始全新對話。用量來自所選主機。</p>
+        <p class="work-note">會在所選 session 新增分頁（window），進入指定目錄並開始全新對話。用量來自所選主機。</p>
         <div class="work-status" id="work-status" role="status" aria-live="polite"></div>
         <button type="submit" class="work-submit" id="work-submit" disabled>開新工作</button>
       </form>
@@ -2952,7 +2953,7 @@
         <h3 id="work-progress-title" tabindex="-1">正在開啟工作</h3>
         <p class="work-progress-context" id="work-progress-context"></p>
         <ol class="work-steps" aria-label="啟動進度">
-          <li id="work-step-session">建立工作階段</li>
+          <li id="work-step-session">在既有 Session 新增分頁</li>
           <li id="work-step-agent">等待 Agent 連線</li>
         </ol>
         <p class="work-progress-message" id="work-progress-message" role="status" aria-live="polite"></p>
@@ -2977,7 +2978,8 @@
     let workOpen = false;
     let workBusy = false;
     let workSequence = 0;
-    let workOptions = { projects: [], agents: [] };
+    let workOptions = { projects: [], agents: [], sessions: [] };
+    const workSessionByHost = new Map();
     let workAccounts = [];
     let workAgent = '';
     let workUsageLoading = false;
@@ -3023,7 +3025,7 @@
       document.getElementById('work-quota-description').textContent = workQuotaText(workAgent);
       document.getElementById('work-quota-detail').hidden = !workAgent;
       if (focused) document.querySelector(`[data-work-agent="${CSS.escape(focused)}"]`)?.focus();
-      document.getElementById('work-submit').disabled = workBusy || workSucceeded || !workOptions.agents?.some(a => a.id === workAgent && a.available) || !document.getElementById('work-path').value.trim();
+      document.getElementById('work-submit').disabled = workBusy || workSucceeded || !workOptions.sessions?.some(s => s.id === document.getElementById('work-session').value) || !workOptions.agents?.some(a => a.id === workAgent && a.available) || !document.getElementById('work-path').value.trim();
     }
     function renderWorkProjects() {
       const focused = document.activeElement?.closest?.('[data-work-pin]')?.dataset.workPin;
@@ -3036,7 +3038,11 @@
     async function loadWorkOptions() {
       const seq = ++workSequence;
       const host = document.getElementById('work-host').value;
-      workOptions = { projects: [], agents: [] }; workAgent = ''; workAccounts = []; workRequest = null; workSucceeded = false;
+      workOptions = { projects: [], agents: [], sessions: [] };
+      document.getElementById('work-session').innerHTML = '<option value="">讀取中…</option>';
+      document.getElementById('work-session').value = '';
+      document.getElementById('work-session').disabled = true;
+      workAgent = ''; workAccounts = []; workRequest = null; workSucceeded = false;
       workUsageLoading = true;
       document.getElementById('work-status').textContent = '正在讀取這台主機的專案與 agent…';
       renderWorkProjects(); renderWorkAgents();
@@ -3048,10 +3054,16 @@
         const data = await response.json();
         if (seq !== workSequence || !workOpen) return;
         if (!response.ok || !data.ok) throw new Error(data.error || '無法讀取主機，請確認已更新來源主機');
+        if (!Array.isArray(data.sessions)) throw new Error('來源主機尚未支援 Session 選擇，請先更新來源主機。');
         workOptions = data;
+        const sessions = data.sessions;
+        const sessionSelect = document.getElementById('work-session');
+        sessionSelect.innerHTML = sessions.length ? sessions.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}${s.attached ? ' · 使用中' : ''}</option>`).join('') : '<option value="">沒有可用的 tmux session</option>';
+        sessionSelect.value = [workSessionByHost.get(host), data.default_session, sessions[0]?.id].find(id => sessions.some(s => s.id === id)) || '';
+        sessionSelect.disabled = !sessions.length;
         const selected = data.projects?.find(p => p.path === document.getElementById('work-path').value.trim());
         workAgent = [selected?.agent, data.default_agent, ...(data.agents || []).map(a => a.id)].find(id => data.agents?.some(a => a.id === id && a.available)) || '';
-        document.getElementById('work-status').textContent = workAgent ? '' : '這台主機未找到可用的 coding agent。';
+        document.getElementById('work-status').textContent = !sessions.length ? '請先在這台主機開啟 tmux session，再重新開啟此視窗。' : workAgent ? '' : '這台主機未找到可用的 coding agent。';
         renderWorkProjects(); renderWorkAgents();
       } catch (error) {
         if (seq === workSequence && workOpen) document.getElementById('work-status').textContent = error.message;
@@ -3067,11 +3079,11 @@
       document.getElementById('work-form').setAttribute('aria-busy', String(stage === 'creating' || stage === 'waiting'));
       document.getElementById('work-close').disabled = workBusy;
       document.getElementById('work-title').textContent = active ? '啟動工作' : '開新工作';
-      const titles = {creating: '正在建立工作階段', waiting: '正在等候 Agent 就緒', slow: 'Agent 啟動時間較長', error: '尚未確認啟動成功'};
+      const titles = {creating: '正在新增工作分頁', waiting: '正在等候 Agent 就緒', slow: 'Agent 啟動時間較長', error: '尚未確認啟動成功'};
       document.getElementById('work-progress-title').textContent = titles[stage] || '';
       document.getElementById('work-step-session').dataset.state = stage === 'creating' ? 'active' : stage === 'error' ? '' : 'done';
       document.getElementById('work-step-agent').dataset.state = stage === 'waiting' || stage === 'slow' ? 'active' : '';
-      document.getElementById('work-progress-message').textContent = message || ({creating: '正在連線至主機並建立新的工作階段，請稍候…', waiting: '工作階段已建立。Agent 連線後會自動開啟，通常需要幾秒鐘。', slow: '工作階段已建立，但尚未收到 Agent 的連線訊號。你可以繼續等候，或返回列表查看啟動狀況。'})[stage] || '';
+      document.getElementById('work-progress-message').textContent = message || ({creating: '正在連線至主機，並在所選 Session 新增分頁，請稍候…', waiting: '分頁已建立。Agent 連線後會自動開啟，通常需要幾秒鐘。', slow: '分頁已建立，但尚未收到 Agent 的連線訊號。你可以繼續等候，或返回列表查看啟動狀況。'})[stage] || '';
       document.getElementById('work-retry').hidden = stage !== 'error';
       document.getElementById('work-edit').hidden = stage !== 'error';
       document.getElementById('work-background').hidden = stage !== 'waiting' && stage !== 'slow';
@@ -3079,7 +3091,7 @@
     function resetWorkProgress() {
       clearTimeout(workWaitTimer); workWaitTimer = null;
       workLaunchTarget = null; workBusy = false;
-      for (const id of ['work-host', 'work-path', 'work-close']) document.getElementById(id).disabled = false;
+      for (const id of ['work-host', 'work-session', 'work-path', 'work-close']) document.getElementById(id).disabled = false;
       setWorkStage('');
     }
     function openWork(seed = null) {
@@ -3115,16 +3127,18 @@
       if (workBusy || document.getElementById('work-submit').disabled) return;
       const path = document.getElementById('work-path').value.trim();
       const host = document.getElementById('work-host').value;
-      const key = JSON.stringify([host, path, workAgent]);
+      const session = document.getElementById('work-session').value;
+      workSessionByHost.set(host, session);
+      const key = JSON.stringify([host, session, path, workAgent]);
       if (workRequest?.key !== key) workRequest = { key, id: globalThis.crypto?.randomUUID?.() || 'work-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) };
       workBusy = true;
-      for (const id of ['work-host', 'work-path', 'work-close']) document.getElementById(id).disabled = true;
+      for (const id of ['work-host', 'work-session', 'work-path', 'work-close']) document.getElementById(id).disabled = true;
       renderWorkAgents(); renderWorkProjects();
-      document.getElementById('work-progress-context').textContent = `${AGENT_LABELS[workAgent] || workAgent} · ${host || '本機'}\n${path}`;
+      document.getElementById('work-progress-context').textContent = `${AGENT_LABELS[workAgent] || workAgent} · ${host || '本機'} · ${workOptions.sessions?.find(s => s.id === session)?.name || session}\n${path}`;
       setWorkStage('creating');
       document.getElementById('work-progress-title').focus();
       try {
-        const response = await fetch('/api/work/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host, path, agent: workAgent, request_id: workRequest.id}), signal: AbortSignal.timeout(25000) });
+        const response = await fetch('/api/work/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({host, session, path, agent: workAgent, request_id: workRequest.id}), signal: AbortSignal.timeout(25000) });
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error(data.error || '啟動失敗');
         workLaunchTarget = data; workSucceeded = true;
@@ -3136,11 +3150,11 @@
       } catch (error) {
         workBusy = false;
         const detail = error.name === 'TimeoutError' || error.name === 'AbortError' ? '主機回應逾時' : error.message;
-        setWorkStage('error', `${detail}。重試會確認同一個工作階段，不會重複建立。`);
+        setWorkStage('error', `${detail}。重試會確認同一個分頁，不會重複建立。`);
         document.getElementById('work-retry').focus();
       } finally {
         if (!workLaunchTarget) workBusy = false;
-        for (const id of ['work-host', 'work-path']) document.getElementById(id).disabled = workBusy;
+        for (const id of ['work-host', 'work-session', 'work-path']) document.getElementById(id).disabled = workBusy;
         document.getElementById('work-close').disabled = workBusy;
         renderWorkAgents(); renderWorkProjects();
       }
@@ -3152,7 +3166,7 @@
     });
     document.getElementById('work-edit').addEventListener('click', () => {
       resetWorkProgress();
-      document.getElementById('work-status').textContent = '原請求可能已建立工作階段；重試相同設定會確認同一階段。';
+      document.getElementById('work-status').textContent = '原請求可能已建立分頁；重試相同設定會確認同一分頁。';
       document.getElementById('work-path').focus();
     });
     document.getElementById('work-retry').addEventListener('click', event => {
@@ -3167,6 +3181,7 @@
       if (event.shiftKey && (document.activeElement === first || document.activeElement === document.getElementById('work-panel') || document.activeElement === document.getElementById('work-progress-title'))) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     });
+    document.getElementById('work-session').addEventListener('change', () => { workRequest = null; workSucceeded = false; renderWorkAgents(); });
     document.getElementById('work-host').addEventListener('change', () => { document.getElementById('work-path').value = ''; loadWorkOptions(); });
     document.getElementById('work-path').addEventListener('input', () => {
       workRequest = null; workSucceeded = false;
