@@ -2944,7 +2944,7 @@
         <label>加入 tmux session<select id="work-session" required disabled><option value="">讀取中…</option></select></label>
         <label>專案路徑<input id="work-path" placeholder="搜尋最近專案，或輸入完整路徑" autocomplete="off" spellcheck="false" required></label>
         <div id="work-projects" aria-label="已釘選與最近專案"></div>
-        <p class="work-note">Coding agent <span style="float:right">剩餘用量</span></p>
+        <p class="work-note">Coding agent <span id="work-quota-source" style="float:right">剩餘用量</span></p>
         <div class="work-agent-options" id="work-agents" role="group" aria-label="選擇 Coding agent"></div>
         <label>啟動方式<select id="work-launch"><option value="">預設指令</option></select></label>
         <details class="work-quota-detail" id="work-quota-detail" hidden><summary>用量詳情</summary><p id="work-quota-description"></p><button type="button" class="work-open" id="work-quota-refresh">重新讀取用量</button></details>
@@ -3165,6 +3165,8 @@
       renderWorkProjects(); renderWorkAgents(); renderWorkLaunches(workLaunchTouched ? document.getElementById('work-launch').value : null);
     }
     function renderWorkAgents() {
+      const quotaHost = document.getElementById('work-host').value || usageHost;
+      document.getElementById('work-quota-source').textContent = quotaHost ? `剩餘用量 · ${quotaHost}` : '剩餘用量';
       const focused = document.activeElement?.closest?.('[data-work-agent]')?.dataset.workAgent;
       document.getElementById('work-agents').innerHTML = (workOptions.agents || []).filter(a => a.available).map(a =>
         `<button type="button" class="work-agent-choice" data-work-agent="${escapeHtml(a.id)}" aria-pressed="${workAgent === a.id}"${workBusy ? ' disabled' : ''}><span class="work-agent-name">${escapeHtml(a.label || a.id)}</span>${workQuotaHtml(a.id)}</button>`).join('');
@@ -3246,7 +3248,8 @@
       workOpen = true;
       const hosts = latestHosts.filter(h => !h.fleet_only);
       const names = [...new Set(hosts.map(h => h.name).filter(Boolean))];
-      const chosen = seed?.host || (hostFilters.size === 1 ? [...hostFilters][0] : names[0]) || '';
+      const localHost = (!serverInfo?.fleet_only && serverInfo?.host) || latestHosts.find(h => h.source === 'local')?.name;
+      const chosen = seed?.host || (hostFilters.size === 1 ? [...hostFilters][0] : localHost || names[0]) || '';
       if (chosen && !names.includes(chosen)) names.unshift(chosen);
       document.getElementById('work-host').innerHTML = names.length ? names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('') : '<option value="">本機</option>';
       document.getElementById('work-host').value = chosen;

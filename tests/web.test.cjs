@@ -4717,3 +4717,11 @@ test('opening before the fleet roster loads binds the local quota cache to the r
   assert.equal(ui.elements.get('work-host').value,'local');
   assert.match(ui.elements.get('work-agents').innerHTML,/Weekly 剩 80%/);
 });
+
+test('new work defaults to the local source rather than the alphabetically first remote host', () => {
+  const ui=dashboard();
+  vm.runInContext("latestHosts=[{name:'a-peer',source:'peer'},{name:'z-local',source:'local'}];serverInfo={host:'z-local',fleet_only:false}",ui.context);
+  ui.context.openWork();
+  assert.equal(ui.elements.get('work-host').value,'z-local');
+  assert.match(ui.elements.get('work-quota-source').textContent,/z-local/);
+});
