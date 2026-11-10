@@ -4489,7 +4489,7 @@ test('new work selects last project agent and keeps source-host quota separate',
   assert.equal(vm.runInContext('workAgent',ui.context),'claude');
   assert.match(ui.elements.get('work-agents').innerHTML,/Weekly 剩 68%/);
   assert.doesNotMatch(ui.elements.get('work-agents').innerHTML,/Wrong host/);
-  assert.match(ui.elements.get('work-agents').innerHTML,/未安裝/);
+  assert.doesNotMatch(ui.elements.get('work-agents').innerHTML,/未安裝|data-work-agent="pi"/);
   assert.ok(calls.every(([url])=>url.includes('host=peer')));
 });
 
@@ -4503,7 +4503,7 @@ test('new work rejects obsolete host responses and unknown quota is explicit', a
   await pending;
   assert.equal(vm.runInContext('workAgent',ui.context),'new-host-agent');
   vm.runInContext('workUsageLoading=false',ui.context);
-  assert.equal(ui.context.workQuotaText('pi'),'暫無用量');
+  assert.equal(ui.context.workQuotaText('pi'),'未提供用量');
 });
 
 test('successful new work prevents a second tap and timeout retry keeps request id', async () => {
@@ -4588,7 +4588,7 @@ test('new work immediately reuses homepage quota and historical options without 
   const calls=[]; let finish;
   const data={ok:true,host:'local',sessions:[{id:'$1',name:'main'}],default_session:'$1',projects:[],agents:[{id:'codex',available:true}],default_agent:'codex',launch_presets:[{id:'preset-full',agent:'codex',label:'codex-full',count:42}],default_launch_preset:'preset-full'};
   const ui=dashboard(url=>{calls.push(url); return new Promise(resolve=>{finish=resolve});});
-  ui.renderUsage({ok:true,host:'local',providers:['codex','claude','cursor','antigravity'],accounts:[{provider:'codex',windows:[{label:'Weekly',usedPercent:20}]}]});
+  ui.renderUsage({ok:true,host:'local',provider_status:{codex:{state:'ready'},claude:{state:'unavailable'},cursor:{state:'unavailable'},antigravity:{state:'unavailable'}},providers:['codex','claude','cursor','antigravity'],accounts:[{provider:'codex',windows:[{label:'Weekly',usedPercent:20}]}]});
   vm.runInContext("workOpen=true;document.getElementById('work-host').value='local';document.getElementById('work-path').value='/project'",ui.context);
   ui.context.workOptionsCacheSeed=data;
   vm.runInContext("workOptionsCache.set('local',workOptionsCacheSeed)",ui.context);
@@ -4684,4 +4684,36 @@ test('legacy empty picker cache cannot discard usable saved homepage usage', () 
   const ui=dashboard({globals:{sessionStorage:{getItem:key=>saved[key]||null,setItem(key,value){saved[key]=value;},removeItem(){}}}});
   assert.equal(vm.runInContext("usageByProvider.get('codex')[0].windows[0].usedPercent",ui.context),20);
   assert.equal(ui.context.cachedWorkAccounts('local')[0].windows[0].usedPercent,20);
+});
+
+test('uninstalled agents are omitted and quota source states are explicit', () => {
+  const ui=dashboard();
+  vm.runInContext("workAgent='codex';workUsageLoading=false;document.getElementById('work-host').value='local';workOptions={projects:[],sessions:[],agents:[{id:'codex',label:'Codex',available:true},{id:'pi',label:'Pi',available:true},{id:'opencode',label:'OpenCode',available:false}]}",ui.context);
+  ui.context.cacheWorkUsage({host:'local',providers:['codex'],accounts:[],provider_status:{codex:{state:'refreshing',source:'none'}}});
+  ui.context.renderWorkAgents();
+  assert.doesNotMatch(ui.elements.get('work-agents').innerHTML,/OpenCode|未安裝/);
+  assert.match(ui.elements.get('work-agents').innerHTML,/更新用量中/);
+  assert.match(ui.elements.get('work-agents').innerHTML,/未提供用量/);
+  ui.context.cacheWorkUsage({host:'local',providers:['codex'],accounts:[],provider_status:{codex:{state:'unavailable',source:'none'}}});
+  assert.match(ui.context.workQuotaHtml('codex'),/暫時無法讀取/);
+});
+
+test('picker polls an in-flight quota source until its cached account becomes available', async () => {
+  let tick;
+  const ui=dashboard({fetchRequest:async()=>({json:async()=>({ok:true,host:'local',providers:['codex'],provider_status:{codex:{state:'ready',source:'codexbar-cache'}},accounts:[{provider:'codex',source:'codexbar-cache',observed_at:Date.now()/1000,windows:[{label:'Weekly',usedPercent:25}]}]})}),globals:{setTimeout:fn=>{tick=fn;return 1}}});
+  vm.runInContext("workOpen=true;document.getElementById('work-host').value='local';workAgent='codex';workOptions={agents:[{id:'codex',available:true}],projects:[],sessions:[]}",ui.context);
+  ui.context.cacheWorkUsage({host:'local',providers:['codex'],accounts:[],provider_status:{codex:{state:'refreshing',source:'none'}}});
+  ui.context.pollWorkUsage('local',0);
+  assert.equal(typeof tick,'function');
+  await tick();
+  assert.match(ui.elements.get('work-agents').innerHTML,/Weekly 剩 75%/);
+  assert.match(ui.context.workQuotaText('codex'),/CodexBar 快取/);
+});
+
+test('opening before the fleet roster loads binds the local quota cache to the resolved host', async () => {
+  const ui=dashboard(async url=>({ok:true,json:async()=>url.startsWith('/api/work-options') ? {ok:true,host:'local',projects:[],sessions:[{id:'$1',name:'main'}],default_session:'$1',agents:[{id:'codex',available:true}],default_agent:'codex'} : {ok:true,host:'local',providers:['codex'],accounts:[{provider:'codex',observed_at:Date.now()/1000,source:'saved-cache',windows:[{label:'Weekly',usedPercent:20}]}],provider_status:{codex:{state:'ready',source:'saved-cache'}}}}));
+  vm.runInContext("workOpen=true;document.getElementById('work-host').value=''",ui.context);
+  await ui.context.loadWorkOptions();
+  assert.equal(ui.elements.get('work-host').value,'local');
+  assert.match(ui.elements.get('work-agents').innerHTML,/Weekly 剩 80%/);
 });

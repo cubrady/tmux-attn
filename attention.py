@@ -4024,6 +4024,275 @@ def usage_payload(providers, force_refresh=False, now=None, ttl=_USAGE_TTL, stal
     }
 
 
+
+_USAGE_SNAPSHOT_LOCK = threading.RLock()
+_USAGE_REFRESHING = set()
+_USAGE_REFRESH_ATTEMPTS = {}
+_USAGE_SNAPSHOT_SOURCES = {}
+_USAGE_DISK_READ = {}
+_USAGE_RETRY_SECONDS = 30.0
+_USAGE_PERSIST_MAX_AGE = 86400.0
+
+
+def usage_snapshot_path():
+    return STATE / 'usage-cache.json'
+
+
+def usage_timestamp(value, swift=False):
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            stamp = float(value) + (978307200 if swift else 0)
+            return stamp if 0 <= stamp < float('inf') else None
+        if isinstance(value, str) and value:
+            return datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except (ValueError, OverflowError, OSError):
+        pass
+    return None
+
+
+def _usage_cached_rows(rows, provider, observed, now, max_age):
+    valid = []
+    if not isinstance(rows, list):
+        return valid
+    for row in rows[:100]:
+        if not isinstance(row, dict) or row.get('provider') != provider or not row.get('windows'):
+            continue
+        sampled = usage_timestamp(row.get('updatedAt')) or usage_timestamp(row.get('observed_at')) or observed
+        if sampled is None or not -60 <= now - sampled <= max_age:
+            continue
+        windows = row.get('windows')
+        if not isinstance(windows, list) or not all(isinstance(w, dict) and isinstance(w.get('usedPercent'), (int, float))
+                                                   and 0 <= w['usedPercent'] <= 100 for w in windows):
+            continue
+        valid.append({**row, 'observed_at': sampled, 'stale': bool(row.get('stale')) or now - sampled > _USAGE_TTL})
+    return valid
+
+
+
+def _merge_usage_accounts(provider, rows, previous, now, source):
+    """Merge individual account observations; a partial source cannot erase other accounts."""
+    old = _usage_cached_rows(previous[1], provider, previous[0], now, _USAGE_PERSIST_MAX_AGE) if previous else []
+    identity = lambda row: str(row.get('account') or row.get('label') or provider).strip().casefold()
+    known = any(identity(row) != provider for row in [*old, *rows])
+    prior = {identity(row): row for row in old if not known or identity(row) != provider}
+    incoming = {identity(row): row for row in rows if not known or identity(row) != provider}
+    anonymous = next((row for row in rows if identity(row) == provider), None)
+    if anonymous and not incoming and len(prior) == 1:
+        key, former = next(iter(prior.items()))
+        incoming[key] = {**former, **anonymous, 'account': former.get('account') or key,
+                         'label': former.get('label') or former.get('account') or key,
+                         'plan': anonymous.get('plan') or former.get('plan') or '',
+                         'stale': bool(anonymous.get('stale')) or now - anonymous['observed_at'] > _USAGE_TTL}
+    elif anonymous and known and not incoming:
+        return old  # An unscoped widget cannot identify one of several accounts.
+    merged = []
+    for key in dict.fromkeys([*prior, *incoming]):
+        former, current = prior.get(key), incoming.get(key)
+        if current and (not former or current['observed_at'] > former['observed_at']
+                        or (source == 'live' and current['observed_at'] == former['observed_at'])):
+            merged.append({**current, 'source': source})
+        elif former:
+            merged.append({**former, 'stale': bool(former.get('stale')) or key not in incoming,
+                           'source': former.get('source') or _USAGE_SNAPSHOT_SOURCES.get(provider, 'saved-cache')})
+    return merged
+
+def _read_usage_json(path):
+    try:
+        if path.stat().st_size > 2 * 1024 * 1024:
+            return None
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _persist_usage_snapshots():
+    path = usage_snapshot_path()
+    providers = {p: {'observed_at': at, 'accounts': rows} for p, (at, rows) in _USAGE_CACHE.items() if rows}
+    if not providers:
+        return
+    temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}')
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w') as handle:
+            json.dump({'version': 1, 'providers': providers}, handle, ensure_ascii=False)
+        os.replace(temp, path)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def seed_usage_snapshot(payload, now=None):
+    """Preserve a previously observed normalized snapshot without fetching credentials."""
+    now = time.time() if now is None else float(now)
+    if not isinstance(payload, dict):
+        return
+    fallback = usage_timestamp(payload.get('updated_at'))
+    with _USAGE_SNAPSHOT_LOCK:
+        for provider in USAGE_PROVIDERS:
+            rows = _usage_cached_rows([r for r in payload.get('accounts', []) if isinstance(r, dict)
+                                       and r.get('provider') == provider], provider, fallback, now, _USAGE_PERSIST_MAX_AGE)
+            if rows:
+                merged = _merge_usage_accounts(provider, rows, _USAGE_CACHE.get(provider), now, 'saved-cache')
+                if merged:
+                    _USAGE_CACHE[provider] = (max(row['observed_at'] for row in merged), merged)
+                    _USAGE_SNAPSHOT_SOURCES[provider] = 'saved-cache'
+        _persist_usage_snapshots()
+
+
+def _load_usage_snapshots(now):
+    path = usage_snapshot_path()
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        stamp = None
+    if _USAGE_DISK_READ.get(str(path)) == stamp:
+        return
+    _USAGE_DISK_READ[str(path)] = stamp
+    payload = _read_usage_json(path)
+    if not payload or payload.get('version') != 1 or not isinstance(payload.get('providers'), dict):
+        return
+    for provider, item in payload['providers'].items():
+        if provider not in USAGE_PROVIDERS or not isinstance(item, dict):
+            continue
+        rows = _usage_cached_rows(item.get('accounts'), provider, usage_timestamp(item.get('observed_at')),
+                                  now, _USAGE_PERSIST_MAX_AGE)
+        if rows:
+            previous = _USAGE_CACHE.get(provider)
+            merged = _merge_usage_accounts(provider, rows, previous, now, 'saved-cache')
+            if merged and (not previous or merged != previous[1]):
+                _USAGE_CACHE[provider] = (max(row['observed_at'] for row in merged), merged)
+                _USAGE_SNAPSHOT_SOURCES[provider] = 'saved-cache'
+
+
+def _codexbar_snapshot_account(provider, usage, observed, account=''):
+    usage = dict(usage)
+    usage['updatedAt'] = datetime.datetime.fromtimestamp(observed, datetime.timezone.utc).isoformat()
+    for key in ('primary', 'secondary', 'tertiary'):
+        if isinstance(usage.get(key), dict):
+            usage[key] = dict(usage[key])
+            reset = usage[key].get('resetsAt')
+            if isinstance(reset, (int, float)):
+                at = usage_timestamp(reset, swift=True)
+                try:
+                    usage[key]['resetsAt'] = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat() if at is not None else ''
+                except (ValueError, OverflowError, OSError):
+                    usage[key]['resetsAt'] = ''
+    try:
+        row = _normalize_usage_account({'provider': provider, 'account': account, 'usage': usage}, provider)
+    except (ValueError, OverflowError, TypeError):
+        return None
+    return {**row, 'observed_at': observed} if row else None
+
+
+def codexbar_snapshot_accounts(now=None, home=None):
+    """Read only quota snapshot exports, never credential/config or cost-history files."""
+    now = time.time() if now is None else float(now)
+    home = Path(home or user_home())
+    grouped = {}
+    codex = _read_usage_json(home / 'Library/Application Support/CodexBar/codex-account-snapshots.json')
+    if codex and isinstance(codex.get('records'), list):
+        for record in codex['records'][:100]:
+            if not isinstance(record, dict) or not isinstance(record.get('snapshot'), dict):
+                continue
+            usage = record['snapshot']
+            at = usage_timestamp(usage.get('updatedAt'), swift=True)
+            if at is not None and -60 <= now - at <= _USAGE_STALE_TTL:
+                row = _codexbar_snapshot_account('codex', usage, at)
+                if row:
+                    grouped.setdefault('codex', []).append(row)
+    root = home / 'Library/Group Containers'
+    try:
+        paths = list(root.glob('*.com.steipete.codexbar/widget-snapshot.json'))[:5]
+    except OSError:
+        paths = []
+    for path in paths:
+        widget = _read_usage_json(path)
+        if not widget or not isinstance(widget.get('entries'), list):
+            continue
+        for entry in widget['entries'][:100]:
+            if not isinstance(entry, dict):
+                continue
+            provider = entry.get('provider')
+            at = usage_timestamp(entry.get('updatedAt'))
+            if provider not in USAGE_PROVIDERS or provider in grouped or at is None or not -60 <= now - at <= _USAGE_STALE_TTL:
+                continue
+            usage = {key: entry[key] for key in ('primary', 'secondary', 'tertiary') if key in entry}
+            # Keep exported period titles when the widget supplies corresponding rows.
+            labels = {}
+            for key, window in usage.items():
+                for item in entry.get('usageRows', []):
+                    if isinstance(item, dict) and item.get('window') == window and item.get('title'):
+                        labels[key] = item['title']
+            row = _codexbar_snapshot_account(provider, usage, at)
+            if row:
+                for window in row['windows']:
+                    if window['key'] in labels:
+                        window['label'] = labels[window['key']]
+                grouped[provider] = [row]
+    return grouped
+
+
+def _refresh_usage_snapshot(provider):
+    try:
+        fresh = _fetch_provider_usage(provider)
+        now = time.time()
+        rows = _usage_cached_rows([{**r, 'observed_at': usage_timestamp(r.get('observed_at')) or usage_timestamp(r.get('updatedAt')) or now,
+                                    'stale': False} for r in fresh], provider, now, now, _USAGE_PERSIST_MAX_AGE)
+        if rows:
+            with _USAGE_SNAPSHOT_LOCK:
+                previous = _USAGE_CACHE.get(provider)
+                merged = _merge_usage_accounts(provider, rows, previous, now, 'live')
+                if merged and (not previous or merged != previous[1]):
+                    _USAGE_CACHE[provider] = (max(row['observed_at'] for row in merged), merged)
+                    _USAGE_SNAPSHOT_SOURCES[provider] = 'live'
+                    _persist_usage_snapshots()
+    except Exception:
+        pass
+    finally:
+        with _USAGE_SNAPSHOT_LOCK:
+            _USAGE_REFRESH_ATTEMPTS[provider] = time.time()
+            _USAGE_REFRESHING.discard(provider)
+
+
+def usage_snapshot_payload(providers, force_refresh=False, now=None):
+    """Return observed quota immediately; refresh missing/stale sources off the request thread."""
+    now = time.time() if now is None else float(now)
+    wanted = parse_usage_providers(providers)
+    accounts, statuses = [], {}
+    with _USAGE_SNAPSHOT_LOCK:
+        _load_usage_snapshots(now)
+        imported = codexbar_snapshot_accounts(now)
+        for provider, rows in imported.items():
+            previous = _USAGE_CACHE.get(provider)
+            merged = _merge_usage_accounts(provider, rows, previous, now, 'codexbar-cache')
+            if merged and (not previous or merged != previous[1]):
+                _USAGE_CACHE[provider] = (max(row['observed_at'] for row in merged), merged)
+                _USAGE_SNAPSHOT_SOURCES[provider] = 'codexbar-cache'
+        for provider in wanted:
+            cached = _USAGE_CACHE.get(provider)
+            rows = _usage_cached_rows(cached[1], provider, cached[0], now, _USAGE_PERSIST_MAX_AGE) if cached else []
+            stale = not rows or any(row.get('stale') or now - row['observed_at'] > _USAGE_TTL for row in rows)
+            partial_export = _USAGE_SNAPSHOT_SOURCES.get(provider) == 'codexbar-cache' or any(
+                row.get('source') == 'codexbar-cache' for row in rows)
+            if ((force_refresh or stale or partial_export) and provider not in _USAGE_REFRESHING
+                    and now - _USAGE_REFRESH_ATTEMPTS.get(provider, 0) >= _USAGE_RETRY_SECONDS):
+                _USAGE_REFRESHING.add(provider)
+                _USAGE_REFRESH_ATTEMPTS[provider] = now
+                threading.Thread(target=_refresh_usage_snapshot, args=(provider,), daemon=True).start()
+            source = _USAGE_SNAPSHOT_SOURCES.get(provider, 'live' if rows else 'none')
+            accounts.extend({**row, 'source': row.get('source') or source} for row in rows)
+            statuses[provider] = {'state': 'refreshing' if provider in _USAGE_REFRESHING else 'ready' if rows and not stale else 'unavailable',
+                                  'source': source, 'observed_at': max((r['observed_at'] for r in rows), default=None)}
+        _persist_usage_snapshots()
+    return {'ok': True, 'providers': wanted, 'accounts': accounts, 'provider_status': statuses,
+            'updated_at': int(max((r['observed_at'] for r in accounts), default=now))}
+
 def web_later_db():
     """Web-only grouping; no pane event, tmux status, or hook reads this database."""
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -6418,18 +6687,10 @@ def work_options(host='', fleet_only=False):
 
 def work_usage(host='', fleet_only=False, providers=None, force_refresh=False):
     if host and host != local_host_name():
-        return work_peer_request(host, '/api/work-usage')
+        return work_peer_request(host, '/api/work-usage' + ('?refresh=1' if force_refresh else ''))
     if fleet_only:
         return 400, {'ok': False, 'error': 'Source host required'}
-    payload = usage_payload(USAGE_PROVIDERS if providers is None else providers, force_refresh=force_refresh)
-    now = time.time()
-    accounts = []
-    for account in payload.get('accounts', []):
-        cached = _USAGE_CACHE.get(account.get('provider'))
-        observed = float(cached[0]) if cached else None
-        accounts.append({**account, 'observed_at': observed,
-                         'stale': observed is None or now - observed > _USAGE_TTL})
-    return 200, {**payload, 'accounts': accounts, 'host': local_host_name()}
+    return 200, {**usage_snapshot_payload(USAGE_PROVIDERS if providers is None else providers, force_refresh), 'host': local_host_name()}
 
 
 def work_path(raw, require_exists=True):
@@ -6605,7 +6866,8 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
             if path in ('/api/work-options', '/api/work-usage'):
                 host = parse_qs(urlparse(self.path).query).get('host', [''])[0]
                 try:
-                    code, body = (work_options if path == '/api/work-options' else work_usage)(host, fleet_only)
+                    code, body = (work_options(host, fleet_only) if path == '/api/work-options' else work_usage(
+                        host, fleet_only, force_refresh=parse_qs(urlparse(self.path).query).get('refresh', [''])[0] == '1'))
                 except Exception as exc:
                     sys.stderr.write(f'web {path}: {type(exc).__name__}: {exc}\n')
                     code, body = 500, {'ok': False, 'error': 'Could not load work options'}

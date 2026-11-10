@@ -65,16 +65,16 @@ class WorkTests(unittest.TestCase):
             self.assertEqual(a.dispatch_work_start(self.payload()), first)
             tmux.assert_not_called()
 
-    def test_source_usage_exposes_real_cache_age(self):
-        accounts = [{'provider': 'codex', 'windows': []}, {'provider': 'claude', 'windows': []}]
-        with patch.object(a, 'usage_payload', return_value={'ok': True, 'accounts': accounts}), \
-             patch.object(a, '_USAGE_CACHE', {'codex': (100., accounts[:1])}), \
-             patch.object(a.time, 'time', return_value=1000.):
+    def test_source_usage_preserves_individual_account_observations(self):
+        accounts = [{'provider': 'codex', 'account': 'old', 'windows': [], 'observed_at': 100., 'stale': True},
+                    {'provider': 'codex', 'account': 'new', 'windows': [], 'observed_at': 900., 'stale': False}]
+        with patch.object(a, 'usage_snapshot_payload', return_value={'ok': True, 'accounts': accounts}):
             result = a.work_usage()[1]
+        self.assertEqual(result['host'], 'local')
         self.assertEqual(result['accounts'][0]['observed_at'], 100.)
         self.assertTrue(result['accounts'][0]['stale'])
-        self.assertIsNone(result['accounts'][1]['observed_at'])
-        self.assertTrue(result['accounts'][1]['stale'])
+        self.assertEqual(result['accounts'][1]['observed_at'], 900.)
+        self.assertFalse(result['accounts'][1]['stale'])
 
     def test_timeout_recovery_uses_same_session(self):
         with patch.object(a, 'tmux', side_effect=['', subprocess.TimeoutExpired('tmux', 4)]) as tmux:

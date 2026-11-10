@@ -2947,7 +2947,7 @@
         <p class="work-note">Coding agent <span style="float:right">剩餘用量</span></p>
         <div class="work-agent-options" id="work-agents" role="group" aria-label="選擇 Coding agent"></div>
         <label>啟動方式<select id="work-launch"><option value="">預設指令</option></select></label>
-        <details class="work-quota-detail" id="work-quota-detail" hidden><summary>用量詳情</summary><p id="work-quota-description"></p></details>
+        <details class="work-quota-detail" id="work-quota-detail" hidden><summary>用量詳情</summary><p id="work-quota-description"></p><button type="button" class="work-open" id="work-quota-refresh">重新讀取用量</button></details>
         <p class="work-note">會在所選 session 新增分頁（window），進入指定目錄並開始全新對話。用量來自所選主機。</p>
         <div class="work-status" id="work-status" role="status" aria-live="polite"></div>
         <button type="submit" class="work-submit" id="work-submit" disabled>開新工作</button>
@@ -3001,6 +3001,7 @@
     let workSucceeded = false;
     let workStage = '';
     let workWaitTimer = null;
+    let workUsagePollTimer = null;
     const WORK_USAGE_CACHE_STORE = 'tmux-attn:work-usage-cache';
     const workUsageCache = new Map();
     const workUsageRequests = new Map();
@@ -3036,7 +3037,11 @@
         }
         stamps[provider] = Math.max(stamps[provider] || 0, receivedAt);
       }
-      const entry = {accounts: [...grouped.values()].flat(), providers: [...grouped.keys()], stamps, observed};
+      const status = {...previous?.status};
+      for (const [provider, value] of Object.entries(data.provider_status || {})) {
+        if (receivedAt >= (previous?.stamps?.[provider] || 0)) status[provider] = value;
+      }
+      const entry = {accounts: [...grouped.values()].flat(), providers: [...grouped.keys()], stamps, observed, status};
       workUsageCache.set(host, entry);
       try { sessionStorage.setItem(WORK_USAGE_CACHE_STORE, JSON.stringify(Object.fromEntries(workUsageCache))); } catch (_) {}
     }
@@ -3048,6 +3053,7 @@
       }
     }
     function cachedWorkAccounts(host) {
+      host = host || usageHost || (!serverInfo?.fleet_only && serverInfo?.host) || '';
       primeHomepageUsageCache(host);
       const entry = workUsageCache.get(host);
       if (!entry) return [];
@@ -3073,30 +3079,49 @@
         workAccounts = accounts; renderWorkAgents();
       }
     }
-    function loadWorkUsage(host) {
+    function loadWorkUsage(host, {force = false} = {}) {
       const entry = workUsageCache.get(host);
-      if (entry && USAGE_PROVIDERS.every(p => entry.stamps[p] && Date.now() - entry.stamps[p] < USAGE_POLL_MS)) return Promise.resolve();
+      if (!force && entry && USAGE_PROVIDERS.every(p => entry.stamps[p] && Date.now() - entry.stamps[p] < USAGE_POLL_MS && entry.status?.[p]?.state !== 'refreshing' && (entry.status?.[p] || entry.accounts.some(a => a.provider === p)))) return Promise.resolve();
       if (workUsageRequests.has(host)) return workUsageRequests.get(host);
-      const request = fetch('/api/work-usage?host=' + encodeURIComponent(host), {cache: 'no-store', signal: AbortSignal.timeout(25000)})
-        .then(r => r.json()).then(data => { if (data?.ok) { cacheWorkUsage(data, host); syncHomepageUsageCache(host); } })
+      const request = fetch('/api/work-usage?host=' + encodeURIComponent(host) + (force ? '&refresh=1' : ''), {cache: 'no-store', signal: AbortSignal.timeout(25000)})
+        .then(r => r.json()).then(data => { if (data?.ok) { cacheWorkUsage(data, host); syncHomepageUsageCache(data.host || host); } })
         .catch(() => {}).finally(() => workUsageRequests.delete(host));
       workUsageRequests.set(host, request);
       return request;
+    }
+    function pollWorkUsage(host, seq) {
+      clearTimeout(workUsagePollTimer);
+      const refreshing = Object.values(workUsageCache.get(host)?.status || {}).some(s => s.state === 'refreshing');
+      if (!workOpen || seq !== workSequence || !refreshing) return;
+      workUsagePollTimer = setTimeout(async () => {
+        if (!workOpen || seq !== workSequence) return;
+        await loadWorkUsage(host);
+        if (!workOpen || seq !== workSequence) return;
+        workAccounts = cachedWorkAccounts(host); renderWorkAgents(); pollWorkUsage(host, seq);
+      }, 3000);
+    }
+    function workQuotaUnavailable(provider) {
+      if (!USAGE_PROVIDERS.includes(provider)) return '未提供用量';
+      const status = workUsageCache.get(document.getElementById('work-host').value)?.status?.[provider];
+      if (status?.state === 'refreshing') return '更新用量中…';
+      if (status?.state === 'unavailable') return '暫時無法讀取';
+      return workUsageLoading ? '讀取用量中…' : '暫無用量';
     }
     function workQuotaText(id) {
       const provider = ({agent: 'cursor', agy: 'antigravity'})[id] || id;
       const accounts = workAccounts.filter(a => a.provider === provider);
       const summaries = accounts.map(a => {
         const windows = (a.windows || []).filter(w => typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent));
+        const source = ({live: '即時資料', 'saved-cache': '伺服器快取', 'codexbar-cache': 'CodexBar 快取'})[a.source] || '';
         const text = windows.map(w => `${w.shortLabel || w.label || '額度'} 剩 ${remainingPercentForWindow(w)}%${w.resetsAt ? ' · ' + formatResetDetail(w.resetsAt) : ''}`).join(' / ');
-        return text ? `${accounts.length > 1 ? (a.account || '帳號') + '：' : ''}${text}${a.stale || (a.observed_at && Date.now() / 1000 - a.observed_at > 120) ? '（快取）' : ''}${a.observed_at ? ' · ' + new Date(a.observed_at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + ' 取樣' : ''}` : '';
+        return text ? `${source ? source + ' · ' : ''}${accounts.length > 1 ? (a.account || '帳號') + '：' : ''}${text}${a.stale || (a.observed_at && Date.now() / 1000 - a.observed_at > 120) ? '（快取）' : ''}${a.observed_at ? ' · ' + new Date(a.observed_at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) + ' 取樣' : ''}` : '';
       }).filter(Boolean);
-      return summaries.join('；') || (workUsageLoading ? '讀取用量中…' : '暫無用量');
+      return summaries.join('；') || workQuotaUnavailable(provider);
     }
     function workQuotaHtml(id) {
       const provider = ({agent: 'cursor', agy: 'antigravity'})[id] || id;
       const accounts = workAccounts.filter(a => a.provider === provider && a.windows?.length);
-      if (!accounts.length) return `<small>${workUsageLoading ? '讀取中…' : '暫無用量'}</small>`;
+      if (!accounts.length) return `<small>${escapeHtml(workQuotaUnavailable(provider))}</small>`;
       const groups = accounts.map(account => {
         const accountLabel = account.label || account.account || AGENT_LABELS[provider] || provider;
         const meters = account.windows.map(win => {
@@ -3121,6 +3146,13 @@
       select.disabled = workBusy || !workAgent;
     }
     function applyWorkOptions(data, host) {
+      if (!host && data.host) {
+        host = data.host;
+        const select = document.getElementById('work-host');
+        select.innerHTML = `<option value="${escapeHtml(host)}">${escapeHtml(host)}</option>`;
+        select.value = host;
+      }
+      workAccounts = cachedWorkAccounts(host);
       workOptions = data;
       const sessions = data.sessions;
       const sessionSelect = document.getElementById('work-session');
@@ -3134,8 +3166,8 @@
     }
     function renderWorkAgents() {
       const focused = document.activeElement?.closest?.('[data-work-agent]')?.dataset.workAgent;
-      document.getElementById('work-agents').innerHTML = (workOptions.agents || []).map(a =>
-        `<button type="button" class="work-agent-choice" data-work-agent="${escapeHtml(a.id)}" aria-pressed="${workAgent === a.id}"${!a.available || workBusy ? ' disabled' : ''}><span class="work-agent-name">${escapeHtml(a.label || a.id)}</span>${a.available ? workQuotaHtml(a.id) : '<small>未安裝</small>'}</button>`).join('');
+      document.getElementById('work-agents').innerHTML = (workOptions.agents || []).filter(a => a.available).map(a =>
+        `<button type="button" class="work-agent-choice" data-work-agent="${escapeHtml(a.id)}" aria-pressed="${workAgent === a.id}"${workBusy ? ' disabled' : ''}><span class="work-agent-name">${escapeHtml(a.label || a.id)}</span>${workQuotaHtml(a.id)}</button>`).join('');
       document.getElementById('work-quota-description').textContent = workQuotaText(workAgent);
       document.getElementById('work-quota-detail').hidden = !workAgent;
       if (focused) document.querySelector(`[data-work-agent="${CSS.escape(focused)}"]`)?.focus();
@@ -3152,6 +3184,7 @@
     async function loadWorkOptions() {
       const seq = ++workSequence;
       const host = document.getElementById('work-host').value;
+      clearTimeout(workUsagePollTimer);
       workOptionsLoading = true; workLaunchTouched = false;
       workOptions = { projects: [], agents: [], sessions: [] };
       document.getElementById('work-session').innerHTML = '<option value="">讀取中…</option>';
@@ -3164,7 +3197,7 @@
       if (cached) applyWorkOptions(cached, host);
       else { renderWorkProjects(); renderWorkAgents(); renderWorkLaunches(null); }
       const quota = loadWorkUsage(host).finally(() => {
-        if (seq === workSequence && workOpen) { workAccounts = cachedWorkAccounts(host); workUsageLoading = false; renderWorkAgents(); }
+        if (seq === workSequence && workOpen) { const selectedHost = document.getElementById('work-host').value || host; workAccounts = cachedWorkAccounts(selectedHost); workUsageLoading = false; renderWorkAgents(); pollWorkUsage(selectedHost, seq); }
       });
       try {
         const response = await fetch('/api/work-options?host=' + encodeURIComponent(host), { cache: 'no-store', signal: AbortSignal.timeout(20000) });
@@ -3173,7 +3206,7 @@
         if (!response.ok || !data.ok) throw new Error(data.error || '無法讀取主機，請確認已更新來源主機');
         if (!Array.isArray(data.sessions)) throw new Error('來源主機尚未支援 Session 選擇，請先更新來源主機。');
         workOptionsLoading = false;
-        workOptionsCache.set(host, data);
+        workOptionsCache.set(data.host || host, data);
         try { sessionStorage.setItem('tmux-attn:work-options-cache', JSON.stringify(Object.fromEntries(workOptionsCache))); } catch (_) {}
         applyWorkOptions(data, host);
         document.getElementById('work-status').textContent = !data.sessions.length ? '請先在這台主機開啟 tmux session，再重新開啟此視窗。' : workAgent ? '' : '這台主機未找到可用的 coding agent。';
@@ -3202,6 +3235,7 @@
     }
     function resetWorkProgress() {
       clearTimeout(workWaitTimer); workWaitTimer = null;
+      clearTimeout(workUsagePollTimer);
       workLaunchTarget = null; workBusy = false;
       for (const id of ['work-host', 'work-session', 'work-path', 'work-launch', 'work-close']) document.getElementById(id).disabled = false;
       setWorkStage('');
@@ -3293,6 +3327,15 @@
       const first = nodes[0], last = nodes[nodes.length - 1];
       if (event.shiftKey && (document.activeElement === first || document.activeElement === document.getElementById('work-panel') || document.activeElement === document.getElementById('work-progress-title'))) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    });
+    document.getElementById('work-quota-refresh').addEventListener('click', async () => {
+      const button = document.getElementById('work-quota-refresh');
+      const host = document.getElementById('work-host').value, seq = workSequence;
+      button.disabled = true;
+      try {
+        await loadWorkUsage(host, {force: true});
+        if (workOpen && seq === workSequence) {workAccounts = cachedWorkAccounts(host); renderWorkAgents(); pollWorkUsage(host, seq);}
+      } finally { button.disabled = false; }
     });
     document.getElementById('work-launch').addEventListener('change', () => { workLaunchTouched = true; workRequest = null; workSucceeded = false; renderWorkAgents(); });
     document.getElementById('work-session').addEventListener('change', () => { workRequest = null; workSucceeded = false; renderWorkAgents(); });
