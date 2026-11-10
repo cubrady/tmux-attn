@@ -4637,3 +4637,51 @@ test('editing project path preserves an explicitly selected launch profile and s
   vm.runInContext("workLaunchTouched=false;workOptions.projects=[{path:'/project',agent:'codex',launch_preset:''}];renderWorkLaunches(null)",ui.context);
   assert.equal(ui.elements.get('work-launch').value,'');
 });
+
+test('a partial picker usage response retains missing provider snapshots in both views', async () => {
+  const ui=dashboard(async()=>({json:async()=>({ok:true,host:'local',providers:['codex','claude','cursor','antigravity'],accounts:[{provider:'cursor',observed_at:200,windows:[{label:'Month',usedPercent:72}]}]})}));
+  ui.renderUsage({host:'local',providers:['codex'],accounts:[{provider:'codex',observed_at:100,windows:[{label:'Weekly',usedPercent:20}]}]});
+  await ui.context.loadWorkUsage('local');
+  const home=vm.runInContext("usageByProvider.get('codex')[0]",ui.context);
+  const picker=ui.context.cachedWorkAccounts('local').find(a=>a.provider==='codex');
+  assert.equal(home.windows[0].usedPercent,20);
+  assert.equal(picker.windows[0].usedPercent,20);
+  assert.equal(home.stale,true);
+  assert.equal(picker.stale,true);
+  assert.match(ui.elements.get('agent-usage').innerHTML,/codex/);
+});
+
+test('new picker samples update homepage and late samples cannot roll either view backward', async () => {
+  const ui=dashboard(async()=>({json:async()=>({ok:true,host:'local',providers:['codex'],accounts:[{provider:'codex',observed_at:200,windows:[{label:'Weekly',usedPercent:10}]}]})}));
+  ui.renderUsage({host:'local',providers:['codex'],accounts:[{provider:'codex',observed_at:100,windows:[{label:'Weekly',usedPercent:30}]}]});
+  await ui.context.loadWorkUsage('local');
+  assert.equal(vm.runInContext("usageByProvider.get('codex')[0].windows[0].usedPercent",ui.context),10);
+  ui.renderUsage({host:'local',providers:['codex'],accounts:[{provider:'codex',observed_at:150,windows:[{label:'Weekly',usedPercent:90}]}]});
+  assert.equal(vm.runInContext("usageByProvider.get('codex')[0].windows[0].usedPercent",ui.context),10);
+  assert.equal(ui.context.cachedWorkAccounts('local')[0].windows[0].usedPercent,10);
+  ui.context.cacheWorkUsage({host:'remote',providers:['codex'],accounts:[{provider:'codex',observed_at:300,windows:[{label:'Weekly',usedPercent:99}]}]});
+  ui.context.syncHomepageUsageCache('remote');
+  assert.equal(vm.runInContext("usageByProvider.get('codex')[0].windows[0].usedPercent",ui.context),10);
+});
+
+test('picker preserves homepage account and window order, all windows, and shared colors', () => {
+  const ui=dashboard();
+  const accounts=[{provider:'codex',account:'first',windows:[{label:'Session',shortLabel:'5h',usedPercent:0},{label:'Weekly',shortLabel:'週',usedPercent:95}]},{provider:'codex',account:'second',windows:[{label:'Session',shortLabel:'5h',usedPercent:10,pace:{willLastToReset:false}},{label:'Weekly',shortLabel:'週',usedPercent:20}]}];
+  ui.context.testAccounts=accounts;vm.runInContext('workAccounts=testAccounts',ui.context);
+  const html=ui.context.workQuotaHtml('codex');
+  assert.equal((html.match(/role="meter"/g)||[]).length,4);
+  assert.ok(html.indexOf('first')<html.indexOf('second'));
+  assert.ok(html.indexOf('Session 剩 100%')<html.indexOf('Weekly 剩 5%'));
+  assert.equal((html.match(/data-tone="warn"/g)||[]).length,2);
+  assert.doesNotMatch(html,/>\+2 項/);
+});
+
+test('legacy empty picker cache cannot discard usable saved homepage usage', () => {
+  const saved={
+    'tmux-attn:usage-cache': JSON.stringify({host:'local',providers:['codex'],updated_at:100,accounts:[{provider:'codex',observed_at:100,windows:[{label:'Weekly',usedPercent:20}]}]}),
+    'tmux-attn:work-usage-cache': JSON.stringify({local:{accounts:[],providers:['codex'],stamps:{codex:200000}}}),
+  };
+  const ui=dashboard({globals:{sessionStorage:{getItem:key=>saved[key]||null,setItem(key,value){saved[key]=value;},removeItem(){}}}});
+  assert.equal(vm.runInContext("usageByProvider.get('codex')[0].windows[0].usedPercent",ui.context),20);
+  assert.equal(ui.context.cachedWorkAccounts('local')[0].windows[0].usedPercent,20);
+});

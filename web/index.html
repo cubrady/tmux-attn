@@ -2707,6 +2707,9 @@
     .work-agent-choice[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
     .work-agent-name { flex: 0 0 96px; font-weight: 500; }
     .work-quota { flex: 1; min-width: 0; display: grid; gap: 7px; }
+    .work-quota-account { display: grid; gap: 7px; }
+    .work-quota-account + .work-quota-account { border-top: 1px solid var(--line); padding-top: 8px; }
+    .work-quota-account-name { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .work-quota-meter { display: grid; grid-template-columns: minmax(30px, 64px) minmax(35px, 1fr) 34px; align-items: center; gap: 7px; font-size: 11px; }
     .work-quota-label { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .work-quota-track { height: 5px; border-radius: 9px; background: color-mix(in srgb, var(--muted) 16%, transparent); overflow: hidden; }
@@ -3014,28 +3017,68 @@
       const previous = workUsageCache.get(host);
       const providers = data.providers?.length ? data.providers : [...new Set(data.accounts.map(a => a.provider))];
       const stamps = {...previous?.stamps};
-      for (const provider of providers) stamps[provider] = receivedAt;
-      const entry = {accounts: [...(previous?.accounts || []).filter(a => !providers.includes(a.provider)), ...data.accounts],
-        providers: [...new Set([...(previous?.providers || []), ...providers])], stamps};
+      const observed = {...previous?.observed};
+      const grouped = new Map((previous?.providers || []).map(p => [p, (previous?.accounts || []).filter(a => a.provider === p)]));
+      for (const provider of providers) {
+        const rows = data.accounts.filter(a => a.provider === provider);
+        const prior = grouped.get(provider) || [];
+        const sample = Math.max(0, ...rows.map(a => (Number(a.observed_at) || 0) * 1000)) || receivedAt;
+        const priorSample = prior.length ? (observed[provider] ?? (Math.max(0, ...prior.map(a => (Number(a.observed_at) || 0) * 1000)) || stamps[provider] || 0)) : 0;
+        if (rows.length) {
+          if (sample < priorSample || (sample === priorSample && receivedAt < (stamps[provider] || 0))) continue;
+          grouped.set(provider, rows);
+          observed[provider] = sample;
+        } else {
+          if (receivedAt < (stamps[provider] || 0)) continue;
+          // Missing usage is an unavailable sample, not proof the previous account vanished.
+          grouped.set(provider, prior.map(a => ({...a, stale: true})));
+          observed[provider] = priorSample;
+        }
+        stamps[provider] = Math.max(stamps[provider] || 0, receivedAt);
+      }
+      const entry = {accounts: [...grouped.values()].flat(), providers: [...grouped.keys()], stamps, observed};
       workUsageCache.set(host, entry);
       try { sessionStorage.setItem(WORK_USAGE_CACHE_STORE, JSON.stringify(Object.fromEntries(workUsageCache))); } catch (_) {}
     }
-    function cachedWorkAccounts(host) {
-      if (!workUsageCache.has(host) && serverInfo?.host === host && !serverInfo.fleet_only && usageByProvider.size) {
-        cacheWorkUsage({host, providers: [...usageByProvider.keys()], accounts: [...usageByProvider.values()].flat()});
-        const imported = workUsageCache.get(host);
-        for (const p of imported.providers) imported.stamps[p] = usageFetchedAt.get(p) || 0;
+    function primeHomepageUsageCache(host) {
+      if ((usageHost === host || (serverInfo?.host === host && !serverInfo.fleet_only)) && usageByProvider.size) {
+        for (const [provider, accounts] of usageByProvider) {
+          cacheWorkUsage({host, providers: [provider], accounts}, host, usageFetchedAt.get(provider) || 0);
+        }
       }
+    }
+    function cachedWorkAccounts(host) {
+      primeHomepageUsageCache(host);
       const entry = workUsageCache.get(host);
       if (!entry) return [];
-      return entry.accounts.map(a => ({...a, stale: !!a.stale || !entry.stamps[a.provider] || Date.now() - entry.stamps[a.provider] > USAGE_POLL_MS}));
+      return entry.accounts.map(a => ({...a, stale: !!a.stale || (a.observed_at
+        ? Date.now() - a.observed_at * 1000 > 180000
+        : !entry.stamps[a.provider] || Date.now() - entry.stamps[a.provider] > USAGE_POLL_MS)}));
+    }
+    function syncHomepageUsageCache(host, persist = true) {
+      if (host !== usageHost && !(serverInfo?.host === host && !serverInfo.fleet_only)) return;
+      const entry = workUsageCache.get(host);
+      if (!entry) return;
+      usageHost = host;
+      const accounts = cachedWorkAccounts(host);
+      for (const provider of entry.providers) {
+        usageByProvider.set(provider, accounts.filter(a => a.provider === provider));
+        usageFetchedAt.set(provider, entry.stamps[provider] || 0);
+      }
+      const samples = accounts.map(a => Number(a.observed_at) || (entry.observed?.[a.provider] || entry.stamps[a.provider]) / 1000).filter(t => t > 0);
+      usageUpdatedAt = samples.length ? Math.min(...samples) : 0;
+      if (persist) saveUsageCache({host, providers: entry.providers, accounts, updated_at: usageUpdatedAt});
+      renderAgentUsage();
+      if (workOpen && document.getElementById('work-host').value === host) {
+        workAccounts = accounts; renderWorkAgents();
+      }
     }
     function loadWorkUsage(host) {
       const entry = workUsageCache.get(host);
       if (entry && USAGE_PROVIDERS.every(p => entry.stamps[p] && Date.now() - entry.stamps[p] < USAGE_POLL_MS)) return Promise.resolve();
       if (workUsageRequests.has(host)) return workUsageRequests.get(host);
       const request = fetch('/api/work-usage?host=' + encodeURIComponent(host), {cache: 'no-store', signal: AbortSignal.timeout(25000)})
-        .then(r => r.json()).then(data => { if (data?.ok) cacheWorkUsage(data, host); })
+        .then(r => r.json()).then(data => { if (data?.ok) { cacheWorkUsage(data, host); syncHomepageUsageCache(host); } })
         .catch(() => {}).finally(() => workUsageRequests.delete(host));
       workUsageRequests.set(host, request);
       return request;
@@ -3052,23 +3095,20 @@
     }
     function workQuotaHtml(id) {
       const provider = ({agent: 'cursor', agy: 'antigravity'})[id] || id;
-      const accounts = workAccounts.filter(a => a.provider === provider);
-      const windows = accounts.flatMap(a => (a.windows || [])
-        .filter(w => typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent))
-        .map(w => ({account: a, win: w})));
-      if (!windows.length) return `<small>${workUsageLoading ? '讀取中…' : '暫無用量'}</small>`;
-      // Show the most constrained windows first; full account/window details stay available below.
-      windows.sort((a, b) => remainingPercentForWindow(a.win) - remainingPercentForWindow(b.win));
-      const meters = windows.slice(0, 2).map(({account, win}) => {
-        const remaining = remainingPercentForWindow(win);
-        const label = win.shortLabel || win.label || '額度';
-        const tone = remaining <= 10 ? 'danger' : remaining <= 25 ? 'warn' : 'ok';
-        const accessible = `${accounts.length > 1 ? (account.account || '帳號') + ' · ' : ''}${label} 剩 ${remaining}%`;
-        return `<span class="work-quota-meter" role="meter" aria-label="${escapeHtml(accessible)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${remaining}" title="${escapeHtml(accessible)}"><span class="work-quota-label">${escapeHtml(label)}</span><span class="work-quota-track" aria-hidden="true"><span class="work-quota-fill" data-tone="${tone}" style="width:${remaining}%"></span></span><span class="work-quota-value" aria-hidden="true">${remaining}%</span></span>`;
+      const accounts = workAccounts.filter(a => a.provider === provider && a.windows?.length);
+      if (!accounts.length) return `<small>${workUsageLoading ? '讀取中…' : '暫無用量'}</small>`;
+      const groups = accounts.map(account => {
+        const accountLabel = account.label || account.account || AGENT_LABELS[provider] || provider;
+        const meters = account.windows.map(win => {
+          const remaining = remainingPercentForWindow(win);
+          const label = provider === 'antigravity' ? win.label || win.shortLabel || '額度' : win.shortLabel || win.label || '額度';
+          const tone = usageToneForWindow(win);
+          const accessible = `${accountLabel} · ${win.label || label} 剩 ${remaining}%`;
+          return `<span class="work-quota-meter" role="meter" aria-label="${escapeHtml(accessible)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${remaining}" title="${escapeHtml(accessible)}"><span class="work-quota-label">${escapeHtml(label)}</span><span class="work-quota-track" aria-hidden="true"><span class="work-quota-fill" data-tone="${tone}" style="width:${remaining}%"></span></span><span class="work-quota-value" aria-hidden="true">${remaining}%</span></span>`;
+        }).join('');
+        return `<span class="work-quota-account">${accounts.length > 1 ? `<span class="work-quota-account-name" title="${escapeHtml(accountLabel)}">${escapeHtml(accountLabel)}</span>` : ''}${meters}${account.stale ? '<span class="work-quota-more">快取</span>' : ''}</span>`;
       }).join('');
-      const cached = accounts.some(a => a.stale || (a.observed_at && Date.now() / 1000 - a.observed_at > 120));
-      const note = [windows.length > 2 ? `+${windows.length - 2} 項` : '', cached ? '快取' : ''].filter(Boolean).join(' · ');
-      return `<span class="work-quota">${meters}${note ? `<span class="work-quota-more">${escapeHtml(note)}</span>` : ''}</span>`;
+      return `<span class="work-quota">${groups}</span>`;
     }
     function renderWorkLaunches(preferred) {
       const select = document.getElementById('work-launch');
@@ -3321,6 +3361,7 @@
         }
       } catch (_) { /* storage unavailable */ }
     }
+    let usageHost = '';
     let usageByProvider = new Map();
     let usageFetchedAt = new Map();
     let usageUpdatedAt = 0;
@@ -3902,6 +3943,7 @@
         return `<div class="usage-card" data-usage-provider="${escapeHtml(acc.provider)}" data-usage-account="${escapeHtml(acc.account || acc.label)}">` +
           `<div class="usage-card-head">` +
             `<span class="usage-card-id" title="${escapeHtml(`${providerName} · ${acc.account || acctLabel}`)}">${badge}<span>${escapeHtml(acctLabel)}</span></span>` +
+            (acc.stale ? '<span class="usage-plan">快取</span>' : '') +
             (acc.plan ? `<span class="usage-plan">${escapeHtml(acc.plan)}</span>` : '') +
           `</div>` +
           winsHtml +
@@ -3923,30 +3965,22 @@
     }
     function renderUsage(data, { persist = true } = {}) {
       if (!data || !Array.isArray(data.accounts)) return;
-      const providers = Array.isArray(data.providers) && data.providers.length
-        ? data.providers
-        : [...new Set(data.accounts.map(a => a && a.provider).filter(Boolean))];
-      const grouped = new Map(providers.map(p => [p, []]));
-      for (const acc of data.accounts) {
-        if (!acc || !acc.provider) continue;
-        if (!grouped.has(acc.provider)) grouped.set(acc.provider, []);
-        grouped.get(acc.provider).push(acc);
+      const host = data.host || usageHost || (!serverInfo?.fleet_only && serverInfo?.host) || '';
+      const receivedAt = persist ? Date.now() : (Number(data.updated_at) || 0) * 1000;
+      if (host) {
+        primeHomepageUsageCache(host);
+        usageHost = host;
+        cacheWorkUsage(data, host, receivedAt);
+        syncHomepageUsageCache(host, persist);
+        return;
       }
-      const now = Date.now();
-      for (const [p, list] of grouped.entries()) {
-        usageByProvider.set(p, list);
-        usageFetchedAt.set(p, now);
+      // Legacy saved data has no host identity; bind it only after server info is known.
+      const providers = data.providers?.length ? data.providers : [...new Set(data.accounts.map(a => a.provider))];
+      for (const provider of providers) {
+        usageByProvider.set(provider, data.accounts.filter(a => a.provider === provider));
+        usageFetchedAt.set(provider, receivedAt);
       }
-      if (Number.isFinite(data.updated_at) && data.updated_at > 0) {
-        usageUpdatedAt = data.updated_at;
-      } else {
-        usageUpdatedAt = Math.floor(now / 1000);
-      }
-      cacheWorkUsage(data, '', persist ? Date.now() : (Number(data.updated_at) || 0) * 1000);
-      if (persist) saveUsageCache({...data, providers: [...usageByProvider.keys()], accounts: [...usageByProvider.values()].flat()});
-      if (workOpen && data.host && document.getElementById('work-host').value === data.host) {
-        workAccounts = cachedWorkAccounts(data.host); renderWorkAgents();
-      }
+      usageUpdatedAt = Number(data.updated_at) || 0;
       renderAgentUsage();
     }
     async function syncAgentUsage({ force = false } = {}) {
@@ -6415,6 +6449,7 @@
         const data = await response.json();
         if (!response.ok || !data.ok) throw new Error('server info unavailable');
         serverInfo = data;
+        if (!data.fleet_only && data.host) { primeHomepageUsageCache(data.host); syncHomepageUsageCache(data.host); }
         infoFailed = false;
       } catch (_) {
         // Keep the last good snapshot on a transient failure; only a first failure is shown.
