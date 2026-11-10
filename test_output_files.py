@@ -63,6 +63,34 @@ class OutputFileTests(unittest.TestCase):
         text = ' '.join(f'`{p}`' for p in (directory, missing, link, fifo, self.file))
         self.assertEqual(a.readable_output_files(text), [str(self.file)])
 
+    def test_fragment_references_authorize_only_the_source_file(self):
+        self.text = f'[流程圖](<{self.file}#flow>)'
+        self.assertEqual(a.output_file_paths(self.text), [str(self.file)])
+        self.assertEqual(a.readable_output_files(self.text), [str(self.file)])
+        self.assertEqual(a.output_file_response(self.query())[0], 200)
+        self.assertEqual(a.output_file_response(self.query(path='/etc/passwd'))[0], 403)
+
+    def test_old_fragment_url_redirects_and_preserves_download(self):
+        self.text = f'[流程圖](<{self.file}#flow>)'
+        url = self.serve() + urlencode({
+            key: values[0] for key, values in self.query(path=str(self.file) + '#flow', download='1').items()})
+        with urlopen(url) as response:
+            parsed = urlparse(response.url)
+            self.assertEqual(parse_qs(parsed.query)['path'], [str(self.file)])
+            self.assertEqual(parsed.fragment, 'flow')
+            self.assertEqual(response.read(), self.file.read_bytes())
+            self.assertTrue(response.headers['Content-Disposition'].startswith('attachment;'))
+
+    def test_literal_hash_filenames_are_not_redirected_or_truncated(self):
+        self.file = Path(self.tmp.name) / 'report#draft.html'
+        self.file.write_text('literal hash')
+        for reference in (f'`{self.file}`', self.file.as_uri()):
+            self.text = f'[report]({reference})' if reference.startswith('file:') else reference
+            self.assertEqual(a.output_file_paths(self.text), [str(self.file)])
+            code, body, headers = a.output_file_response(self.query())
+            self.assertEqual((code, body), (200, b'literal hash'))
+            self.assertNotIn('Location', headers)
+
     def test_preview_shell_escapes_titles_and_preserves_authorized_source_query(self):
         page = a.output_preview_page(self.query(path='/tmp/<script>alert(1).md', host='peer')).decode()
         self.assertIn('&lt;script&gt;', page)

@@ -4227,14 +4227,13 @@
           const paths = fileContext ? outputFilePaths(raw) : [];
           const html = marked.parse(raw, { async: false, walkTokens(token) {
             if (token.type !== 'link' || !fileContext) return;
-            let path = token.href || '';
-            if (path.startsWith('file:///')) {
-              try { path = decodeURIComponent(path.slice(7)); } catch (_) { return; }
-            }
+            const reference = outputFileReference(token.href || '');
+            if (!reference) return;
+            const { path, fragment } = reference;
             // App routes and ordinary web links keep their original destinations.
             if (/^\/(?:api|icons)\//.test(path) || !paths.includes(path)) return;
             const url = outputFilePreviewUrl(path, fileContext.agent, fileContext.text);
-            if (url) token.href = url;
+            if (url) token.href = url + fragment;
           } });
           return DOMPurify.sanitize(html, {
             USE_PROFILES: { html: true },
@@ -4265,21 +4264,31 @@
       return `<div class="preview">${earlier}${latest}${
         agentLine ? previewLineHtml('agent', agentLine, target('agent', 0), openFull, fileContext) : ''}</div>`;
     }
+    function outputFileReference(destination, literal = false) {
+      // The browser owns the fragment; only the path goes to the source host.
+      const index = literal ? -1 : destination.indexOf('#');
+      let path = index < 0 ? destination : destination.slice(0, index);
+      const fragment = index < 0 ? '' : destination.slice(index);
+      if (path.startsWith('file:///')) {
+        try { path = decodeURIComponent(path.slice(7)); } catch (_) { return null; }
+      }
+      return { path, fragment };
+    }
     function outputFilePaths(text) {
       const candidates = [];
       let rest = String(text || '').replace(/\[[^\]\n]*\]\((?:<([^>\n]+)>|((?:\\[^\n]|[^)\\\n])+))\)/g, (_, angle, plain) => {
         const destination = angle || plain.trim().replace(/\s+(?:"[^"\n]*"|'[^'\n]*')$/, '');
         const path = destination.replace(/\\([!-\/:-@\[-`{-~])/g, '$1');
-        if (path.startsWith('/') || path.startsWith('file:///')) candidates.push(path);
+        if (path.startsWith('/') || path.startsWith('file:///')) candidates.push([path, false]);
         return ' ';
       });
-      rest = rest.replace(/`([^`\n]+)`/g, (_, path) => { candidates.push(path); return ' '; });
-      for (const match of rest.matchAll(/(?<![\w:/])\/[^\s`<>"'()\[\]，。；：！？]+/g)) candidates.push(match[0]);
+      rest = rest.replace(/`([^`\n]+)`/g, (_, path) => { candidates.push([path, true]); return ' '; });
+      for (const match of rest.matchAll(/(?<![\w:/])\/[^\s`<>"'()\[\]，。；：！？]+/g)) candidates.push([match[0], false]);
       const paths = [];
-      for (let path of candidates) {
-        if (path.startsWith('file:///')) {
-          try { path = decodeURIComponent(path.slice(7)); } catch (_) { continue; }
-        }
+      for (const [candidate, literal] of candidates) {
+        const reference = outputFileReference(candidate, literal);
+        if (!reference) continue;
+        let path = reference.path;
         path = path.replace(/[.,;!?:，。；：！？]+$/, '');
         if (path.startsWith('/') && !path.startsWith('//') && path.slice(1).includes('/')
           && !path.includes('\0') && !path.split('/').includes('..') && !paths.includes(path)) paths.push(path);

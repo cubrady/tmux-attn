@@ -5911,18 +5911,20 @@ def output_file_paths(text):
         destination = match[1] or re.sub(r'''\s+(?:"[^"\n]*"|'[^'\n]*')$''', '', match[2].strip())
         candidate = re.sub(r'\\([!-/:-@\[-`{-~])', r'\1', destination)
         if candidate.startswith(('/', 'file:///')):
-            candidates.append(candidate)
+            candidates.append((candidate, False))
         return ' '
 
     def code(match):
-        candidates.append(match[1])
+        candidates.append((match[1], True))
         return ' '
 
     rest = re.sub(r'\[[^\]\n]*\]\((?:<([^>\n]+)>|((?:\\[^\n]|[^)\\\n])+))\)', link, text)
     rest = re.sub(r'`([^`\n]+)`', code, rest)
-    candidates.extend(re.findall(r'(?<![\w:/])/(?:[^\s`<>"\'()\[\]，。；：！？]+)', rest))
+    candidates.extend((path, False) for path in re.findall(r'(?<![\w:/])/(?:[^\s`<>"\'()\[\]，。；：！？]+)', rest))
     paths = []
-    for candidate in candidates:
+    for candidate, literal in candidates:
+        if not literal:
+            candidate = candidate.split('#', 1)[0]
         if candidate.startswith('file:///'):
             candidate = unquote(candidate[7:])
         candidate = candidate.rstrip('.,;!?:，。；：！？')
@@ -6024,7 +6026,15 @@ def output_file_response(query, fleet_only=False):
             message, error = full_message_for_pane(con, pane, pid, 'agent', 0, sig)
         if error:
             return 409, b'Agent conversation unavailable; refresh and retry', {}
-        if path not in output_file_paths(message['text']):
+        allowed_paths = output_file_paths(message['text'])
+        if path not in allowed_paths:
+            source_path, separator, fragment = path.partition('#')
+            if separator and source_path in allowed_paths:
+                # Repair old links after authorization; literal # filenames win.
+                params = {**query, 'path': [source_path]}
+                return 302, b'', {
+                    'Location': '/api/output-file?' + urlencode(params, doseq=True)
+                        + '#' + quote(fragment, safe='/?:@-._~!$&\'()*+,;=%')}
             return 403, b'File is not referenced in the current agent reply', {}
         # Nonblocking open prevents devices/FIFOs holding a web worker indefinitely.
         descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)

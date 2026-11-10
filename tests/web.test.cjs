@@ -3368,6 +3368,27 @@ test('web links, app routes, anchors and protocol-relative links keep their dest
   }
 });
 
+test('output file fragments stay on the browser URL and never enter the authorized file path', () => {
+  const ui = markdownLinkDashboard();
+  const raw = '[流程圖](/Users/dev/report.html#flow) [text](file:///home/me/a%20b.md#section)';
+  const current = agent('peer-b', 'IDLE');
+  const html = ui.context.renderMarkdown(raw, { agent: current, text: raw });
+  assert.deepEqual(Array.from(ui.context.outputFilePaths(raw)), ['/Users/dev/report.html', '/home/me/a b.md']);
+  const links = Array.from(html.matchAll(/href="([^"]+)"/g), match => new URL(match[1], 'http://dashboard'));
+  assert.equal(links[0].searchParams.get('path'), '/Users/dev/report.html');
+  assert.equal(links[0].hash, '#flow');
+  assert.equal(links[0].searchParams.get('sig'), raw);
+  assert.equal(links[1].pathname, '/api/output-preview');
+  assert.equal(links[1].searchParams.get('path'), '/home/me/a b.md');
+  assert.equal(links[1].hash, '#section');
+  assert.deepEqual(Array.from(ui.context.outputFilePaths('`/tmp/report#draft.html` [report](file:///tmp/report%23draft.html)')), ['/tmp/report#draft.html']);
+  const literal = ui.context.renderMarkdown('[report](file:///tmp/report%23draft.html)', { agent: current, text: raw });
+  assert.equal(new URL(literal.match(/href="([^"]+)"/)[1], 'http://dashboard').searchParams.get('path'), '/tmp/report#draft.html');
+  const files = ui.context.outputFilesHtml(raw, current, ['/Users/dev/report.html']);
+  assert.ok(files.includes('輸出檔案'));
+  assert.ok(files.includes('path=' + encodeURIComponent('/Users/dev/report.html') + '&amp;sig='));
+});
+
 test('sheet summaries, full replies and reader route original agent links without changing user links', () => {
   const ui = markdownLinkDashboard();
   const text = '[report](/Users/dev/report.html)';
