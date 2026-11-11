@@ -141,6 +141,22 @@ class OutputFileTests(unittest.TestCase):
         with patch.object(a, 'MAX_OUTPUT_FILE_BYTES', 4):
             self.assertEqual(a.output_file_response(self.query())[0], 413)
 
+    def test_large_output_local_and_peer_and_oversized_rejection(self):
+        with self.file.open('wb') as handle:
+            handle.truncate(33 * 1024 * 1024)
+        self.assertEqual(a.readable_output_files(self.text), [str(self.file)])
+        self.assertEqual(a.output_file_response(self.query())[0], 200)
+        url = self.serve()
+        with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': url.split('/api/')[0]}]):
+            code, body, _ = a.output_file_response(self.query(host='peer'))
+        self.assertEqual(code, 200)
+        self.assertEqual(len(body), 33 * 1024 * 1024)
+        with self.file.open('wb') as handle:
+            handle.truncate(256 * 1024 * 1024 + 1)
+        self.assertEqual(a.readable_output_files(self.text), [])
+        code, body, _ = a.output_file_response(self.query())
+        self.assertEqual((code, body), (413, b'File too large (limit: 256 MiB)'))
+
     def test_fifo_cannot_block_worker(self):
         self.file.unlink()
         os.mkfifo(self.file)

@@ -5900,7 +5900,7 @@ def dispatch_message(payload):
     return 200, {'ok': True, 'pane': pane, 'pid': pid, 'host': local, **message}
 
 
-MAX_OUTPUT_FILE_BYTES = 32 * 1024 * 1024
+MAX_OUTPUT_FILE_BYTES = 256 * 1024 * 1024
 
 
 def output_file_paths(text):
@@ -6004,7 +6004,7 @@ def output_file_response(query, fleet_only=False):
             with urlopen(Request(url), timeout=PEER_UPLOAD_TIMEOUT) as response:
                 data = response.read(MAX_OUTPUT_FILE_BYTES + 1)
                 if len(data) > MAX_OUTPUT_FILE_BYTES:
-                    return 413, b'File too large (limit: 32 MiB)', {}
+                    return 413, b'File too large (limit: 256 MiB)', {}
                 headers = {key: response.headers[key] for key in (
                     'Content-Type', 'Content-Disposition', 'Content-Security-Policy',
                     'X-Content-Type-Options', 'Referrer-Policy') if key in response.headers}
@@ -6043,10 +6043,10 @@ def output_file_response(query, fleet_only=False):
             if not stat.S_ISREG(info.st_mode):
                 return 403, b'Only regular files can be opened', {}
             if info.st_size > MAX_OUTPUT_FILE_BYTES:
-                return 413, b'File too large (limit: 32 MiB)', {}
+                return 413, b'File too large (limit: 256 MiB)', {}
             data = handle.read(MAX_OUTPUT_FILE_BYTES + 1)
         if len(data) > MAX_OUTPUT_FILE_BYTES:
-            return 413, b'File too large (limit: 32 MiB)', {}
+            return 413, b'File too large (limit: 256 MiB)', {}
     except FileNotFoundError:
         return 404, b'File no longer exists on the source host', {}
     except OSError:
