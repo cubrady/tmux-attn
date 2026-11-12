@@ -23,10 +23,18 @@ class UsageSnapshotTests(unittest.TestCase):
                      patch.object(a, '_USAGE_REFRESHING', set()),
                      patch.object(a, '_USAGE_REFRESH_ATTEMPTS', {}),
                      patch.object(a, '_USAGE_SNAPSHOT_SOURCES', {}),
-                     patch.object(a, '_USAGE_DISK_READ', {})):
+                     patch.object(a, '_USAGE_DISK_READ', {}),
+                     patch.object(a, '_CODEXBAR_WIDGETS', a.CodexbarWidgetCache())):
             mock.start()
             self.addCleanup(mock.stop)
         self.now = float(int(time.time()))
+
+    def wait_widgets(self, cache=None):
+        cache = cache or a._CODEXBAR_WIDGETS
+        deadline = time.monotonic() + 4
+        while cache.active and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertFalse(cache.active)
 
     def row(self, provider='codex', observed=None):
         return {'provider': provider, 'account': provider, 'label': provider,
@@ -88,6 +96,8 @@ class UsageSnapshotTests(unittest.TestCase):
                  'primary': {'usedPercent': 25, 'windowMinutes': 300}},
                 {'provider': 'antigravity', 'updatedAt': iso(self.now - 60),
                  'primary': {'usedPercent': 10, 'windowMinutes': 10080}}]}))
+        a._CODEXBAR_WIDGETS.get(self.root / 'home')
+        self.wait_widgets()
         rows = a.codexbar_snapshot_accounts(now=self.now)
         self.assertNotIn('claude', rows)
         self.assertEqual(rows['antigravity'][0]['observed_at'], self.now - 60)
@@ -96,6 +106,43 @@ class UsageSnapshotTests(unittest.TestCase):
         thread.assert_called_once()
         self.assertEqual(result['provider_status']['antigravity']['source'], 'codexbar-cache')
         self.assertEqual(result['provider_status']['antigravity']['state'], 'refreshing')
+
+    def test_blocked_widget_open_cannot_hold_quota_lock_or_hide_codex_export(self):
+        folder = self.root / 'home/Library/Group Containers/example.com.steipete.codexbar'
+        folder.mkdir(parents=True)
+        os.mkfifo(folder / 'widget-snapshot.json')
+        codex = self.root / 'home/Library/Application Support/CodexBar'
+        codex.mkdir(parents=True)
+        (codex / 'codex-account-snapshots.json').write_text(json.dumps({'records': [
+            {'snapshot': {'updatedAt': self.now - 978307200,
+                          'primary': {'usedPercent': 20, 'windowMinutes': 300}}}]}))
+        cache = a._CODEXBAR_WIDGETS
+        cache.timeout = .5
+        with patch.object(a, '_fetch_provider_usage', return_value=[]):
+            started = time.monotonic()
+            result = a.usage_snapshot_payload(['codex'], now=self.now)
+            self.assertLess(time.monotonic() - started, .25)
+            self.assertEqual(result['accounts'][0]['windows'][0]['usedPercent'], 20)
+            self.wait_widgets()
+            self.assertFalse(cache.cache)  # The blocked worker timed out without a result.
+            with patch.object(cache, '_command') as launch:
+                for _ in range(5):
+                    result = a.usage_snapshot_payload(['codex'], now=self.now)
+                launch.assert_not_called()  # Cooldown prevents a process per HTTP request.
+            self.assertEqual(result['accounts'][0]['source'], 'codexbar-cache')
+
+    def test_widget_failure_preserves_last_good_sample_and_worker_capacity(self):
+        cache = a.CodexbarWidgetCache(timeout=.2, max_workers=1)
+        home = str(self.root / 'home')
+        sample = [{'entries': []}]
+        cache.cache[home] = sample
+        with patch.object(cache, '_command', return_value=[a.sys.executable, '-c', 'import time; time.sleep(30)']) as launch:
+            self.assertEqual(cache.get(home), sample)
+            for _ in range(10):
+                self.assertEqual(cache.get(home), sample)
+            self.wait_widgets(cache)
+            self.assertEqual(cache.get(home), sample)
+            self.assertEqual(launch.call_count, 1)
 
     def test_codex_swift_dates_and_expired_account_are_handled_independently(self):
         folder = self.root / 'home/Library/Application Support/CodexBar'
@@ -218,6 +265,7 @@ class UsageSnapshotTests(unittest.TestCase):
         self.assertEqual(a._USAGE_REFRESH_ATTEMPTS['codex'], self.now + 31)
         with patch.object(a.threading, 'Thread') as thread:
             result = a.usage_snapshot_payload(['codex'], now=self.now + 34)
-        thread.assert_not_called()
+        self.assertFalse(any(call.kwargs.get('target') is a._refresh_usage_snapshot
+                             for call in thread.call_args_list))
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(result['provider_status']['codex']['state'], 'unavailable')

@@ -3422,6 +3422,10 @@
     let usageUpdatedAt = 0;
     let usageExpanded = false;
     let usageRefreshing = false;
+    let usageSettled = false;
+    const usageProviderStatus = new Map();
+    let usagePollTimer = null;
+    let usagePollAttempts = 0;
     let usageReqSeq = 0;
     let agentFilter = readAgentFilter();
     const NOTIFY_STORE = 'tmux-attn:notify';
@@ -3915,7 +3919,7 @@
         }
       }
       if (!accounts.length) {
-        if (usageRefreshing || !usageFetchedAt.size) {
+        if (!usageSettled) {
           box.hidden = false;
           let skelPanelHtml = '';
           if (usageExpanded) {
@@ -3933,8 +3937,9 @@
           if (box.innerHTML !== skelMarkup) box.innerHTML = skelMarkup;
           return;
         }
-        box.hidden = true;
-        box.innerHTML = '';
+        box.hidden = false;
+        const pending = usagePollAttempts < 10 && providers.some(p => usageProviderStatus.get(p)?.state === 'refreshing');
+        box.innerHTML = `<div class="usage-bar-head"><span class="usage-panel-title">${pending ? '更新用量中…' : '暫時無法讀取用量'}</span><button type="button" class="usage-refresh" data-usage-refresh${usageRefreshing ? ' disabled' : ''}>${usageRefreshing ? '更新中…' : '重試'}</button></div>`;
         return;
       }
       box.hidden = false;
@@ -4020,6 +4025,9 @@
     }
     function renderUsage(data, { persist = true } = {}) {
       if (!data || !Array.isArray(data.accounts)) return;
+      usageSettled = true;
+      for (const provider of data.providers || []) usageProviderStatus.delete(provider);
+      for (const [provider, status] of Object.entries(data.provider_status || {})) usageProviderStatus.set(provider, status);
       const host = data.host || usageHost || (!serverInfo?.fleet_only && serverInfo?.host) || '';
       const receivedAt = persist ? Date.now() : (Number(data.updated_at) || 0) * 1000;
       if (host) {
@@ -4038,20 +4046,24 @@
       usageUpdatedAt = Number(data.updated_at) || 0;
       renderAgentUsage();
     }
-    async function syncAgentUsage({ force = false } = {}) {
+    async function syncAgentUsage({ force = false, poll = false } = {}) {
       const providers = activeUsageProviders();
       if (!providers.length) return;
       const now = Date.now();
       const needed = force
         ? providers
-        : providers.filter(p => !usageFetchedAt.has(p) || (now - (usageFetchedAt.get(p) || 0)) >= USAGE_POLL_MS);
+        : providers.filter(p => poll ? usageProviderStatus.get(p)?.state === 'refreshing'
+          : !usageFetchedAt.has(p) || (now - (usageFetchedAt.get(p) || 0)) >= USAGE_POLL_MS);
       if (!needed.length || (usageRefreshing && !force)) return;
+      clearTimeout(usagePollTimer);
+      if (!poll) usagePollAttempts = 0;
+      else usagePollAttempts++;
       const seq = ++usageReqSeq;
       usageRefreshing = true;
       renderAgentUsage();
       const url = `/api/usage?providers=${encodeURIComponent(needed.join(','))}${force ? '&refresh=1' : ''}`;
       try {
-        const res = await fetch(url, { cache: 'no-store' });
+        const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(25000) });
         if (!res || !res.ok) return;
         const data = await res.json();
         if (seq !== usageReqSeq || !data || !data.ok) return;
@@ -4061,7 +4073,13 @@
       } finally {
         if (seq === usageReqSeq) {
           usageRefreshing = false;
+          usageSettled = true;
           renderAgentUsage();
+          // Background quota collectors finish after the immediate snapshot response.
+          // Check briefly without forcing a new collection on every request.
+          if (usagePollAttempts < 10 && activeUsageProviders().some(p => usageProviderStatus.get(p)?.state === 'refreshing')) {
+            usagePollTimer = setTimeout(() => syncAgentUsage({ poll: true }), 3000);
+          }
         }
       }
     }

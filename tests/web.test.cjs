@@ -4073,6 +4073,91 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.match(box.innerHTML, /class="usage-toggle tone-danger"[^>]*aria-expanded="false"/);
 });
 
+test('quota failures and unavailable snapshots finish loading and let the user retry', async () => {
+  for (const failure of [
+    async () => ({ok: false, status: 500}),
+    async () => { throw new Error('network unavailable'); },
+    async () => ({ok: true, json: async () => ({ok: true, host: 'local', providers: ['codex'], accounts: [], provider_status: {codex: {state: 'unavailable'}}})}),
+  ]) {
+    let retry = false;
+    const ui = dashboard({allowUsageFetch: true, fetchRequest: (...args) => retry
+      ? Promise.resolve({ok: true, json: async () => ({ok: true, host: 'local', providers: ['codex'], accounts: [{provider: 'codex', windows: [{label: 'Weekly', usedPercent: 25}]}]})})
+      : failure(...args)});
+    await ui.context.syncAgentUsage();
+    const box = ui.elements.get('agent-usage');
+    assert.doesNotMatch(box.innerHTML, /skel-usage-toggle/);
+    assert.match(box.innerHTML, /暫時無法讀取用量/);
+    assert.match(box.innerHTML, /data-usage-refresh>重試/);
+    retry = true;
+    box.listeners.click({target: {closest: selector => selector === '[data-usage-refresh]' ? {} : null}});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(box.innerHTML, /剩 75%/);
+  }
+});
+
+test('a stalled quota request has a deadline and releases the loading state when aborted', async () => {
+  const controller = new AbortController();
+  let deadline;
+  const ui = dashboard({allowUsageFetch: true,
+    globals: {AbortSignal: {timeout: ms => { deadline = ms; return controller.signal; }}},
+    fetchRequest: (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), {once: true});
+    }),
+  });
+  const request = ui.context.syncAgentUsage();
+  assert.equal(deadline, 25000);
+  assert.match(ui.elements.get('agent-usage').innerHTML, /skel-usage-toggle/);
+  controller.abort();
+  await request;
+  assert.doesNotMatch(ui.elements.get('agent-usage').innerHTML, /skel-usage-toggle/);
+  assert.match(ui.elements.get('agent-usage').innerHTML, /data-usage-refresh>重試/);
+});
+
+test('homepage polls an immediate refreshing snapshot and displays the completed quota', async () => {
+  const timers = [];
+  const calls = [];
+  const ui = dashboard({allowUsageFetch: true,
+    globals: {setTimeout: (callback, delay) => {if (delay === 3000) timers.push({callback, delay}); return timers.length;}},
+    fetchRequest: async url => {
+      calls.push(url);
+      return {ok: true, json: async () => ({ok: true, host: 'local', providers: ['codex'],
+        provider_status: {codex: {state: calls.length === 1 ? 'refreshing' : 'ready'}},
+        accounts: calls.length === 1 ? [] : [{provider: 'codex', windows: [{label: 'Weekly', usedPercent: 25}]}],
+      })};
+    },
+  });
+  vm.runInContext("agentFilter='codex'", ui.context);
+  await ui.context.syncAgentUsage();
+  assert.match(ui.elements.get('agent-usage').innerHTML, /更新用量中/);
+  assert.doesNotMatch(ui.elements.get('agent-usage').innerHTML, /skel-usage-toggle/);
+  await ui.context.syncAgentUsage();
+  assert.equal(calls.length, 1, 'normal refresh retains the existing cache cadence');
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 3000);
+  await timers[0].callback();
+  assert.equal(calls[1], '/api/usage?providers=codex');
+  assert.match(ui.elements.get('agent-usage').innerHTML, /剩 75%/);
+  assert.equal(timers.length, 1, 'ready snapshots stop the short poll');
+});
+
+test('homepage short quota polling is bounded when the collector remains refreshing', async () => {
+  const timers = [];
+  let calls = 0;
+  const ui = dashboard({allowUsageFetch: true,
+    globals: {setTimeout: (callback, delay) => {if (delay === 3000) timers.push(callback); return timers.length;}},
+    fetchRequest: async () => {
+      calls++;
+      return {ok: true, json: async () => ({ok: true, providers: ['codex'], accounts: [], provider_status: {codex: {state: 'refreshing'}}})};
+    },
+  });
+  await ui.context.syncAgentUsage();
+  for (let i = 0; i < timers.length && i < 20; i++) await timers[i]();
+  assert.equal(calls, 11);
+  assert.equal(timers.length, 10);
+  assert.doesNotMatch(ui.elements.get('agent-usage').innerHTML, /skel-usage-toggle/);
+  assert.match(ui.elements.get('agent-usage').innerHTML, /暫時無法讀取用量/);
+});
+
 test('untracked shell cards show last 3 lines and toggle inline up to 12 lines without opening the sheet', () => {
   const lines12 = Array.from({ length: 12 }, (_, i) => `2026-10-28T21:00:${String(i + 1).padStart(2, '0')} #<${i + 1}>`);
   const shell12 = {

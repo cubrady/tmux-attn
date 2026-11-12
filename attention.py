@@ -4468,6 +4468,73 @@ def _codexbar_snapshot_account(provider, usage, observed, account=''):
     return {**row, 'observed_at': observed} if row else None
 
 
+def _read_codexbar_widgets(home):
+    root = Path(home) / 'Library/Group Containers'
+    try:
+        paths = list(root.glob('*.com.steipete.codexbar/widget-snapshot.json'))[:5]
+    except OSError:
+        return []
+    return [widget for path in paths if (widget := _read_usage_json(path))]
+
+
+class CodexbarWidgetCache:
+    """Protected macOS exports may block in open(); keep that I/O out of HTTP."""
+
+    def __init__(self, timeout=1.5, ttl=30.0, max_workers=2):
+        self.timeout, self.ttl, self.max_workers = timeout, ttl, max_workers
+        self.lock = threading.Lock()
+        self.cache, self.active, self.retry_at = {}, set(), {}
+
+    def get(self, home):
+        key = str(home)
+        with self.lock:
+            if (key not in self.active and len(self.active) < self.max_workers
+                    and time.monotonic() >= self.retry_at.get(key, 0)):
+                self.active.add(key)
+                try:
+                    threading.Thread(target=self._refresh, args=(key,), daemon=True,
+                                     name='codexbar-widgets').start()
+                except RuntimeError:
+                    self.active.discard(key)
+                    self.retry_at[key] = time.monotonic() + self.ttl
+            return self.cache.get(key, [])
+
+    def _command(self, home):
+        return [sys.executable, str(ROOT / 'attention.py'), 'codexbar-widgets', home]
+
+    def _refresh(self, home):
+        proc = None
+        try:
+            proc = subprocess.Popen(self._command(home), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            output, _ = proc.communicate(timeout=self.timeout)
+            widgets = json.loads(output)
+            if proc.returncode or not isinstance(widgets, list) or not all(isinstance(w, dict) for w in widgets):
+                raise ValueError('invalid widget snapshot')
+            with self.lock:
+                self.cache[home] = widgets[:5]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass  # Retain previous samples; their source dates still bound validity.
+        finally:
+            with self.lock:
+                self.retry_at[home] = time.monotonic() + self.ttl
+            if proc is not None:
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                # A child stuck in kernel I/O retains its slot until actually reaped.
+                proc.wait()
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            with self.lock:
+                self.active.discard(home)
+
+
+_CODEXBAR_WIDGETS = CodexbarWidgetCache()
+
+
 def codexbar_snapshot_accounts(now=None, home=None):
     """Read only quota snapshot exports, never credential/config or cost-history files."""
     now = time.time() if now is None else float(now)
@@ -4484,13 +4551,7 @@ def codexbar_snapshot_accounts(now=None, home=None):
                 row = _codexbar_snapshot_account('codex', usage, at)
                 if row:
                     grouped.setdefault('codex', []).append(row)
-    root = home / 'Library/Group Containers'
-    try:
-        paths = list(root.glob('*.com.steipete.codexbar/widget-snapshot.json'))[:5]
-    except OSError:
-        paths = []
-    for path in paths:
-        widget = _read_usage_json(path)
+    for widget in _CODEXBAR_WIDGETS.get(home):
         if not widget or not isinstance(widget.get('entries'), list):
             continue
         for entry in widget['entries'][:100]:
@@ -7583,6 +7644,11 @@ def ensure_sidebars(target=None):
 
 
 def main():
+    if sys.argv[1:2] == ['codexbar-widgets'] and len(sys.argv) == 3:
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.alarm(2)
+        print(json.dumps(_read_codexbar_widgets(sys.argv[2])))
+        return
     if sys.argv[1:2] == ['auth-token'] and len(sys.argv) == 2:
         print(WebSecurity.from_environment().token)
         return
