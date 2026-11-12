@@ -4499,12 +4499,13 @@ test('Markdown and structured text preview routes retain raw download endpoints'
 
 test('new work selects last project agent and shares homepage quota on a remote host', async () => {
   const calls = [];
+  const observed = Date.now() / 1000;
   const ui = dashboard(async (url, options) => {
     calls.push([url, options]);
     if (url.startsWith('/api/work-options')) return {ok:true,json:async()=>({ok:true,host:'peer',default_agent:'codex',sessions:[{id:'$1',name:'main',attached:1,windows:2}],default_session:'$1',projects:[{path:'/project',agent:'claude',last_used:5,pinned:false}],agents:[{id:'codex',label:'Codex',available:true},{id:'claude',label:'Claude',available:true},{id:'pi',label:'Pi',available:false}]})};
-    return {ok:true,json:async()=>({ok:true,host:'local',accounts:[{provider:'claude',windows:[{label:'Weekly',usedPercent:32}]}]})};
+    return {ok:true,json:async()=>({ok:true,host:'local',accounts:[{provider:'claude',observed_at:observed,windows:[{label:'Weekly',usedPercent:32}]}]})};
   });
-  ui.renderUsage({host:'local',accounts:[{provider:'claude',windows:[{label:'Old sample',usedPercent:99}]}]});
+  ui.renderUsage({host:'local',accounts:[{provider:'claude',observed_at:observed-60,windows:[{label:'Old sample',usedPercent:99}]}]});
   vm.runInContext("workOpen=true;document.getElementById('work-host').value='peer';document.getElementById('work-path').value='/project'",ui.context);
   await ui.context.loadWorkOptions();
   assert.equal(vm.runInContext('workAgent',ui.context),'claude');

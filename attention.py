@@ -20,6 +20,7 @@ from pathlib import Path
 import secrets
 import shlex
 import shutil
+import signal
 import socket as socket_mod
 import sqlite3
 import ssl
@@ -3360,13 +3361,45 @@ def fleet_plan(include_local=True):
     return {'ok': True, 'hosts': hosts, 'version': install_version()}
 
 
+_AGENT_FEED_LOCK = threading.Lock()
+_AGENT_FEED_ACTIVE = {}
+_AGENT_FEED_LAST = {'last_success_at': None, 'last_duration_s': None, 'last_error': None}
+
+
+def local_agents_payload():
+    """Instrument the real feed separately from the process liveness check."""
+    token, started = object(), time.monotonic()
+    with _AGENT_FEED_LOCK:
+        _AGENT_FEED_ACTIVE[token] = started
+    try:
+        with closing(db()) as con:
+            payload = agents_payload(con)
+        remember_work_projects(payload.get('agents', []))
+        with _AGENT_FEED_LOCK:
+            _AGENT_FEED_LAST.update(last_success_at=time.time(), last_error=None)
+        return payload
+    except Exception as exc:
+        with _AGENT_FEED_LOCK:
+            _AGENT_FEED_LAST['last_error'] = type(exc).__name__
+        raise
+    finally:
+        with _AGENT_FEED_LOCK:
+            _AGENT_FEED_ACTIVE.pop(token, None)
+            _AGENT_FEED_LAST['last_duration_s'] = round(time.monotonic() - started, 3)
+
+
+def agent_feed_status():
+    now = time.monotonic()
+    with _AGENT_FEED_LOCK:
+        return {**_AGENT_FEED_LAST, 'active': len(_AGENT_FEED_ACTIVE),
+                'oldest_active_age_s': round(max((now - at for at in _AGENT_FEED_ACTIVE.values()), default=0), 3)}
+
+
 def _fleet_local_slice(now, stale_ttl):
     host = local_host_name()
     cache_key = ('local', host)
     try:
-        with closing(db()) as con:
-            local = agents_payload(con)
-        remember_work_projects(local.get('agents', []))
+        local = local_agents_payload()
         tagged, summary = tag_host(local, host)
         _remember_fleet_host(cache_key, now, tagged, summary)
         return {'name': host, 'ok': True, 'source': 'local', 'version': install_version()}, tagged, summary
@@ -4751,7 +4784,7 @@ def _project_candidates(root):
     return candidates
 
 
-def project_technology(path):
+def detect_project_technology(path):
     """Conservative, bounded manifest detection on the host that owns the cwd."""
     if not path or not Path(path).is_absolute():
         return ''
@@ -4776,6 +4809,115 @@ def project_technology(path):
         _PROJECT_TECH_CACHE.clear()
     _PROJECT_TECH_CACHE[path] = (now, result)
     return result
+
+
+_PROJECT_ICON_KEYS = frozenset((
+    '', 'android', 'react', 'nextjs', 'vue', 'nuxt', 'svelte', 'angular',
+    'flutter', 'react-native', 'python', 'cli', 'rust', 'go',
+))
+
+
+class ProjectIconCache:
+    """Optional filesystem enrichment never runs in an HTTP request thread."""
+
+    def __init__(self, timeout=1.0, max_workers=2, capacity=256, ttl=60.0, max_age=3600.0):
+        self.timeout, self.max_workers, self.capacity = timeout, max_workers, capacity
+        self.ttl, self.max_age = ttl, max_age
+        self.cache, self.active = {}, {}
+        self.lock = threading.Lock()
+        self.failures = 0
+        self.last_failure = None
+
+    @staticmethod
+    def enabled():
+        return os.environ.get('TMUX_ATTN_PROJECT_ICONS', '1').lower() not in ('0', 'false', 'off')
+
+    def get(self, path):
+        # Lexical validation only: even stat/resolve can hang on an unavailable volume.
+        if not self.enabled() or not isinstance(path, str) or not path or not Path(path).is_absolute():
+            return ''
+        now = time.monotonic()
+        with self.lock:
+            entry = self.cache.get(path)
+            value = entry['value'] if entry and now - entry['observed'] < self.max_age else ''
+            if (path in self.active or (entry and now < entry['retry_at'])
+                    or len(self.active) >= self.max_workers):
+                return value
+            if path not in self.cache and len(self.cache) >= self.capacity:
+                oldest = next((key for key in self.cache if key not in self.active), None)
+                if oldest is None:
+                    return value
+                del self.cache[oldest]
+            self.cache.setdefault(path, {'value': '', 'observed': 0, 'retry_at': 0})
+            self.active[path] = {'started': now, 'pid': None, 'timed_out': False}
+            try:
+                threading.Thread(target=self._refresh, args=(path,), daemon=True,
+                                 name='project-icon').start()
+            except RuntimeError:
+                del self.active[path]
+                self._failed(path, 'thread_start_failed')
+            return value
+
+    def _command(self, path):
+        return [sys.executable, str(ROOT / 'attention.py'), 'project-technology', path]
+
+    def _failed(self, path, error):
+        """Caller holds lock; preserve the previous successful observation."""
+        self.cache[path]['retry_at'] = time.monotonic() + self.ttl
+        self.failures += 1
+        self.last_failure = {'path': path, 'error': error, 'at': time.time()}
+
+    def _refresh(self, path):
+        proc = None
+        try:
+            proc = subprocess.Popen(self._command(path), cwd=str(ROOT), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            with self.lock:
+                self.active[path]['pid'] = proc.pid
+            output, _ = proc.communicate(timeout=self.timeout)
+            value = json.loads(output)
+            if proc.returncode or not isinstance(value, str) or value not in _PROJECT_ICON_KEYS:
+                raise ValueError('invalid detector result')
+            with self.lock:
+                now = time.monotonic()
+                self.cache[path] = {'value': value, 'observed': now, 'retry_at': now + self.ttl}
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            error = 'timeout' if isinstance(exc, subprocess.TimeoutExpired) else type(exc).__name__
+            with self.lock:
+                self._failed(path, error)
+                self.active[path]['timed_out'] = error == 'timeout'
+            sys.stderr.write(f'project icon: {error}: {path}\n')
+        finally:
+            if proc is not None:
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                # Publish failure first. A child stuck in kernel I/O keeps its slot
+                # until reaped, bounding both child processes and supervisor threads.
+                proc.wait()
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            with self.lock:
+                self.active.pop(path, None)
+
+    def status(self):
+        now = time.monotonic()
+        with self.lock:
+            return {'enabled': self.enabled(), 'cached': len(self.cache), 'active': len(self.active),
+                    'timed_out_active': sum(row['timed_out'] for row in self.active.values()),
+                    'oldest_active_age_s': round(max((now - row['started'] for row in self.active.values()),
+                                                    default=0), 3),
+                    'failures': self.failures,
+                    'last_failure': dict(self.last_failure) if self.last_failure else None}
+
+
+_PROJECT_ICONS = ProjectIconCache()
+
+
+def project_technology(path):
+    return _PROJECT_ICONS.get(path)
 
 
 def repo_name(path):
@@ -6892,6 +7034,8 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                     'started_version': STARTED_VERSION,
                     'update': local_update_status(),
                     'code_current': loaded_code_current(),
+                    'project_icons': _PROJECT_ICONS.status(),
+                    'agent_feed': agent_feed_status(),
                 }), 'application/json; charset=utf-8')
                 return
             if path == '/api/fleet/update-status':
@@ -6912,9 +7056,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
             if path == '/api/agents':
                 # Machine-local feed only — peer scrapers must use this path.
                 try:
-                    with closing(db()) as con:
-                        payload = {**agents_payload(con), 'version': install_version()}
-                    remember_work_projects(payload.get('agents', []))
+                    payload = {**local_agents_payload(), 'version': install_version()}
                     self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
                     sys.stderr.write(f'web /api/agents: {type(exc).__name__}: {exc}\n')
@@ -7098,6 +7240,13 @@ def ensure_sidebars(target=None):
 def main():
     if sys.argv[1:2] == ['update']:
         sys.exit(run_update(sys.argv[2:]))
+    if sys.argv[1:2] == ['project-technology'] and len(sys.argv) == 3:
+        # Only this isolated worker performs project-icon filesystem operations.
+        # An OS-delivered deadline also applies if the HTTP parent exits first.
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.alarm(2)
+        print(json.dumps(detect_project_technology(sys.argv[2])))
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=['event','sidebar','ensure','status','dump','next','focus','prune','observe','popup','inbox','status-clickable','cycle','web','viewed','install-view-hooks'])
     parser.add_argument('args', nargs='*')

@@ -259,7 +259,14 @@ HTML 使用隔離環境，可執行內嵌 JavaScript；不載入其他本地檔�
 sh install_web_service.sh --status
 ~/.local/bin/tmux-attn status
 curl -s http://127.0.0.1:7788/api/health
+curl --max-time 10 -s http://127.0.0.1:7788/api/agents
 ```
+
+`health.ok` 表示 web 程序存活；session feed 是否正常需另看 `/api/agents`，
+以及 health 的 `agent_feed` 最近成功時間、掃描耗時與進行中的請求。
+專案圖示由背景子程序偵測，逾時只會暫時缺少圖示，狀態在 health 的 `project_icons`。
+可在 web 服務環境設定 `TMUX_ATTN_PROJECT_ICONS=0` 並重啟以停用；
+快取、逾時與重試限制見 [專案圖示說明](docs/project-icons.md)。
 
 若 Codex 視窗只有專案名、沒有狀態 emoji，先跑 `tmux-attn status`，再用
 `tmux-attn dump` 確認 pane 是否已登記。status 刷新會自動恢復停止的 observer，

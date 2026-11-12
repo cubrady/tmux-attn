@@ -21,7 +21,13 @@ Keys: `android`, `react`, `nextjs`, `vue`, `nuxt`, `svelte`, `angular`, `flutter
 
 Collect independent candidates and return blank on unrelated conflicts. Related framework specificity wins (Next over React, Nuxt over Vue, SvelteKit shares Svelte). Workspace declarations or conservatively mixed apps/services/packages directories suppress root inference; nearest valid child can still be identified.
 
-Read regular files only; cap each manifest at 64KiB and reject oversized/truncated content. Cap any directory listing (128 entries) and ancestor lookup (8 levels); no recursive repo scanning or executed project code. Cache results for at most 60 seconds with a bounded cache (256 entries).
+Read regular files only; cap each manifest at 64KiB and reject oversized/truncated content. Cap any directory listing (128 entries) and ancestor lookup (8 levels); no recursive repo scanning or executed project code.
+
+HTTP requests only read an in-memory cache: no project-icon filesystem operations, including `stat` or `resolve`, run in the request thread. A cold miss returns no icon and schedules background detection. Cache successful results for 60 seconds, with at most 256 entries. Refresh failure preserves the previous result for at most one hour; an expired result displays no icon. Failures retry after a 60-second cooldown, and concurrent requests for one path share the same job.
+
+At most two detector subprocesses run per server, supervised by daemon threads. The parent allows one second for child execution, then publishes failure and kills the child. A child also has a two-second OS alarm so it terminates if the parent exits first. A timed-out child retains its worker slot until reaped; unavailable storage must not cause unlimited child or thread creation. Detection remains optional: its failure never removes a session from the feed.
+
+Set `TMUX_ATTN_PROJECT_ICONS=0` in the web service environment and restart it to disable detection. This disables icons only; it does not grant or change macOS filesystem permissions. `/api/health` exposes `project_icons` (active jobs, failures, last failed path/reason, timed-out jobs still waiting for reaping) and `agent_feed` (last successful feed time, last scan duration/error, active scans and oldest scan age). The health `ok` flag still denotes process liveness; monitor the actual `/api/agents` response and feed timestamps separately. No recent request is not itself a failure.
 
 Stop ancestry on existence, not readable contents: package.json, pyproject.toml, requirements.txt, Cargo.toml, go.mod, pubspec.yaml, Gradle build/settings, pnpm-workspace.yaml, workspace markers, or .git (including worktree files). Empty/malformed/unreadable/unsupported child manifests may not borrow parent technology. At a child module resolving Gradle aliases, read ancestor catalogs only within its nearest repository and bounded lookup; do not cross nested repository boundaries.
 

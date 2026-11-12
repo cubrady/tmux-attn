@@ -29,7 +29,7 @@ class ProjectTechnologyTests(unittest.TestCase):
         }))
 
     def detect(self, suffix=''):
-        return a.project_technology(str(self.root / suffix))
+        return a.detect_project_technology(str(self.root / suffix))
 
     def test_android_applied_plugins_and_nested_cwd(self):
         for plugin in ('application', 'library'):
@@ -249,8 +249,8 @@ class ProjectTechnologyTests(unittest.TestCase):
         self.assertEqual(a._project_read(self.root), '')
 
     def test_bounded_iteration_ancestry_and_cache(self):
-        self.assertEqual(a.project_technology(''), '')
-        self.assertEqual(a.project_technology('relative'), '')
+        self.assertEqual(a.detect_project_technology(''), '')
+        self.assertEqual(a.detect_project_technology('relative'), '')
         self.package(bin='cli.js')
         self.assertEqual(self.detect(), 'cli')
         (self.root / 'package.json').write_text('{}')
@@ -262,7 +262,7 @@ class ProjectTechnologyTests(unittest.TestCase):
         self.package(bin='cli.js')
         self.assertEqual(self.detect(deep), '')
         for index in range(260):
-            a.project_technology(str(self.root / f'missing{index}'))
+            a.detect_project_technology(str(self.root / f'missing{index}'))
         self.assertLessEqual(len(a._PROJECT_TECH_CACHE), 256)
         for index in range(129):
             self.write(f'many/file{index}')
@@ -282,7 +282,8 @@ class ProjectTechnologyTests(unittest.TestCase):
                 patch.object(a, 'shell_pane_preview', return_value={}), \
                 patch.object(a, 'pane_conversation_preview', return_value={}), \
                 patch.object(a, 'pane_model', return_value=('', '')), \
-                patch.object(a, 'pane_tasks', return_value=None):
+                patch.object(a, 'pane_tasks', return_value=None), \
+                patch.object(a, 'project_technology', side_effect=a.detect_project_technology):
             con = a.db()
             try:
                 a.record(con, 'socket', '%1', '123', 'codex', 'WAIT', 'Approval')
