@@ -9,6 +9,7 @@ from unittest.mock import patch
 from urllib.request import urlopen
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 class InstallInfoTests(unittest.TestCase):
@@ -43,7 +44,7 @@ class VersionApiTests(unittest.TestCase):
             self.addCleanup(target.stop)
 
     def serve(self, **kwargs):
-        class Quiet(a.make_web_handler(**kwargs)):
+        class Quiet(domain_web_handler(app=a, **kwargs)):
             def log_message(self, format, *args):
                 pass
 

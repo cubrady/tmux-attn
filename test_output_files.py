@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 class OutputFileTests(unittest.TestCase):
@@ -32,7 +33,7 @@ class OutputFileTests(unittest.TestCase):
             'pane': '%1', 'pid': '123', 'path': str(self.file), **overrides}.items()}
 
     def serve(self):
-        class Quiet(a.make_web_handler()):
+        class Quiet(domain_web_handler(app=a)):
             def log_message(self, *_args):
                 pass
         server = a.ThreadingHTTPServer(('127.0.0.1', 0), Quiet)
@@ -147,7 +148,7 @@ class OutputFileTests(unittest.TestCase):
         self.assertEqual(a.readable_output_files(self.text), [str(self.file)])
         self.assertEqual(a.output_file_response(self.query())[0], 200)
         url = self.serve()
-        with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': url.split('/api/')[0]}]):
+        with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': url.split('/api/')[0], 'token': 't' * 43}]):
             code, body, _ = a.output_file_response(self.query(host='peer'))
         self.assertEqual(code, 200)
         self.assertEqual(len(body), 33 * 1024 * 1024)
@@ -174,18 +175,55 @@ class OutputFileTests(unittest.TestCase):
 
     def test_peer_forwarding_preserves_signature_and_drops_host(self):
         url = self.serve()
-        with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': url.split('/api/')[0]}]):
+        with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': url.split('/api/')[0], 'token': 't' * 43}]):
             # Real HTTP roundtrip through the peer endpoint, not a mocked response.
             code, body, headers = a.output_file_response(self.query(host='peer', sig='完成：'))
         self.assertEqual(code, 200)
         self.assertEqual(body, b'<h1>First</h1>')
         self.assertIn('sandbox', headers['Content-Security-Policy'])
 
+    def test_peer_legacy_fragment_redirect_is_rewritten_through_hub_with_download(self):
+        self.text = f'[流程圖](<{self.file}#flow>)'
+        url = self.serve()
+        with patch.object(a, 'load_peers', return_value=[{
+                'name': 'peer', 'url': url.split('/api/')[0], 'token': 't' * 43}]):
+            code, _, headers = a.output_file_response(self.query(host='peer', path=str(self.file) + '#flow', download='1'))
+            self.assertEqual(code, 302)
+            target = urlparse(headers['Location'])
+            self.assertEqual((target.scheme, target.netloc, target.path, target.fragment),
+                             ('', '', '/api/output-file', 'flow'))
+            params = parse_qs(target.query)
+            self.assertEqual(params['host'], ['peer'])
+            self.assertEqual(params['path'], [str(self.file)])
+            self.assertEqual(params['download'], ['1'])
+            with urlopen(url.split('/api/')[0] + headers['Location']) as response:
+                self.assertEqual(response.read(), b'<h1>First</h1>')
+                self.assertIn('attachment', response.headers['Content-Disposition'])
+
+    def test_peer_literal_hash_filename_does_not_become_a_fragment(self):
+        self.file = Path(self.tmp.name) / 'literal#flow.html'
+        self.file.write_text('literal hash')
+        self.text = f'`{self.file}`'
+        url = self.serve()
+        with patch.object(a, 'load_peers', return_value=[{
+                'name': 'peer', 'url': url.split('/api/')[0], 'token': 't' * 43}]):
+            code, body, headers = a.output_file_response(self.query(host='peer'))
+        self.assertEqual((code, body), (200, b'literal hash'))
+        self.assertNotIn('Location', headers)
+
+    def test_peer_file_redirect_cannot_choose_another_origin(self):
+        error = HTTPError('http://configured/api/output-file', 302, 'Found',
+                          {'Location': 'https://untrusted.invalid/steal'}, io.BytesIO())
+        with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': 'http://configured'}]), \
+                patch.object(a, 'peer_urlopen', side_effect=error):
+            code, _, headers = a.output_file_response(self.query(host='peer', path=str(self.file) + '#flow'))
+        self.assertEqual((code, headers), (502, {}))
+
     def test_peer_request_never_propagates_host_or_caller_url(self):
         response = io.BytesIO(b'content')
         response.headers = {'Content-Type': 'text/plain', 'Content-Disposition': 'inline'}
         with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': 'http://configured:7788'}]), \
-                patch.object(a, 'urlopen', return_value=response) as request:
+                patch.object(a, 'peer_urlopen', return_value=response) as request:
             self.assertEqual(a.output_file_response(self.query(host='peer', sig='完成：'))[0], 200)
         parsed = urlparse(request.call_args.args[0].full_url)
         self.assertEqual(parsed.netloc, 'configured:7788')

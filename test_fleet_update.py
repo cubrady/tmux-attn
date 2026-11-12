@@ -10,6 +10,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 def git(repo, *args, check=True):
@@ -177,7 +178,7 @@ class FleetUpdateTests(unittest.TestCase):
 
     def test_http_routes_reject_a_short_ref_and_serve_the_log(self):
         root, first, second = self.repo()
-        handler = a.make_web_handler()
+        handler = domain_web_handler(app=a)
 
         class Quiet(handler):
             def log_message(self, format, *args):

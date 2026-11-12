@@ -10,6 +10,7 @@ from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 def fleet(state='IDLE', revision=2, acknowledged=2, live=True, online=True):
@@ -64,7 +65,7 @@ class WebLaterTests(unittest.TestCase):
 
     def test_http_clients_share_the_web_services_group(self):
         with patch.object(a, 'fleet_payload', side_effect=lambda **_: fleet()):
-            server = a.ThreadingHTTPServer(('127.0.0.1', 0), a.make_web_handler())
+            server = a.ThreadingHTTPServer(('127.0.0.1', 0), domain_web_handler(app=a))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             self.addCleanup(server.server_close)

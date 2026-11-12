@@ -12,6 +12,36 @@ import join_peer
 
 
 class JoinPeerTests(unittest.TestCase):
+    def test_api_enrollment_authenticates_hub_and_sends_private_local_key_without_printing_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / 'auth.key'
+            output = io.StringIO()
+            response = io.BytesIO(b'{"ok":true,"action":"added"}')
+            hub_key = 'h' * 43
+            with patch.dict(os.environ, {'SERVER_TOKEN': hub_key, 'TMUX_ATTN_AUTH_KEY_FILE': str(key)}), \
+                    patch.object(join_peer, 'open_peer', return_value=response) as opened, \
+                    contextlib.redirect_stdout(output):
+                join_peer.register_via_api('http://100.64.0.1:7788', 'work', 'http://100.64.0.2:7788')
+            request, credential = opened.call_args.args
+            self.assertEqual(credential, hub_key)
+            payload = json.loads(request.data)
+            local_key = key.read_text().strip()
+            self.assertEqual(payload, {'name': 'work', 'url': 'http://100.64.0.2:7788', 'token': local_key})
+            self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+            for secret in (hub_key, local_key):
+                self.assertNotIn(secret, output.getvalue())
+                self.assertNotIn(secret, request.full_url)
+
+    def test_missing_hub_credential_fails_before_creating_local_key_or_sending_request(self):
+        with patch.dict(os.environ, {'SERVER_TOKEN': ''}), \
+                patch.object(join_peer, 'open_peer') as opened, \
+                patch.object(join_peer, 'load_owner_token') as load, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                join_peer.register_via_api('http://100.64.0.1:7788', 'work', 'http://100.64.0.2:7788')
+        opened.assert_not_called()
+        load.assert_not_called()
+
     def test_ssh_registration_quotes_remote_code_and_values(self):
         real_run = subprocess.run
         with tempfile.TemporaryDirectory() as directory:

@@ -1,3 +1,4 @@
+from test_http_support import domain_web_handler
 import importlib.util
 import json
 from contextlib import closing
@@ -871,7 +872,7 @@ class StoreTests(unittest.TestCase):
                     self.assertEqual(body['error'], error)
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen') as urlopen_mock:
+             patch.object(a, 'peer_urlopen') as urlopen_mock:
             urlopen_mock.return_value.__enter__.return_value.read.return_value = json.dumps({
                 'ok': True, 'preview': {'users': ['hi'], 'agent': 'there'},
             }).encode()
@@ -913,7 +914,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual((code, body.get('error')), (409, 'empty message'))
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen') as urlopen_mock:
+             patch.object(a, 'peer_urlopen') as urlopen_mock:
             class FakeResp:
                 def __enter__(self): return self
                 def __exit__(self, *args): return False
@@ -941,7 +942,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual((code, body.get('error')), (409, 'pane pid changed'))
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen') as urlopen_mock:
+             patch.object(a, 'peer_urlopen') as urlopen_mock:
             class FakeResp:
                 def __enter__(self): return self
                 def __exit__(self, *args): return False
@@ -952,13 +953,13 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(urlopen_mock.call_args.args[0].full_url, 'http://lab:7788/api/kill')
         peers = Path(self.tmp.name) / 'peers.json'
         with patch.object(a, 'peers_config_path', return_value=peers):
-            code, body = a.dispatch_peer_register({'name': 'cicd', 'url': 'http://100.1.2.3:7788'})
+            code, body = a.dispatch_peer_register({'name': 'cicd', 'url': 'http://100.64.1.3:7788', 'token': 't' * 43})
             self.assertEqual(code, 200)
             self.assertEqual(body['action'], 'added')
-            code, body = a.dispatch_peer_register({'name': 'cicd', 'url': 'http://100.1.2.3:7789'})
+            code, body = a.dispatch_peer_register({'name': 'cicd', 'url': 'http://100.64.1.3:7789', 'token': 't' * 43})
             self.assertEqual(body['action'], 'updated')
             saved = json.loads(peers.read_text())
-            self.assertEqual(saved['peers'][0]['url'], 'http://100.1.2.3:7789')
+            self.assertEqual(saved['peers'][0]['url'], 'http://100.64.1.3:7789')
 
     def test_send_to_pane_rejects_pid_mismatch(self):
 
@@ -1115,7 +1116,7 @@ class StoreTests(unittest.TestCase):
             def read(self): return json.dumps({'ok': True, 'id': 'a' * 32 + '.txt'}).encode()
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen', return_value=Reply()) as request:
+             patch.object(a, 'peer_urlopen', return_value=Reply()) as request:
             self.assertEqual(a.dispatch_upload(payload | {'host': 'lab'})[0], 200)
             self.assertEqual(json.loads(request.call_args.args[0].data)['filename'], '筆記.txt')
             self.assertEqual(a.dispatch_send({'host': 'lab', 'pane': '%1', 'pid': '123', 'text': '', 'files': ['a' * 32 + '.txt']})[0], 200)
@@ -1186,7 +1187,7 @@ class StoreTests(unittest.TestCase):
             def read(self): return json.dumps({'ok': True, 'id': 'f' * 32 + '.png'}).encode()
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+             patch.object(a, 'peer_urlopen', return_value=FakeResp()) as urlopen_mock:
             code, body = a.dispatch_upload({'host': 'lab', 'pane': '%9', 'pid': '999', 'data': 'AAAA'})
             self.assertEqual((code, body['id']), (200, 'f' * 32 + '.png'))
             request = urlopen_mock.call_args.args[0]
@@ -1213,7 +1214,7 @@ class StoreTests(unittest.TestCase):
             def read(self): return json.dumps({'ok': True}).encode()
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+             patch.object(a, 'peer_urlopen', return_value=FakeResp()) as urlopen_mock:
             a.dispatch_send({'host': 'lab', 'pane': '%9', 'pid': '999', 'text': 'yo', 'images': [image_id]})
             self.assertEqual(json.loads(urlopen_mock.call_args.args[0].data.decode())['images'], [image_id])
 
@@ -1275,7 +1276,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual((error, events), (None, [('load', 'hello\n'), ('paste', True)]))
 
     def test_web_upload_endpoint_and_request_size_limit(self):
-        handler = a.make_web_handler()
+        handler = domain_web_handler(app=a)
 
         class Quiet(handler):
             def log_message(self, format, *args):
@@ -1382,7 +1383,7 @@ class StoreTests(unittest.TestCase):
             def read(self): return json.dumps({'ok': True, 'text': 'hi', 'role': 'agent', 'chars': 2}).encode()
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+             patch.object(a, 'peer_urlopen', return_value=FakeResp()) as urlopen_mock:
             code, body = a.dispatch_message({'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent', 'sig': 'ab'})
             self.assertEqual((code, body['text']), (200, 'hi'))
             request = urlopen_mock.call_args.args[0]
@@ -1401,7 +1402,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual((code, body['error']), (409, 'content changed; refresh preview'))
 
     def test_fleet_only_mode_requires_a_host_on_every_action_route(self):
-        handler = a.make_web_handler(fleet_only=True)
+        handler = domain_web_handler(app=a, fleet_only=True)
 
         class Quiet(handler):
             def log_message(self, format, *args):
@@ -1452,17 +1453,17 @@ class StoreTests(unittest.TestCase):
         peers = [{'name': 'lab', 'url': 'http://lab:7788'}]
         good = {'ok': True, 'role': 'agent', 'text': 'hi', 'chars': 2, 'truncated': False, 'partial': False}
         with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers):
-            with patch.object(a, 'urlopen', return_value=reply(good | {'extra': '<script>'})):
+            with patch.object(a, 'peer_urlopen', return_value=reply(good | {'extra': '<script>'})):
                 code, body = a.dispatch_message({'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent'})
             self.assertEqual((code, body), (200, good))
             for hostile in ({'chars': '<img src=x onerror=alert(1)>'}, {'text': {'length': '<b>'}}, {'role': 'root'}, {'chars': True}):
-                with patch.object(a, 'urlopen', return_value=reply(good | hostile)):
+                with patch.object(a, 'peer_urlopen', return_value=reply(good | hostile)):
                     code, body = a.dispatch_message({'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent'})
                 self.assertEqual((code, body['error']), (502, 'peer message failed: bad reply'), hostile)
-            with patch.object(a, 'urlopen', return_value=reply({'ok': True, 'id': '../../etc/passwd', 'bytes': 3})):
+            with patch.object(a, 'peer_urlopen', return_value=reply({'ok': True, 'id': '../../etc/passwd', 'bytes': 3})):
                 code, body = a.dispatch_upload({'host': 'lab', 'pane': '%9', 'pid': '9', 'data': 'AAAA'})
             self.assertEqual((code, body['error']), (502, 'peer upload failed: bad reply'))
-            with patch.object(a, 'urlopen', return_value=reply({'ok': True, 'id': 'c' * 32 + '.png', 'x': 1})):
+            with patch.object(a, 'peer_urlopen', return_value=reply({'ok': True, 'id': 'c' * 32 + '.png', 'x': 1})):
                 code, body = a.dispatch_upload({'host': 'lab', 'pane': '%9', 'pid': '9', 'data': 'AAAA'})
             self.assertEqual((code, body), (200, {'ok': True, 'id': 'c' * 32 + '.png'}))
 
@@ -1477,7 +1478,7 @@ class StoreTests(unittest.TestCase):
         ]
         with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers):
             for dispatch, payload, code, message in calls:
-                with patch.object(a, 'urlopen', side_effect=http_error(code, {'ok': False, 'error': message})):
+                with patch.object(a, 'peer_urlopen', side_effect=http_error(code, {'ok': False, 'error': message})):
                     self.assertEqual(dispatch(payload), (code, {'ok': False, 'error': message}), dispatch.__name__)
 
     def test_a_peer_without_the_new_routes_is_reported_as_outdated(self):
@@ -1485,7 +1486,7 @@ class StoreTests(unittest.TestCase):
         def missing_route(*args, **kwargs):
             raise HTTPError('http://lab:7788/x', 404, 'Not Found', {}, io.BytesIO(b'{"ok": false, "error": "not found"}'))
         with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers), \
-             patch.object(a, 'urlopen', side_effect=missing_route):
+             patch.object(a, 'peer_urlopen', side_effect=missing_route):
             for dispatch, payload in (
                     (a.dispatch_message, {'host': 'lab', 'pane': '%9', 'pid': '9', 'role': 'agent'}),
                     (a.dispatch_upload, {'host': 'lab', 'pane': '%9', 'pid': '9', 'data': 'AAAA'})):
@@ -1499,7 +1500,7 @@ class StoreTests(unittest.TestCase):
             def read(self): return json.dumps({'ok': True}).encode()
         peers = [{'name': 'lab', 'url': 'http://lab:7788'}]
         with patch.object(a, 'local_host_name', return_value='home'), patch.object(a, 'load_peers', return_value=peers), \
-             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen_mock:
+             patch.object(a, 'peer_urlopen', return_value=FakeResp()) as urlopen_mock:
             a.dispatch_send({'host': 'lab', 'pane': '%9', 'pid': '9', 'text': 'plain'})
             self.assertEqual(urlopen_mock.call_args.kwargs['timeout'], 3)
             a.dispatch_send({'host': 'lab', 'pane': '%9', 'pid': '9', 'text': 'pics', 'images': ['d' * 32 + '.png']})
@@ -1512,7 +1513,7 @@ class StoreTests(unittest.TestCase):
         for active in patches:
             active.start()
             self.addCleanup(active.stop)
-        handler = a.make_web_handler()
+        handler = domain_web_handler(app=a)
 
         class Quiet(handler):
             def log_message(self, format, *args):
@@ -1533,7 +1534,7 @@ class StoreTests(unittest.TestCase):
             server.server_close()
 
     def test_post_body_limits_differ_for_uploads_and_a_bad_length_is_a_400(self):
-        handler = a.make_web_handler()
+        handler = domain_web_handler(app=a)
 
         class Quiet(handler):
             def log_message(self, format, *args):
@@ -1587,7 +1588,7 @@ class StoreTests(unittest.TestCase):
     def test_web_api_smoke(self):
         a.record(self.con, 'socket', '%1', '123', 'claude', 'WAIT', 'Approval needed')
         live = {('%1', '123'): {'pane': '%1', 'pid': '123', 'session': 'work', 'window': 'one', 'window_id': '@1', 'path': '/proj/demo'}}
-        handler = a.make_web_handler()
+        handler = domain_web_handler(app=a)
 
         class Quiet(handler):
             def log_message(self, format, *args):
@@ -2199,7 +2200,14 @@ class IntegrationTests(unittest.TestCase):
             home=Path(directory)
             label='attn-test-'+str(os.getpid())
             command=['tmux','-L',label]
-            subprocess.run(command+['-f','/dev/null','new-session','-d','-s','fixture','-x','160','-y','45','/bin/sh'],check=True)
+            # The pane shell inherits the tmux server environment, so isolate it
+            # before starting the server as well as the installer subprocess.
+            fixture_env=os.environ|{'HOME':str(home),'CODEX_HOME':str(home/'.codex'),
+                                    'TMUX_ATTN_STATE_DIR':str(home/'.local/state/tmux-attn')}
+            for key in ('TMUX','TMUX_PANE','TMUX_ATTN_NOTIFY'):
+                fixture_env.pop(key,None)
+            subprocess.run(command+['-f','/dev/null','new-session','-d','-s','fixture','-x','160','-y','45','/bin/sh'],
+                           env=fixture_env,check=True)
             unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
             try:
                 def initial(*args): return subprocess.check_output(command+list(args),text=True).strip()
@@ -2207,7 +2215,7 @@ class IntegrationTests(unittest.TestCase):
                 pid=initial('display-message','-p','#{pid}')
                 pane=initial('display-message','-p','#{pane_id}')
                 window=initial('display-message','-p','#{window_id}')
-                env=os.environ|{'HOME':str(home),'CODEX_HOME':str(home/'.codex'),'TMUX':f'{sock},{pid},0','TMUX_PANE':pane}
+                env=fixture_env|{'TMUX':f'{sock},{pid},0','TMUX_PANE':pane}
                 def run(*args): return subprocess.check_output(['tmux',*args],env=env,text=True).strip()
                 old_window_format=run('show-options','-gwv','window-status-format')
                 (home/'.codex').mkdir()
@@ -2227,8 +2235,9 @@ class IntegrationTests(unittest.TestCase):
                 self.assertIsNone(unrelated.poll(), 'installer killed an unrelated process from a stale lock')
                 backup=json.loads(result)['backup']
                 app=home/'.local/share/tmux-attn/attention.py'
-                def wait(predicate):
-                    for _ in range(100):
+                def wait(predicate,timeout=10):
+                    deadline=time.monotonic()+timeout
+                    while time.monotonic()<deadline:
                         if predicate(): return
                         time.sleep(.1)
                     self.fail('Timed out waiting for tmux sidebar: '+run('capture-pane','-p','-t',sidebar)+'\nWORK PANE: '+run('capture-pane','-p','-t',pane)+'\nFILES: '+str(list(home.rglob('hook-errors.log')))+'\nLOG: '+''.join(p.read_text() for p in home.rglob('hook-errors.log'))+'\nDUMP: '+subprocess.check_output([sys.executable,str(app),'dump'],env=env,text=True))
@@ -2251,7 +2260,11 @@ class IntegrationTests(unittest.TestCase):
                     hook = shlex.join([sys.executable,str(app),'event',agent,name])
                     script = 'TMUX_ATTN_STATE_DIR='+shlex.quote(str(home/'.local/state/tmux-attn'))+' TMUX_PANE=%999999 '+hook+' < '+shlex.quote(str(payload))+' > '+shlex.quote(str(result))+''
                     run('send-keys','-t',pane,script,'Enter')
-                    wait(lambda:result.exists() and result.read_text().strip()=='{}')
+                    # Ownership resolution probes existing tmux sockets. A busy
+                    # developer host can have hundreds of old socket entries;
+                    # allow the real hook to finish without weakening its output
+                    # or the subsequent state/revision assertions.
+                    wait(lambda:result.exists() and result.read_text().strip()=='{}',timeout=30)
                     self.assertEqual(json.loads(result.read_text()),{})
                     result.unlink()
                 def acknowledge_sidebar():

@@ -134,7 +134,7 @@ class UsageSnapshotTests(unittest.TestCase):
         response = io.BytesIO(b'{"ok":true,"providers":[],"accounts":[]}')
         with patch.object(a, 'local_host_name', return_value='local'), \
                 patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': 'http://known:7788'}]), \
-                patch.object(a, 'urlopen', return_value=response) as fetch:
+                patch.object(a, 'peer_urlopen', return_value=response) as fetch:
             self.assertEqual(a.work_usage('peer', force_refresh=True)[0], 200)
         self.assertEqual(fetch.call_args.args[0].full_url, 'http://known:7788/api/work-usage?refresh=1')
 

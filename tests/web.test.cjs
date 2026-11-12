@@ -4348,7 +4348,7 @@ test('connect command points the client at this server and at its own Tailscale 
   await openInfo(ui);
   assert.equal(ui.elements.get('info-url').textContent, 'http://100.64.0.10:7788');
   const cmd = ui.elements.get('info-cmd').textContent;
-  assert.equal(cmd, `curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='<name>' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://100.64.0.10:7788' sh`);
+  assert.equal(cmd, `curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='<name>' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://100.64.0.10:7788' SERVER_TOKEN="$TMUX_ATTN_SERVER_TOKEN" sh`);
   assert.equal(ui.elements.get('info-cmd-copy').disabled, true, 'no copy until the client has a name');
   assert.equal(ui.elements.get('info-url-copy').disabled, false);
 });
@@ -4366,7 +4366,7 @@ test('copy unlocks only for a shell-safe client name and copies the exact comman
   assert.equal(copy.disabled, false);
   ui.elements.get('info-panel').listeners.click({ target: { closest: () => copy } });
   for (let i = 0; i < 4; i++) await settle();
-  assert.deepEqual(copied, ["curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='工作機-1.mac' LOCAL_FEED_URL=\"http://$(tailscale ip -4):7788\" SERVER_URL='http://100.64.0.10:7788' sh"]);
+  assert.deepEqual(copied, ["curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='工作機-1.mac' LOCAL_FEED_URL=\"http://$(tailscale ip -4):7788\" SERVER_URL='http://100.64.0.10:7788' SERVER_TOKEN=\"$TMUX_ATTN_SERVER_TOKEN\" sh"]);
   assert.equal(copy.textContent, '已複製');
 });
 

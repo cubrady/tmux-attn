@@ -155,6 +155,60 @@ class UpdateTests(unittest.TestCase):
         self.run_update()
         self.assertEqual(self.services.calls, [('restart_observers', (111,))])
 
+    def test_support_modules_are_packaged_and_rollback_removes_new_modules(self):
+        modules = {name: f'# {name}\n' for name in ('feed_snapshots.py', 'web_security.py', 'peer_transport.py')}
+        self.publish(modules, 'support modules')
+        code, out = self.run_update()
+        self.assertEqual(code, 0, out)
+        for name, content in modules.items():
+            self.assertEqual(self.text(name), content)
+        self.assertEqual(self.services.calls, ['restart_web', ('restart_observers', (111,))])
+        code = update.rollback(update.latest_backup(self.state), self.services, lambda line: None)
+        self.assertEqual(code, 0)
+        for name in modules:
+            self.assertFalse((self.runtime / name).exists())
+
+    def test_each_support_module_change_requires_loaded_code_restart(self):
+        for name in ('feed_snapshots.py', 'web_security.py', 'peer_transport.py'):
+            with self.subTest(module=name):
+                have = {'attention.py': b'core', name: b'v1'}
+                plan = update.make_plan(have | {name: b'v2'}, have, 'new', 'old')
+                self.assertEqual(plan.write, (name,))
+                self.assertTrue(plan.restart_web)
+                self.assertTrue(plan.restart_observer)
+
+    def test_auth_upgrade_blocked_before_runtime_record_backup_or_restart_changes(self):
+        self.publish({'web_security.py': '# new authentication\n'}, 'auth upgrade')
+        before = update.runtime_files(self.runtime)
+        record = (self.runtime / update.RECORD).read_bytes()
+        probe = update.SystemServices(self.runtime, self.tmp.name)
+        probe._web_text = LAUNCHD_TEXT
+        self.services.preflight_auth_upgrade = probe.preflight_auth_upgrade
+        with patch.dict(os.environ, {'TMUX_ATTN_ALLOWED_ORIGINS': 'https://shell-only.ts.net'}):
+            with self.assertRaisesRegex(update.UpdateError, 'Authentication upgrade blocked'):
+                self.run_update()
+        self.assertEqual(update.runtime_files(self.runtime), before)
+        self.assertEqual((self.runtime / update.RECORD).read_bytes(), record)
+        self.assertEqual(self.head(self.client), self.v1)
+        self.assertEqual((self.backups(), self.services.calls), ([], []))
+
+    def test_auth_upgrade_check_reports_blocker_without_deploying(self):
+        self.publish({'web_security.py': '# new authentication\n'}, 'auth upgrade')
+        self.services.web_endpoint = lambda: ('0.0.0.0', 7788)
+        code, out = self.run_update('--check')
+        self.assertEqual(code, 0)
+        self.assertIn('blocked', out)
+        self.assertIn('TMUX_ATTN_WEB_HOST=127.0.0.1 sh install_web_service.sh', out)
+        self.assertFalse((self.runtime / 'web_security.py').exists())
+        self.assertEqual((self.backups(), self.services.calls), ([], []))
+
+    def test_auth_upgrade_on_explicit_listener_and_without_service_is_allowed(self):
+        self.publish({'web_security.py': '# new authentication\n'}, 'auth upgrade')
+        self.services.web = False
+        code, out = self.run_update()
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.runtime / 'web_security.py').exists())
+
     def test_no_running_observer_means_nothing_to_restart(self):
         self.services.pids = []
         self.publish({'attention.py': 'v2 attention\n'}, 'core')
@@ -568,6 +622,47 @@ class SystemServicesTests(unittest.TestCase):
         self.assertEqual(update.local_url('0.0.0.0', 7788, '/api/health'), 'http://127.0.0.1:7788/api/health')
         self.assertEqual(update.local_url('100.64.0.10', 7788, '/'), 'http://100.64.0.10:7788/')
         self.assertEqual(update.local_url('fd7a::1', 7788, '/'), 'http://[fd7a::1]:7788/')
+
+    def test_auth_migration_accepts_explicit_listener_without_origins(self):
+        for host in ('127.0.0.1', '100.64.0.10', '::1'):
+            with self.subTest(host=host):
+                self.svc._web_text = LAUNCHD_TEXT.replace('0.0.0.0', host)
+                self.svc.preflight_auth_upgrade()
+        self.assertEqual(self.calls, [])
+
+    def test_auth_migration_launchd_uses_loaded_environment_not_update_shell(self):
+        self.svc._web_text = LAUNCHD_TEXT
+        with patch.dict(os.environ, {'TMUX_ATTN_ALLOWED_ORIGINS': 'https://shell-only.ts.net'}):
+            with self.assertRaisesRegex(update.UpdateError, 'wildcard web service'):
+                self.svc.preflight_auth_upgrade()
+        self.svc._web_text += '\nenvironment = {\n TMUX_ATTN_ALLOWED_ORIGINS => https://work.ts.net\n}\n'
+        self.svc.preflight_auth_upgrade()
+
+    def test_auth_migration_rejects_malformed_or_ambiguous_loaded_origins(self):
+        for value in ('https://work.ts.net:0', 'http://@work.ts.net', 'https://work.ts.net\\evil',
+                      'https://*.ts.net', ', ,', '"unterminated'):
+            with self.subTest(value=value):
+                self.svc._web_text = LAUNCHD_TEXT + '\nenvironment = {\n TMUX_ATTN_ALLOWED_ORIGINS => ' + value + '\n}\n'
+                with self.assertRaises(update.UpdateError):
+                    self.svc.preflight_auth_upgrade()
+        self.svc._web_text = (LAUNCHD_TEXT + '\n TMUX_ATTN_ALLOWED_ORIGINS => https://one.ts.net\n'
+                              + ' TMUX_ATTN_ALLOWED_ORIGINS => https://two.ts.net\n')
+        with self.assertRaises(update.UpdateError):
+            self.svc.preflight_auth_upgrade()
+
+    def test_auth_migration_systemd_reads_service_environment(self):
+        self.svc._web_text = SYSTEMD_TEXT.replace('100.64.0.10', '::')
+        self.outputs['systemctl'] = (0, 'OTHER=value "TMUX_ATTN_ALLOWED_ORIGINS=https://work.ts.net, http://100.64.0.10:7788"')
+        self.svc.preflight_auth_upgrade()
+        self.assertEqual(self.calls, [['systemctl', '--user', 'show', 'tmux-attn-web', '-p', 'Environment', '--value']])
+        self.outputs['systemctl'] = (1, '')
+        with self.assertRaises(update.UpdateError):
+            self.svc.preflight_auth_upgrade()
+
+    def test_auth_migration_rejects_unknown_active_listener(self):
+        self.svc._web_text = 'launchd\nstate = running\n'
+        with self.assertRaisesRegex(update.UpdateError, 'Cannot verify'):
+            self.svc.preflight_auth_upgrade()
 
     def test_observers_come_from_ps_and_are_restarted_by_pid_then_respawned(self):
         runtime_app = str(self.home / 'runtime' / 'attention.py')

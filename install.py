@@ -106,6 +106,7 @@ paths.append(web_index)
 paths.append(opencode_plugin)
 paths.append(agy_hooks_path)
 paths.extend([
+    DEST/'feed_snapshots.py', DEST/'web_security.py', DEST/'peer_transport.py',
     DEST/'web/icons', DEST/'install_web_service.sh',
     DEST/'contrib/systemd/tmux-attn-web.service',
     DEST/'contrib/launchd/ai.tmux-attn.web.plist',
@@ -156,6 +157,8 @@ if new_codex_text is not None:
     codex_path.parent.mkdir(parents=True, exist_ok=True)
     codex_path.write_text(new_codex_text)
 shutil.copy2(ROOT/'codex_observer.py', DEST/'codex_observer.py')
+for module in ('feed_snapshots.py', 'web_security.py', 'peer_transport.py'):
+    shutil.copy2(ROOT / module, DEST / module)
 web_index.parent.mkdir(parents=True, exist_ok=True)
 shutil.copy2(ROOT/'web'/'index.html', web_index)
 icons_src = ROOT/'web'/'icons'

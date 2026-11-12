@@ -24,7 +24,10 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import Request
+from peer_transport import TOKEN_RE, open_peer, validate_peer_url
+from web_security import load_owner_token
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -75,22 +78,37 @@ def print_client_next(name: str, url: str) -> None:
     print()
     print('NEXT STEPS (CLIENT):')
     print(f'  1. export TMUX_ATTN_HOST={name!r}')
-    print(f'  2. sh {WEB_SERVICE}          # keep feed up; do not use bare `tmux-attn web`')
+    bind = urlsplit(url).hostname if urlsplit(url).scheme == 'http' else '127.0.0.1'
+    print(f'  2. TMUX_ATTN_WEB_HOST={shlex.quote(bind or "127.0.0.1")} sh {WEB_SERVICE}')
     print('  3. curl -s http://127.0.0.1:7788/api/health')
     print(f'  4. curl -s {url}/api/health')
     print('  5. Reload hooks: Claude new session | Codex /hooks | Cursor reopen | Pi /reload')
     print('Phone → http://<server-tailscale>:7788/')
+    print('The browser requires the server access key; machine requests use the enrolled peer key.')
 
 
 def register_via_api(server_url: str, name: str, url: str) -> None:
+    server_token = os.environ.get('SERVER_TOKEN') or ''
+    if not TOKEN_RE.fullmatch(server_token):
+        die('SERVER_TOKEN is required; obtain it with tmux-attn auth-token on the server.')
+    try:
+        server_url = validate_peer_url(server_url)
+        url = validate_peer_url(url)
+    except ValueError as exc:
+        die(str(exc))
+    key_path = Path(os.environ.get('TMUX_ATTN_AUTH_KEY_FILE') or Path.home() / '.config/tmux-attn/auth.key')
+    key_path = key_path.expanduser()
+    if not key_path.is_absolute():
+        die('TMUX_ATTN_AUTH_KEY_FILE must be an absolute path')
+    token = load_owner_token(key_path)
     endpoint = server_url.rstrip('/') + '/api/peers'
-    body = json.dumps({'name': name, 'url': url}).encode()
+    body = json.dumps({'name': name, 'url': url, 'token': token}).encode()
     request = Request(
         endpoint, data=body,
         headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
         method='POST',
     )
-    with urlopen(request, timeout=5) as response:
+    with open_peer(request, server_token, timeout=5) as response:
         data = json.loads(response.read().decode())
     if not data.get('ok'):
         die(f'server rejected peer: {data.get("error") or data}')
@@ -159,7 +177,14 @@ def main() -> None:
     print()
 
     if args.apply:
-        action = upsert_local(name, url)
+        token = os.environ.get('PEER_TOKEN', '')
+        if not TOKEN_RE.fullmatch(token):
+            die('PEER_TOKEN is required for --apply; obtain it on the peer with tmux-attn auth-token.')
+        # Use the same locked, private, atomic writer as authenticated enrollment.
+        from attention import upsert_peer
+        ok, action = upsert_peer(name, url, token, config_path=peers_path())
+        if not ok:
+            die(action)
         print(f'Server local: {action} {name!r} → {peers_path()}')
         print(f'Keep server web up: sh {WEB_SERVICE}')
         print_client_next(name, url)
@@ -174,9 +199,7 @@ def main() -> None:
         return
 
     if server_ssh:
-        apply_remote_ssh(server_ssh, name, url)
-        print_client_next(name, url)
-        return
+        die('Use SERVER_URL with SERVER_TOKEN for authenticated enrollment, or --apply with PEER_TOKEN on the server.')
 
     print('Preferred: set SERVER_URL=http://<server>:7788 (POST /api/peers).')
     print('Or paste the peer JSON into server ~/.config/tmux-attn/peers.json.')

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from urllib.request import urlopen
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 def completed(stdout, returncode=0):
@@ -71,7 +72,7 @@ class ServerInfoApiTests(unittest.TestCase):
         self.peers_file.write_text(json.dumps({'peers': [{'name': 'work-mac', 'url': 'http://100.1.2.3:7788'}]}))
         for target in (
             patch.object(a, 'STATE', Path(self.tmp.name)),
-            patch.object(a, 'load_peers', return_value=[{'name': 'work-mac', 'url': 'http://100.1.2.3:7788'}]),
+            patch.object(a, 'load_peers', return_value=[{'name': 'work-mac', 'url': 'http://100.1.2.3:7788', 'token': 'secret' * 8}]),
             patch.object(a, 'install_version', return_value='abc123def456'),
             patch.object(a, 'local_host_name', return_value='workstation'),
             patch.object(a, 'peers_config_path', return_value=self.peers_file),
@@ -81,7 +82,7 @@ class ServerInfoApiTests(unittest.TestCase):
             self.addCleanup(target.stop)
 
     def serve(self, **kwargs):
-        class Quiet(a.make_web_handler(**kwargs)):
+        class Quiet(domain_web_handler(app=a, **kwargs)):
             def log_message(self, format, *args):
                 pass
 
@@ -108,15 +109,22 @@ class ServerInfoApiTests(unittest.TestCase):
         })
 
     def test_bind_and_port_come_from_the_server_that_serves_the_page(self):
-        port = self.serve(bind='192.168.1.5', port=7799, fleet_only=True)
+        port = self.serve(bind='100.64.0.10', port=7799, fleet_only=True)
         info = json.loads(urlopen(f'http://127.0.0.1:{port}/api/info', timeout=2).read())
-        self.assertEqual((info['bind'], info['port'], info['fleet_only']), ('192.168.1.5', 7799, True))
+        self.assertEqual((info['bind'], info['port'], info['fleet_only']), ('100.64.0.10', 7799, True))
         self.assertEqual(info['tailscale_url'], 'http://100.64.0.10:7799')
 
     def test_without_tailscale_the_url_is_empty_rather_than_guessed(self):
         with patch.object(a, 'tailscale_ipv4', return_value=''):
             info = a.server_info_payload(bind='0.0.0.0', port=7788)
         self.assertEqual(info['tailscale_url'], '')
+
+    def test_loopback_does_not_advertise_an_unbound_tailnet_port(self):
+        with patch.dict(a.os.environ, {'TMUX_ATTN_ALLOWED_ORIGINS': ''}):
+            self.assertEqual(a.server_info_payload(bind='127.0.0.1')['tailscale_url'], '')
+        with patch.dict(a.os.environ, {'TMUX_ATTN_ALLOWED_ORIGINS': 'https://work.example.ts.net'}):
+            self.assertEqual(a.server_info_payload(bind='127.0.0.1')['tailscale_url'],
+                             'https://work.example.ts.net')
 
 
 if __name__ == '__main__':

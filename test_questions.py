@@ -532,7 +532,7 @@ class AnswerDispatchTests(unittest.TestCase):
 
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen', return_value=FakeResp()) as urlopen:
+             patch.object(a, 'peer_urlopen', return_value=FakeResp()) as urlopen:
             self.assertEqual(a.dispatch_answer(payload), (200, {'ok': True}))
             request = urlopen.call_args.args[0]
             self.assertEqual(request.full_url, 'http://lab:7788/api/answer')
@@ -541,7 +541,7 @@ class AnswerDispatchTests(unittest.TestCase):
         missing = HTTPError('http://lab:7788/api/answer', 404, 'nf', {}, io.BytesIO(b''))
         with patch.object(a, 'local_host_name', return_value='home'), \
              patch.object(a, 'load_peers', return_value=[{'name': 'lab', 'url': 'http://lab:7788'}]), \
-             patch.object(a, 'urlopen', side_effect=missing):
+             patch.object(a, 'peer_urlopen', side_effect=missing):
             self.assertEqual(a.dispatch_answer(payload), (502, {'ok': False, 'error': a.PEER_OUTDATED}))
 
     def test_answer_pane_questions_matches_group_and_validates(self):

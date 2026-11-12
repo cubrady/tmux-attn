@@ -84,7 +84,12 @@ client A ── /api/agents ──┐
 client B ── /api/agents ──┼──▶ server /api/fleet ──▶ 手機
 ```
 
-安全：**無內建登入**。只綁 Tailscale / 私有 LAN，不要暴露公網。
+新安裝預設只監聽 `127.0.0.1`。瀏覽器使用主機存取金鑰登入，主機間使用 Bearer 憑證。
+遠端可明確綁定 Tailscale IP，或由 Tailscale Serve 提供私有 HTTPS；設定 Tailnet 存取規則。
+
+總覽由背景快照提供：本機每輪完成後約 2 秒更新、peer 約 3 秒；多個裝置共用同一次收集。
+啟動時顯示暖機狀態，收集失敗保留有時間標示的舊資料。
+既有 fleet 升級需先設定各台憑證與監聽位址，詳見 [架構與升級說明](docs/architecture-stage1.md)。
 
 ---
 
@@ -99,16 +104,19 @@ cd tmux-attn
 sh install.sh --solo          # 單機
 # 多機 client：
 # PEER_NAME='…' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" \
-#   SERVER_URL='http://<server>:7788' sh install.sh
+#   SERVER_URL='http://<server>:7788' SERVER_TOKEN="$TMUX_ATTN_SERVER_TOKEN" sh install.sh
 
-sh install_web_service.sh     # 建議：常駐 web（macOS launchd / Linux systemd）
+sh install_web_service.sh     # 常駐 web，預設只監聽本機
+tmux-attn auth-token          # 取得此主機的瀏覽器登入金鑰
+# 遠端直接連線時，明確選擇這台機器的 Tailscale IP：
+# TMUX_ATTN_WEB_HOST="$(tailscale ip -4)" sh install_web_service.sh
 ```
 
 也可以在沒有 checkout 的 client 使用 GitHub 託管的安裝腳本（需要 `curl`、`git`，並已登入 Tailscale）：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | \
-  PEER_NAME='client-1' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://<server>:7788' sh
+  PEER_NAME='client-1' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='http://<server>:7788' SERVER_TOKEN="$TMUX_ATTN_SERVER_TOKEN" sh
 ```
 
 腳本會 clone repo 到目前目錄下的 `tmux-attn`，再執行安裝與加入 server。執行前可先開啟上述 raw 網址檢視腳本；`main` 會隨更新改變。
@@ -133,6 +141,8 @@ tmux attach                   # Prefix → a 開清單
 
 ### 更新
 
+首次升級到有驗證的版本，先依 [升級步驟](docs/architecture-stage1.md#fleet-rollout) 準備憑證與 listener。既有 wildcard listener 未配置可信 origins 時，updater 會在修改程式前拒絕升級。
+
 在已安裝的機器上，一個指令升級：
 
 ```sh
@@ -154,7 +164,7 @@ curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/<tag-或-sha>/upd
 - checkout 有未提交修改、已分叉、或指定的 `--ref` 比 checkout 舊時拒絕執行；不會動 tmux，也不會改 web 服務綁定的位址。
 - hooks 或 tmux 設定相關檔案（`install.py`、`bootstrap.sh`、`pi-attention.ts`、`opencode-attention.ts`）有變時只提示，要加 `--reinstall` 才會重跑安裝器。
 - 還原：`tmux-attn update --rollback`（最近一次）或 `--rollback <備份目錄>`。
-- hub 畫面在 peer 版本不同時顯示一顆「更新全部」。點下去先列出各台到 hub 的 commit，確認後 hub 請每台有版本的 peer 在本機執行 `tmux-attn update --ref <完整 SHA>`。沒回報版本的舊機器仍只顯示安裝指令。這條請求和面板一樣沒有登入，只應在 Tailscale／區網可達。
+- hub 畫面在 peer 版本不同時顯示一顆「更新全部」。點下去先列出各台到 hub 的 commit，確認後 hub 請每台有版本的 peer 在本機執行 `tmux-attn update --ref <完整 SHA>`。沒回報版本的舊機器仍只顯示安裝指令。這條請求需要登入；hub 透過各 peer 的憑證驗證。
 
 第一次安裝或需要重裝 hooks 時仍用 `sh install.sh --no-clone`。
 
@@ -165,11 +175,12 @@ Install tmux-attn on THIS machine. Tailscale/LAN only; never expose :7788 public
 
 Ask: SETUP=solo|multi
   solo → clone https://github.com/cubrady/tmux-attn.git && cd tmux-attn && sh install.sh --solo
-  multi client → PEER_NAME, LOCAL_FEED_URL=http://$(tailscale ip -4):7788, SERVER_URL=http://<server>:7788
+  multi client → PEER_NAME, LOCAL_FEED_URL=http://$(tailscale ip -4):7788, SERVER_URL=http://<server>:7788, SERVER_TOKEN=<server access key>
        clone … && cd tmux-attn
-       PEER_NAME='…' LOCAL_FEED_URL='…' SERVER_URL='…' sh install.sh
+       PEER_NAME='…' LOCAL_FEED_URL='…' SERVER_URL='…' SERVER_TOKEN="$TMUX_ATTN_SERVER_TOKEN" sh install.sh
 Then EXACTLY follow printed NEXT STEPS:
-  sh ~/.local/share/tmux-attn/install_web_service.sh   # required (not bare `tmux-attn web`)
+  sh ~/.local/share/tmux-attn/install_web_service.sh   # solo defaults loopback; multi uses explicit Tailscale bind
+  ~/.local/bin/tmux-attn auth-token   # browser key; never paste into logs or reports
   curl -s http://127.0.0.1:7788/api/health
   reload hooks (Claude new session | Codex /hooks | Cursor reopen | Pi /reload | OpenCode restart TUI)
   verify: ~/.local/bin/tmux-attn status   # expect non-zero counts when an agent is live
@@ -180,7 +191,7 @@ Report: install JSON (status_control_clicks), web health, peers, tmux status lin
 | 你給 agent | 內容 |
 | --- | --- |
 | Solo | `SETUP=solo` |
-| Multi client | `PEER_NAME`、本機 `LOCAL_FEED_URL`、`SERVER_URL` |
+| Multi client | `PEER_NAME`、本機 `LOCAL_FEED_URL`、`SERVER_URL`、`SERVER_TOKEN` |
 | Multi server | 常駐 web（建議 `install_web_service.sh`）+ `peers.json` |
 
 ---
@@ -259,7 +270,7 @@ HTML 使用隔離環境，可執行內嵌 JavaScript；不載入其他本地檔�
 sh install_web_service.sh --status
 ~/.local/bin/tmux-attn status
 curl -s http://127.0.0.1:7788/api/health
-curl --max-time 10 -s http://127.0.0.1:7788/api/agents
+curl --max-time 10 -s -H "Authorization: Bearer $(~/.local/bin/tmux-attn auth-token)" http://127.0.0.1:7788/api/agents
 ```
 
 `health.ok` 表示 web 程序存活；session feed 是否正常需另看 `/api/agents`，

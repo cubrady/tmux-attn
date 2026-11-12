@@ -8,8 +8,8 @@
   <array>
     <string>/bin/bash</string>
     <string>__HOME__/.local/share/tmux-attn/contrib/launchd/web-run.sh</string>
-    <string>0.0.0.0</string>
-    <string>7788</string>
+    <string>__HOST__</string>
+    <string>__PORT__</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__HOME__</string>

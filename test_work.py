@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 class WorkTests(unittest.TestCase):
@@ -116,13 +117,13 @@ class WorkTests(unittest.TestCase):
     def test_peer_forwarding_and_fleet_mode(self):
         response = io.BytesIO(json.dumps({'ok': True, 'host': 'peer', 'agents': []}).encode())
         with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': 'http://known:7788'}]), \
-             patch.object(a, 'urlopen', return_value=response) as fetch:
+             patch.object(a, 'peer_urlopen', return_value=response) as fetch:
             self.assertEqual(a.work_options('peer', fleet_only=True)[0], 200)
             self.assertEqual(fetch.call_args.args[0].full_url, 'http://known:7788/api/work-options')
             self.assertEqual(parse_qs(urlparse(fetch.call_args.args[0].full_url).query), {})
         response = io.BytesIO(b'{"ok":true,"pane":"%2"}')
         with patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': 'http://known:7788'}]), \
-             patch.object(a, 'urlopen', return_value=response) as fetch:
+             patch.object(a, 'peer_urlopen', return_value=response) as fetch:
             self.assertEqual(a.dispatch_work_start(self.payload(host='peer'))[0], 200)
             self.assertNotIn('host', json.loads(fetch.call_args.args[0].data))
         self.assertEqual(a.work_options('', fleet_only=True)[0], 400)
@@ -191,7 +192,7 @@ class WorkTests(unittest.TestCase):
             tmux.assert_not_called()
 
     def test_http_host_usage_and_start_routes(self):
-        class Quiet(a.make_web_handler(fleet_only=True)):
+        class Quiet(domain_web_handler(app=a, fleet_only=True)):
             def log_message(self, *_args):
                 pass
         server = a.ThreadingHTTPServer(('127.0.0.1', 0), Quiet)

@@ -17,6 +17,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -24,7 +25,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from urllib.request import ProxyHandler, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
 
 HOME = Path.home()
 RUNTIME = HOME / '.local/share/tmux-attn'
@@ -32,6 +33,7 @@ STATE = HOME / '.local/state/tmux-attn'
 RECORD = 'INSTALL.json'
 RUNTIME_FILES = (
     'attention.py', 'codex_observer.py', 'install_web_service.sh', 'web/index.html',
+    'feed_snapshots.py', 'web_security.py', 'peer_transport.py',
     'contrib/systemd/tmux-attn-web.service', 'contrib/launchd/ai.tmux-attn.web.plist',
     'contrib/launchd/web-run.sh',
 )
@@ -44,6 +46,13 @@ HEALTH_WAIT_S = 20.0
 OBSERVER_STOP_WAIT_S = 5.0
 FETCH_TIMEOUT_S = 120
 SHA = re.compile(r'[0-9a-f]{40}')
+AUTH_MIGRATION_HINT = (
+    'Reconfigure and restart the existing service before updating: from the checkout run '
+    'TMUX_ATTN_WEB_HOST=127.0.0.1 sh install_web_service.sh '
+    '(or choose this machine\'s Tailscale IP). To keep a wildcard listener, persist '
+    'TMUX_ATTN_ALLOWED_ORIGINS in the launchd/systemd service configuration first; '
+    'an export in the update shell does not configure the service.'
+)
 
 
 class UpdateError(Exception):
@@ -166,7 +175,7 @@ class Plan:
 def make_plan(wanted, have, commit, previous, reinstall_hint=False):
     write = tuple(rel for rel in wanted if have.get(rel) != wanted[rel])
     remove = tuple(rel for rel in have if rel not in wanted and rel.startswith(RUNTIME_DIRS))
-    restart_web = 'attention.py' in write
+    restart_web = bool(set(write) & {'attention.py', 'feed_snapshots.py', 'web_security.py', 'peer_transport.py'})
     return Plan(
         commit=commit, previous=previous, write=write, remove=remove,
         restart_web=restart_web,
@@ -298,6 +307,47 @@ class SystemServices:
     def web_endpoint(self):
         return parse_web_endpoint(self._web())
 
+    def preflight_auth_upgrade(self):
+        """Do not activate new authentication behind an unconfigured legacy listener."""
+        endpoint = self.web_endpoint()
+        if endpoint is not None and endpoint[0] not in ('0.0.0.0', '::'):
+            return
+        if endpoint is None:
+            raise UpdateError('Cannot verify the existing web listener before authentication upgrade. '
+                              + AUTH_MIGRATION_HINT)
+        value = ''
+        if self._web().startswith('launchd'):
+            matches = re.findall(r'^\s*TMUX_ATTN_ALLOWED_ORIGINS\s*=>\s*(.*?)\s*$', self._web(), re.M)
+            if len(matches) == 1:
+                value = matches[0]
+                if value[:1] in ('"', "'"):
+                    try:
+                        words = shlex.split(value)
+                        value = words[0] if len(words) == 1 else ''
+                    except ValueError:
+                        value = ''
+        elif self._web().startswith('systemd'):
+            probe = self._run(['systemctl', '--user', 'show', WEB_UNIT, '-p', 'Environment', '--value'])
+            if probe.returncode == 0:
+                try:
+                    values = [item.partition('=')[2] for item in shlex.split(probe.stdout)
+                              if item.partition('=')[0] == 'TMUX_ATTN_ALLOWED_ORIGINS']
+                    value = values[0] if len(values) == 1 else ''
+                except ValueError:
+                    pass
+        origins = [origin.strip() for origin in value.split(',') if origin.strip()]
+        try:
+            # Parse using the same contract as the target web service, without
+            # instantiating authentication or creating an owner key.
+            from web_security import _origin
+            for origin in origins:
+                _origin(origin)
+        except (ImportError, ValueError):
+            origins = []
+        if not origins:
+            raise UpdateError('Authentication upgrade blocked: the existing wildcard web service '
+                              'has no verified TMUX_ATTN_ALLOWED_ORIGINS. ' + AUTH_MIGRATION_HINT)
+
     def restart_web(self):
         if self._web().startswith('launchd'):
             args = ['launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{WEB_LABEL}']
@@ -309,7 +359,12 @@ class SystemServices:
 
     def fetch(self, host, port, path):
         # Never through a proxy: this is the machine talking to itself.
-        with build_opener(ProxyHandler({})).open(local_url(host, port, path), timeout=3) as response:
+        request = Request(local_url(host, port, path))
+        key = Path(os.environ.get('TMUX_ATTN_AUTH_KEY_FILE') or self.home / '.config/tmux-attn/auth.key')
+        if key.is_file():
+            from web_security import load_owner_token
+            request.add_header('Authorization', 'Bearer ' + load_owner_token(key))
+        with build_opener(ProxyHandler({})).open(request, timeout=3) as response:
             return response.read(1 << 20)
 
     def observers(self):
@@ -435,6 +490,21 @@ def update(options, services=None, runtime=None, state=None, out=print):
     for line in describe(plan):
         out(line)
     behind = git(src, 'rev-parse', 'HEAD') != target
+    if 'web_security.py' in wanted and not (runtime / 'web_security.py').is_file() and services.has_web_service():
+        try:
+            preflight = getattr(services, 'preflight_auth_upgrade', None)
+            if preflight is not None:
+                preflight()
+            else:
+                # Alternate service adapters must still prove an explicit bind.
+                endpoint = services.web_endpoint()
+                if endpoint is None or endpoint[0] in ('0.0.0.0', '::'):
+                    raise UpdateError('Authentication upgrade requires a verified web listener. '
+                                      + AUTH_MIGRATION_HINT)
+        except UpdateError as error:
+            if not options.check:
+                raise
+            out(f'  blocked  {error}')
     if options.check:
         out('update available (dry run, nothing changed)' if not plan.empty or behind else 'already up to date')
         return 0

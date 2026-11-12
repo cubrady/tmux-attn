@@ -14,6 +14,7 @@ from unittest.mock import patch
 from urllib.request import urlopen
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 class ProjectIconCacheTests(unittest.TestCase):
@@ -182,7 +183,7 @@ print(json.dumps(a.detect_project_technology(root)))
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        server = a.ThreadingHTTPServer(('127.0.0.1', 0), a.make_web_handler())
+        server = a.ThreadingHTTPServer(('127.0.0.1', 0), domain_web_handler(app=a))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)

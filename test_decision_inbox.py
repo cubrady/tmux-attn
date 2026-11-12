@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import attention as a
+from test_http_support import domain_web_handler
 
 
 class DecisionExtractionTests(unittest.TestCase):
@@ -163,7 +164,7 @@ class DecisionMetadataTests(unittest.TestCase):
         self.assertNotIn('unknown', safe[0])
 
     def test_http_route_shares_metadata_without_touching_pane_state(self):
-        handler = object.__new__(a.make_web_handler())
+        handler = object.__new__(domain_web_handler(app=a))
         handler.path = '/api/inbox'
         body = json.dumps(self.target | {'action': 'label', 'label': 'P1 / #42'}).encode()
         handler.headers = {'Content-Length': str(len(body))}

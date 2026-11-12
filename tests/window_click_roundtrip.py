@@ -12,7 +12,7 @@ import sys
 import tempfile
 import termios
 import time
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -141,18 +141,32 @@ with tempfile.TemporaryDirectory() as directory:
         assert ready, 'installed web server did not start'
         assert json.loads(web.stdout.readline())['port'] == port
 
-        def agent(pane):
-            with urlopen(f'http://127.0.0.1:{port}/api/agents', timeout=3) as response:
-                payload = json.load(response)
-            return next(item for item in payload['agents'] if item['pane'] == pane)
+        token = (home / '.config/tmux-attn/auth.key').read_text().strip()
 
-        assert agent(beta)['reviewed'] and not agent(beta)['unread']
+        def agent(pane, *, unread=None):
+            # Feed publication is asynchronous; wait for the expected revision,
+            # preserving this test's real installed-service authentication.
+            expected = row(pane)['revision']
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                request = Request(f'http://127.0.0.1:{port}/api/agents',
+                                  headers={'Authorization': 'Bearer ' + token})
+                with urlopen(request, timeout=3) as response:
+                    payload = json.load(response)
+                item = next((item for item in payload['agents'] if item['pane'] == pane
+                             and item['revision'] == expected), None)
+                if item is not None and (unread is None or item['unread'] == unread):
+                    return item
+                time.sleep(.05)
+            raise AssertionError('expected pane revision was not published')
+
+        assert agent(beta, unread=False)['reviewed']
         assert agent(other)['unread'] and agent(alpha)['pending']
         # Remaining focused while a new result arrives must not read it automatically.
         beta_second = record(beta, turn='second')
         drain(.5)
         assert beta_second > beta_first and not viewed(beta)
-        assert agent(beta)['unread']
+        assert agent(beta, unread=True)['unread']
         click(9)  # Clicking the already selected native window runs after-select-window too.
         wait_for(lambda: viewed(beta), 'repeat selected-window click did not acknowledge new result')
         assert row(beta)['acknowledged'] == beta_second

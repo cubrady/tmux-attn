@@ -1,7 +1,7 @@
 #!/bin/bash
 # launchd entrypoint: warm identity before Python/CF init when Open Directory is slow.
 set -euo pipefail
-HOST="${1:-0.0.0.0}"
+HOST="${1:-127.0.0.1}"
 PORT="${2:-7788}"
 : "${HOME:?HOME must be set by launchd}"
 : "${USER:=}"

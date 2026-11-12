@@ -10,6 +10,7 @@
   <link rel="apple-touch-icon" href="/icons/favicon.svg">
   <meta name="theme-color" content="#0f766e" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0c0c0e" media="(prefers-color-scheme: dark)">
+  <script src="/auth-client.js"></script>
   <script id="early-fleet-request">
     // Start the host roster before font and Markdown resources block page scripts.
     window.initialFleetPlanRequest = fetch('/api/fleet/plan', { cache: 'no-store' })
@@ -6424,6 +6425,9 @@
           setRefreshing(false);
         }
         paintClock('live');
+        if ([...hostSliceByName.values()].some(slice => (slice.hosts || []).some(host => host.pending))) {
+          setTimeout(refresh, 2000);
+        }
       } catch (e) {
         if (epoch !== refreshEpoch) return;
         document.getElementById('error').hidden = false;
@@ -6462,7 +6466,7 @@
     }
     function joinCommand(name, url) {
       // Expanded by the client's own shell, so each machine reports its own Tailscale address. Nothing is guessed here.
-      return `curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='${name}' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='${url}' sh`;
+      return `curl -fsSL https://raw.githubusercontent.com/cubrady/tmux-attn/main/install.sh | PEER_NAME='${name}' LOCAL_FEED_URL="http://$(tailscale ip -4):7788" SERVER_URL='${url}' SERVER_TOKEN="$TMUX_ATTN_SERVER_TOKEN" sh`;
     }
     function renderJoin() {
       const url = serverUrl(serverInfo || {});
@@ -6484,7 +6488,7 @@
       setText(document.getElementById('info-hint'),
         !nameReady ? '填入這台 client 的名稱（字母、數字、. _ -），指令會跟著更新。'
           : !urlReady ? '這台 server 沒偵測到 Tailscale 位址；請把 <server> 換成 server 的 IP 或主機名稱。'
-            : '到要加入的那台機器上，在 tmux-attn 專案目錄內執行。');
+            : '先在 client 設定 TMUX_ATTN_SERVER_TOKEN 為 server 的存取金鑰，再執行加入指令。');
     }
     function renderServerInfo() {
       const info = serverInfo;

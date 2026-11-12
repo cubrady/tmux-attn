@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent
 FILES = [
     'README.md', 'LICENSE', '.gitignore', 'bootstrap.sh', 'migrate.py', 'install.py',
     'rollback.py', 'attention.py', 'codex_observer.py', 'pi-attention.ts',
+    'feed_snapshots.py', 'web_security.py', 'peer_transport.py',
     'opencode-attention.ts',
     'tmux-attn', 'tmux.conf.snippet', 'project-aliases.example.json',
     'web/index.html', 'peers.example.json', 'join_peer.py', 'install.sh',
@@ -19,6 +20,9 @@ FILES = [
     'web/icons/claude.svg', 'web/icons/codex.svg', 'web/icons/agent.svg', 'web/icons/pi.svg',
     'web/icons/opencode.svg', 'web/icons/agy.svg', 'web/icons/favicon.svg',
     'docs/coding-agent-status-research.md',
+    'docs/architecture-stage1.md', 'test_http_support.py',
+    'test_feed_snapshots.py', 'test_web_security.py', 'test_architecture_http.py',
+    'test_peer_transport.py', 'test_local_snapshot_collector.py',
 
     'test_attention.py', 'test_codex_observer.py', 'test_observer_recovery.py',
     'test_migration.py', 'tests/popup_roundtrip.py',

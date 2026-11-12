@@ -18,6 +18,7 @@ import re
 import os
 from pathlib import Path
 import secrets
+import selectors
 import shlex
 import shutil
 import signal
@@ -37,6 +38,9 @@ import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from feed_snapshots import SnapshotCache
+from peer_transport import TOKEN_RE as PEER_TOKEN_RE, open_peer, validate_peer_url
+from web_security import AUTH_CLIENT_JS, WebSecurity, login_html
 
 ROOT = Path(__file__).resolve().parent
 STATE = Path(os.environ.get('TMUX_ATTN_STATE_DIR', Path.home() / '.local/state/tmux-attn'))
@@ -3206,25 +3210,45 @@ def load_peers():
     except (OSError, ValueError):
         return []
     peers = data.get('peers', []) if isinstance(data, dict) else []
+    if not isinstance(peers, list):
+        return []
     result = []
     for peer in peers:
+        if len(result) >= 64:
+            break
         if not isinstance(peer, dict):
             continue
         name = clean(peer.get('name') or '')
         url = clean(peer.get('url') or '').rstrip('/')
-        if name and url.startswith(('http://', 'https://')):
-            result.append({'name': name, 'url': url})
+        if name and name not in {item['name'] for item in result} and url.startswith(('http://', 'https://')):
+            item = {'name': name, 'url': url}
+            if isinstance(peer.get('token'), str):
+                item['token'] = peer['token']
+            result.append(item)
     return result
 
 
-def upsert_peer(name, url):
+def upsert_peer(name, url, token=None, config_path=None):
     """Add or update a peer in peers.json. Returns (ok, detail)."""
     name = clean(name or '')
     url = clean(url or '').rstrip('/')
-    if not name or not url.startswith(('http://', 'https://')):
-        return False, 'name and http(s) url required'
-    path = peers_config_path()
+    if not name:
+        return False, 'name required'
+    try:
+        url = validate_peer_url(url)
+    except ValueError as exc:
+        return False, str(exc)
+    if not isinstance(token, str) or not PEER_TOKEN_RE.fullmatch(token):
+        return False, 'peer token required (run tmux-attn auth-token on that host)'
+    path = Path(config_path) if config_path is not None else peers_config_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Serialize enrollment across API threads/processes, and publish atomically.
+    with (path.with_suffix('.lock')).open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _write_peer_config(path, name, url, token)
+
+
+def _write_peer_config(path, name, url, token):
     data = {'peers': []}
     if path.is_file():
         try:
@@ -3238,12 +3262,22 @@ def upsert_peer(name, url):
     for row in peers:
         if isinstance(row, dict) and clean(row.get('name') or '') == name:
             row['url'] = url
+            row['token'] = token
             action = 'updated'
             break
     else:
-        peers.append({'name': name, 'url': url})
+        if len(peers) >= 64:
+            return False, 'peer limit reached (64)'
+        peers.append({'name': name, 'url': url, 'token': token})
     data['peers'] = peers
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+    temp = path.with_name('.peers-' + secrets.token_hex(12))
+    try:
+        descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
     return True, action
 
 
@@ -3272,13 +3306,30 @@ _FLEET_HOST_CACHE = {}
 _FLEET_STALE_TTL = 35.0
 
 
+def peer_urlopen(request, timeout=PEER_FETCH_TIMEOUT):
+    endpoint = urlparse(request.full_url)
+    peer = next((row for row in load_peers()
+                 if urlparse(row['url']).scheme == endpoint.scheme
+                 and urlparse(row['url']).netloc == endpoint.netloc), None)
+    if peer is None:
+        raise ValueError('Unknown peer origin')
+    return open_peer(request, peer.get('token'), timeout=timeout)
+
+
 def fetch_peer_agents(url, timeout=PEER_FETCH_TIMEOUT):
     """Pull a machine-local /api/agents document. Never call /api/fleet here."""
     request = Request(url.rstrip('/') + '/api/agents', headers={'Accept': 'application/json'})
-    with urlopen(request, timeout=timeout) as response:
-        data = json.loads(response.read().decode())
+    with peer_urlopen(request, timeout=timeout) as response:
+        raw = response.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError('Peer feed exceeds 4 MiB')
+        data = json.loads(raw.decode())
     if not isinstance(data, dict) or not data.get('ok'):
         raise RuntimeError(data.get('error') if isinstance(data, dict) else 'invalid peer payload')
+    metadata = data.get('snapshot') or {}
+    if (metadata.get('state') in ('cold', 'error') or metadata.get('available') is False
+            or metadata.get('last_error') or (metadata.get('age_s') or 0) > _FLEET_STALE_TTL):
+        raise RuntimeError('Peer snapshot not ready or degraded')
     return data
 
 
@@ -3393,6 +3444,200 @@ def agent_feed_status():
     with _AGENT_FEED_LOCK:
         return {**_AGENT_FEED_LAST, 'active': len(_AGENT_FEED_ACTIVE),
                 'oldest_active_age_s': round(max((now - at for at in _AGENT_FEED_ACTIVE.values()), default=0), 3)}
+
+
+
+class LocalSnapshotCollector:
+    """Keep scanner caches warm; restart the isolated process after a deadline."""
+
+    def __init__(self, timeout=8):
+        self.proc = None
+        self.closed = False
+        self.timeout = timeout
+        self.lifecycle_lock = threading.Lock()
+
+    def close(self):
+        with self.lifecycle_lock:
+            self.closed = True
+            proc = self.proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=.2)
+            except subprocess.TimeoutExpired:
+                return
+        if proc is not None:
+            proc.stdin.close()
+            proc.stdout.close()
+            with self.lifecycle_lock:
+                if self.proc is proc:
+                    self.proc = None
+
+    def __call__(self):
+        token, started = object(), time.monotonic()
+        with _AGENT_FEED_LOCK:
+            _AGENT_FEED_ACTIVE[token] = started
+        try:
+            if self.closed:
+                raise RuntimeError('Collector stopped')
+            if self.proc is None or self.proc.poll() is not None:
+                if self.proc is not None:
+                    self.proc.stdin.close()
+                    self.proc.stdout.close()
+                candidate = subprocess.Popen(
+                    [sys.executable, str(ROOT / 'attention.py'), 'snapshot-worker'],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                with self.lifecycle_lock:
+                    self.proc = candidate
+                    stopped = self.closed
+                if stopped:
+                    raise RuntimeError('Collector stopped')
+            proc = self.proc
+            proc.stdin.write(b'{}\n')
+            proc.stdin.flush()
+            deadline, raw = time.monotonic() + self.timeout, bytearray()
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while not raw.endswith(b'\n'):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise subprocess.TimeoutExpired('snapshot-worker', self.timeout)
+                    chunk = os.read(proc.stdout.fileno(), 65536)
+                    if not chunk:
+                        raise ValueError('Local snapshot collector exited')
+                    raw.extend(chunk)
+                    if len(raw) > 4 * 1024 * 1024:
+                        raise ValueError('Local snapshot exceeds 4 MiB')
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or not payload.get('ok') or not isinstance(payload.get('agents'), list):
+                raise ValueError('Invalid local snapshot')
+            for row in payload['agents']:
+                row['project_technology'] = project_technology(row.get('path', ''))
+            with _AGENT_FEED_LOCK:
+                _AGENT_FEED_LAST.update(last_success_at=time.time(), last_error=None)
+            return payload
+        except Exception as exc:
+            with _AGENT_FEED_LOCK:
+                _AGENT_FEED_LAST['last_error'] = type(exc).__name__
+            failed = self.proc
+            if failed is not None:
+                if failed.poll() is None:
+                    try:
+                        failed.kill()
+                    except ProcessLookupError:
+                        pass
+                # The sole collector slot remains occupied until the child is reaped.
+                failed.wait()
+                failed.stdin.close()
+                failed.stdout.close()
+                with self.lifecycle_lock:
+                    if self.proc is failed:
+                        self.proc = None
+            raise
+        finally:
+            with _AGENT_FEED_LOCK:
+                _AGENT_FEED_ACTIVE.pop(token, None)
+                _AGENT_FEED_LAST['last_duration_s'] = round(time.monotonic() - started, 3)
+
+
+class FeedSnapshots:
+    """One local collector and a bounded peer pool shared by every viewer."""
+
+    def __init__(self, include_local=True, local_loader=None, peer_loader=None):
+        self.include_local = include_local
+        self.local_loader = local_loader if local_loader is not None else LocalSnapshotCollector()
+        self.peer_loader = peer_loader or fetch_peer_agents
+        self.local = SnapshotCache(max_workers=1, capacity=1)
+        self.peers = SnapshotCache(ttl=3, max_workers=4, capacity=64)
+
+    def start(self):
+        if self.include_local:
+            self.local.register('local', self.local_loader)
+            self.local.start()
+        self._sync_peers()
+        self.peers.start()
+
+    @staticmethod
+    def _peer_key(peer):
+        # Re-enrollment must never reuse data or credentials from another origin.
+        return peer['name'], peer['url'], hashlib.sha256(peer.get('token', '').encode()).hexdigest()
+
+    def _sync_peers(self):
+        peers = load_peers()[:64]
+        self.peers.retain(self._peer_key(peer) for peer in peers)
+        for peer in peers:
+            self.peers.register(self._peer_key(peer), lambda peer=peer: self.peer_loader(peer['url']))
+        return peers
+
+    def agents(self):
+        entry = self.local.get('local', self.local_loader)
+        payload = entry['payload'] or {'ok': True, 'agents': [], 'summary': empty_summary()}
+        metadata = {**entry['snapshot'], 'available': entry['payload'] is not None}
+        return {**payload, 'version': install_version(), 'snapshot': metadata}
+
+    def _slice(self, name, peers):
+        if self.include_local and name == local_host_name():
+            payload = self.agents()
+            metadata = payload['snapshot']
+            available = metadata['available']
+            source = 'local'
+            row = {'name': name, 'source': source}
+        else:
+            peer = next((peer for peer in peers if peer['name'] == name), None)
+            if peer is None:
+                return {'ok': False, 'error': 'unknown host'}
+            entry = self.peers.get(self._peer_key(peer))
+            payload = entry['payload'] or {'agents': []}
+            metadata = entry['snapshot']
+            available = entry['payload'] is not None
+            source = 'peer'
+            row = {'name': name, 'source': source, 'url': peer['url']}
+            if payload.get('snapshot'):
+                row['source_snapshot'] = {**payload['snapshot'],
+                    'age_s': round((payload['snapshot'].get('age_s') or 0) + (metadata['age_s'] or 0), 3)}
+        ready = available and metadata['state'] not in ('cold', 'error')
+        row.update(ok=ready and not metadata['last_error'], version=payload.get('version', ''), snapshot=metadata)
+        if metadata['state'] == 'cold':
+            row.update(pending=True, error='snapshot warming')
+        if metadata['stale']:
+            row.update(stale=True, stale_age=metadata['age_s'])
+        if metadata['last_error']:
+            row['error'] = metadata['last_error']
+        agents, summary = tag_host(payload, name)
+        return {'ok': True, 'agents': agents, 'summary': summary, 'hosts': [row],
+                'version': install_version(), 'snapshot': metadata}
+
+    def host(self, name):
+        payload = self._slice(clean(name), self._sync_peers())
+        return web_later_fleet(payload) if payload.get('ok') else payload
+
+    def fleet(self):
+        peers = self._sync_peers()
+        names = ([local_host_name()] if self.include_local else []) + [peer['name'] for peer in peers]
+        parts = [self._slice(name, peers) for name in names]
+        return web_later_fleet({'ok': True, 'version': install_version(),
+                               'agents': sorted([row for part in parts for row in part['agents']], key=agent_sort_key),
+                               'hosts': [host for part in parts for host in part['hosts']],
+                               'summary': merge_summaries(part['summary'] for part in parts)})
+
+    def invalidate(self, host=''):
+        if not host or host == local_host_name():
+            self.local.invalidate('local')
+        for peer in self._sync_peers():
+            if not host or host == peer['name']:
+                self.peers.invalidate(self._peer_key(peer))
+
+    def status(self):
+        return {'local': self.local.status(), 'peers': self.peers.status()}
+
+    def stop(self):
+        self.local.stop()
+        self.peers.stop()
+        if isinstance(self.local_loader, LocalSnapshotCollector):
+            self.local_loader.close()
 
 
 def _fleet_local_slice(now, stale_ttl):
@@ -4369,7 +4614,7 @@ def web_later_fleet(fleet):
     return web_inbox_fleet(fleet)
 
 
-def dispatch_web_later(payload, include_local=True):
+def dispatch_web_later(payload, include_local=True, fleet=None):
     """Move a viewed completion into/out of the Web-only later group."""
     if not isinstance(payload, dict):
         return 400, {'ok': False, 'error': 'invalid json'}
@@ -4386,7 +4631,7 @@ def dispatch_web_later(payload, include_local=True):
     revision = payload.get('revision')
     if type(revision) is not int or revision < 1:
         return 400, {'ok': False, 'error': 'positive integer revision required'}
-    fleet = fleet_payload(include_local=include_local)
+    fleet = fleet_payload(include_local=include_local) if fleet is None else fleet
     if host not in {row['name'] for row in fleet['hosts'] if row.get('ok')}:
         return 409, {'ok': False, 'error': 'host is offline'}
     agent = next((row for row in fleet['agents'] if web_later_key(row) == (host, pane, pid)), None)
@@ -4470,7 +4715,7 @@ def web_inbox_fleet(fleet):
     return fleet
 
 
-def dispatch_web_inbox(payload, include_local=True):
+def dispatch_web_inbox(payload, include_local=True, fleet=None):
     if not isinstance(payload, dict):
         return 400, {'ok': False, 'error': 'invalid json'}
     identity = tuple(payload.get(key) for key in ('host', 'pane', 'pid'))
@@ -4489,7 +4734,7 @@ def dispatch_web_inbox(payload, include_local=True):
         if (type(revision) is not int or not 1 <= revision <= INBOX_MAX_REVISION
                 or not isinstance(item_id, str) or not re.fullmatch(r'[a-f0-9]{24}', item_id)):
             return 400, {'ok': False, 'error': 'valid revision and item_id required'}
-    fleet = fleet_payload(include_local=include_local)
+    fleet = fleet_payload(include_local=include_local) if fleet is None else fleet
     if identity[0] not in {host['name'] for host in fleet['hosts'] if host.get('ok')}:
         return 409, {'ok': False, 'error': 'host is offline; refresh before editing'}
     agent = next((row for row in fleet['agents'] if web_later_key(row) == identity and row.get('tracked')), None)
@@ -5628,7 +5873,7 @@ def start_local_update(ref):
 
 def fetch_peer_health(url, timeout=PEER_FETCH_TIMEOUT):
     request = Request(url.rstrip('/') + '/api/health', headers={'Accept': 'application/json'})
-    with urlopen(request, timeout=timeout) as response:
+    with peer_urlopen(request, timeout=timeout) as response:
         data = json.loads(response.read().decode())
     if not isinstance(data, dict) or data.get('ok') is not True:
         raise RuntimeError('invalid health')
@@ -5642,7 +5887,7 @@ def post_peer_update(url, ref, timeout=8):
         headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with peer_urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode())
     except HTTPError as exc:
         return {'ok': False, 'error': f'HTTP {exc.code}'}
@@ -5841,7 +6086,7 @@ def dispatch_send(payload):
                 method='POST',
             )
             # Each image costs the peer several tmux calls; a timeout after delivery would invite a duplicate send.
-            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT if images or files else 3) as response:
+            with peer_urlopen(request, timeout=PEER_UPLOAD_TIMEOUT if images or files else 3) as response:
                 data = json.loads(response.read().decode())
             return (200 if data.get('ok') else 502), data
         except HTTPError as exc:
@@ -5885,7 +6130,7 @@ def dispatch_upload(payload):
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                 method='POST',
             )
-            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
+            with peer_urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
                 result = json.loads(response.read().decode())
             reply = peer_upload_reply(result)
             return (200, reply) if reply else (502, {'ok': False, 'error': 'peer upload failed: bad reply'})
@@ -5935,7 +6180,7 @@ def dispatch_kill(payload):
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                 method='POST',
             )
-            with urlopen(request, timeout=3) as response:
+            with peer_urlopen(request, timeout=3) as response:
                 data = json.loads(response.read().decode())
             return (200 if data.get('ok') else 502), data
         except Exception as exc:
@@ -5968,7 +6213,7 @@ def dispatch_preview(payload):
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                 method='POST',
             )
-            with urlopen(request, timeout=3) as response:
+            with peer_urlopen(request, timeout=3) as response:
                 data = json.loads(response.read().decode())
             return (200 if data.get('ok') else 502), data
         except Exception as exc:
@@ -6018,7 +6263,7 @@ def dispatch_message(payload):
                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                 method='POST',
             )
-            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
+            with peer_urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
                 data = json.loads(response.read().decode())
             reply = peer_message_reply(data)
             return (200, reply) if reply else (502, {'ok': False, 'error': 'peer message failed: bad reply'})
@@ -6143,7 +6388,7 @@ def output_file_response(query, fleet_only=False):
         url = peer['url'].rstrip('/') + '/api/output-file?' + urlencode({
             'pane': pane, 'pid': pid, 'path': path, 'sig': sig, 'download': '1' if download else '0'})
         try:
-            with urlopen(Request(url), timeout=PEER_UPLOAD_TIMEOUT) as response:
+            with peer_urlopen(Request(url), timeout=PEER_UPLOAD_TIMEOUT) as response:
                 data = response.read(MAX_OUTPUT_FILE_BYTES + 1)
                 if len(data) > MAX_OUTPUT_FILE_BYTES:
                     return 413, b'File too large (limit: 256 MiB)', {}
@@ -6156,6 +6401,24 @@ def output_file_response(query, fleet_only=False):
                 return 200, data, headers
         except HTTPError as exc:
             with exc:
+                if exc.code == 302:
+                    # Older links put the anchor inside path. Only accept the
+                    # source's exact authorized file-repair redirect, and rebuild
+                    # it on this hub; never follow a peer-selected destination.
+                    target = urlparse(exc.headers.get('Location', ''))
+                    params = parse_qs(target.query)
+                    source_path, separator, fragment = path.partition('#')
+                    expected_fragment = quote(fragment, safe='/?:@-._~!$&\'()*+,;=%')
+                    valid = (separator and not target.scheme and not target.netloc
+                             and target.path == '/api/output-file' and target.fragment == expected_fragment
+                             and params.get('path') == [source_path] and params.get('pane') == [pane]
+                             and params.get('pid') == [pid] and params.get('sig', ['']) == [sig]
+                             and params.get('download', ['0']) == ['1' if download else '0'])
+                    if not valid:
+                        return 502, b'Invalid source file redirect', {}
+                    repaired = {**query, 'path': [source_path]}
+                    return 302, b'', {'Location': '/api/output-file?' + urlencode(repaired, doseq=True)
+                                     + '#' + expected_fragment}
                 if exc.code == 404:
                     return 404, b'File not found, or source host needs a tmux-attn update', {}
                 return exc.code, exc.read(4096), {}
@@ -6236,7 +6499,7 @@ def dispatch_ack(payload):
                                                '_local_only': True}).encode(),
                               headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                               method='POST')
-            with urlopen(request, timeout=3) as response:
+            with peer_urlopen(request, timeout=3) as response:
                 data = json.loads(response.read().decode())
             return (200 if data.get('ok') else 502), data
         except HTTPError as exc:
@@ -6275,7 +6538,7 @@ def dispatch_peer_register(payload):
         return 400, {'ok': False, 'error': 'invalid json'}
     name = payload.get('name')
     url = payload.get('url')
-    ok, detail = upsert_peer(name, url)
+    ok, detail = upsert_peer(name, url, payload.get('token'))
     if not ok:
         return 400, {'ok': False, 'error': detail}
     return 200, {'ok': True, 'action': detail, 'peer': {'name': clean(name), 'url': clean(url).rstrip('/')}}
@@ -6306,7 +6569,7 @@ def dispatch_answer(payload):
                               headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                               method='POST')
             # Several confirmed key steps; a timeout after delivery would invite a duplicate answer.
-            with urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
+            with peer_urlopen(request, timeout=PEER_UPLOAD_TIMEOUT) as response:
                 data = json.loads(response.read().decode())
             return (200 if data.get('ok') else 502), data
         except HTTPError as exc:
@@ -6364,6 +6627,15 @@ def tailscale_ipv4():
 def server_info_payload(bind='0.0.0.0', port=7788, fleet_only=False):
     """What the header's ? popover shows: enough to connect a client and to spot a stale process."""
     ts_ip = tailscale_ipv4()
+    remote_url = f'http://{ts_ip}:{port}' if ts_ip and bind in ('0.0.0.0', '::', ts_ip) else ''
+    if not remote_url:
+        # A loopback listener is reachable remotely only through an explicitly
+        # configured ingress; do not advertise an unbound Tailscale port.
+        for origin in os.environ.get('TMUX_ATTN_ALLOWED_ORIGINS', '').split(','):
+            candidate = urlparse(origin.strip())
+            if candidate.scheme == 'https' and (candidate.hostname or '').endswith('.ts.net'):
+                remote_url = origin.strip().rstrip('/')
+                break
     return {
         'ok': True,
         'host': local_host_name(),
@@ -6372,9 +6644,9 @@ def server_info_payload(bind='0.0.0.0', port=7788, fleet_only=False):
         'fleet_only': bool(fleet_only),
         'bind': bind,
         'port': port,
-        'peers': load_peers(),
+        'peers': [{'name': peer['name'], 'url': peer['url']} for peer in load_peers()],
         'peers_path': str(peers_config_path()),
-        'tailscale_url': f'http://{ts_ip}:{port}' if ts_ip else '',
+        'tailscale_url': remote_url,
     }
 
 
@@ -6730,7 +7002,7 @@ def work_peer_request(host, endpoint, payload=None):
                       data=json.dumps(forwarded).encode() if payload is not None else None,
                       headers={'Content-Type': 'application/json', 'Accept': 'application/json'})
     try:
-        with urlopen(request, timeout=20 if endpoint == '/api/work-usage' else 10) as response:
+        with peer_urlopen(request, timeout=20 if endpoint == '/api/work-usage' else 10) as response:
             data = json.loads(response.read(2 * 1024 * 1024).decode())
         if not isinstance(data, dict) or data.get('ok') is not True:
             return 502, {'ok': False, 'error': 'Source host returned an invalid response'}
@@ -6967,10 +7239,12 @@ def dispatch_work_start(payload):
         con.commit()
         return 200, result
 
-def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
+def make_web_handler(fleet_only=False, bind='127.0.0.1', port=7788, *, security=None, snapshots=None):
     index = web_index_path()
     if not index.is_file():
         raise SystemExit(f'Missing web UI: {index}')
+    security = security if security is not None else WebSecurity.from_environment(bind, port)
+    snapshots = snapshots if snapshots is not None else FeedSnapshots(include_local=not fleet_only)
 
     actions = {
         '/api/kill': dispatch_kill, '/api/send': dispatch_send, '/api/upload': dispatch_upload,
@@ -6991,13 +7265,32 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(payload)))
             self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Referrer-Policy', 'no-referrer')
             for key, value in (headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(payload)
 
+        def _authorized(self, method, path):
+            denied = security.authorize(method, path, self.headers,
+                                        getattr(getattr(self, 'server', None), 'server_port', port))
+            if denied:
+                code, body = denied
+                self._send(code, json.dumps(body), 'application/json; charset=utf-8')
+                return False
+            return True
+
         def do_GET(self):
             path = urlparse(self.path).path
+            if not self._authorized('GET', path):
+                return
+            if path == '/auth-client.js':
+                self._send(200, AUTH_CLIENT_JS, 'application/javascript; charset=utf-8')
+                return
+            if path == '/api/auth':
+                self._send(200, json.dumps(security.session_status(self.headers)), 'application/json; charset=utf-8')
+                return
             if path == '/api/output-preview':
                 self._send(200, output_preview_page(parse_qs(urlparse(self.path).query)), 'text/html; charset=utf-8', {
                     'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; "
@@ -7026,7 +7319,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             if path == '/api/health':
-                self._send(200, json.dumps({
+                health = {
                     'ok': True,
                     'fleet_only': fleet_only,
                     'peers': len(load_peers()),
@@ -7034,9 +7327,11 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                     'started_version': STARTED_VERSION,
                     'update': local_update_status(),
                     'code_current': loaded_code_current(),
-                    'project_icons': _PROJECT_ICONS.status(),
-                    'agent_feed': agent_feed_status(),
-                }), 'application/json; charset=utf-8')
+                }
+                if security.authenticated(self.headers):
+                    health.update(project_icons=_PROJECT_ICONS.status(), agent_feed=agent_feed_status(),
+                                  snapshots=snapshots.status())
+                self._send(200, json.dumps(health), 'application/json; charset=utf-8')
                 return
             if path == '/api/fleet/update-status':
                 query = parse_qs(urlparse(self.path).query)
@@ -7056,7 +7351,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
             if path == '/api/agents':
                 # Machine-local feed only — peer scrapers must use this path.
                 try:
-                    payload = {**local_agents_payload(), 'version': install_version()}
+                    payload = snapshots.agents()
                     self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
                     sys.stderr.write(f'web /api/agents: {type(exc).__name__}: {exc}\n')
@@ -7070,7 +7365,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
             if path == '/api/fleet/host':
                 name = parse_qs(urlparse(self.path).query).get('name', [''])[0]
                 try:
-                    payload = fleet_host_slice(name, include_local=not fleet_only)
+                    payload = snapshots.host(name)
                     code = 200 if payload.get('ok') else 404
                     self._send(code, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
@@ -7080,7 +7375,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 return
             if path == '/api/fleet':
                 try:
-                    payload = web_later_fleet(fleet_payload(include_local=not fleet_only))
+                    payload = snapshots.fleet()
                     self._send(200, json.dumps(payload, ensure_ascii=False), 'application/json; charset=utf-8')
                 except Exception as exc:
                     sys.stderr.write(f'web /api/fleet: {type(exc).__name__}: {exc}\n')
@@ -7121,12 +7416,15 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
                 return
             if path in ('/', '/index.html'):
-                self._send(200, index.read_bytes(), 'text/html; charset=utf-8')
+                page = index.read_bytes() if security.authenticated(self.headers) else login_html()
+                self._send(200, page, 'text/html; charset=utf-8', {'Content-Security-Policy': "frame-ancestors 'none'"})
                 return
             self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if not self._authorized('POST', path):
+                return
             try:
                 length = int(self.headers.get('Content-Length') or 0)
             except ValueError:
@@ -7146,15 +7444,26 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
             if not isinstance(payload, dict):
                 self._send(400, json.dumps({'ok': False, 'error': 'invalid json'}), 'application/json; charset=utf-8')
                 return
+            if path == '/api/auth/session':
+                code, body, headers = security.login(payload.get('token'), self.headers,
+                                                     self.server.server_port)
+                self._send(code, json.dumps(body), 'application/json; charset=utf-8', headers)
+                return
+            if path == '/api/auth/logout':
+                code, body, headers = security.logout(self.headers)
+                self._send(code, json.dumps(body), 'application/json; charset=utf-8', headers)
+                return
             # Only peer-forwarded server requests may set _local_only.
             payload.pop('_local_only', None)
             if path == '/api/peers':
                 code, body = dispatch_peer_register(payload)
+                if body.get('ok'):
+                    snapshots.invalidate()
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             if path == '/api/later':
                 try:
-                    code, body = dispatch_web_later(payload, include_local=not fleet_only)
+                    code, body = dispatch_web_later(payload, include_local=not fleet_only, fleet=snapshots.fleet())
                 except Exception as exc:
                     sys.stderr.write(f'web /api/later: {type(exc).__name__}: {exc}\n')
                     code, body = 500, {'ok': False, 'error': 'failed to update later group'}
@@ -7162,7 +7471,7 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                 return
             if path == '/api/inbox':
                 try:
-                    code, body = dispatch_web_inbox(payload, include_local=not fleet_only)
+                    code, body = dispatch_web_inbox(payload, include_local=not fleet_only, fleet=snapshots.fleet())
                 except Exception as exc:
                     sys.stderr.write(f'web /api/inbox: {type(exc).__name__}: {exc}\n')
                     code, body = 500, {'ok': False, 'error': 'failed to update inbox'}
@@ -7188,6 +7497,8 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
                                'application/json; charset=utf-8')
                     return
                 code, body = action(payload)
+                if body.get('ok') and path in ('/api/send', '/api/kill', '/api/ack', '/api/answer', '/api/work/start'):
+                    snapshots.invalidate(payload.get('host', ''))
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')
@@ -7195,9 +7506,42 @@ def make_web_handler(fleet_only=False, bind='0.0.0.0', port=7788):
     return Handler
 
 
-def serve_web(host='0.0.0.0', port=7788, fleet_only=False):
+class BoundedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_workers=32):
+        self.slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(address, handler)
+
+    def process_request(self, request, address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.settimeout(.2)
+                request.sendall(b'HTTP/1.0 503 Service Unavailable\r\nRetry-After: 1\r\n'
+                                b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, address):
+        try:
+            super().process_request_thread(request, address)
+        finally:
+            self.slots.release()
+
+
+def serve_web(host='127.0.0.1', port=7788, fleet_only=False):
     prune_uploads()
-    server = ThreadingHTTPServer((host, port), make_web_handler(fleet_only=fleet_only, bind=host, port=port))
+    feeds = FeedSnapshots(include_local=not fleet_only)
+    handler = make_web_handler(fleet_only=fleet_only, bind=host, port=port, snapshots=feeds)
+    server = BoundedHTTPServer((host, port), handler)
+    feeds.start()
     print(json.dumps({
         'web': f'http://{host}:{port}/',
         'bind': host,
@@ -7210,6 +7554,7 @@ def serve_web(host='0.0.0.0', port=7788, fleet_only=False):
     except KeyboardInterrupt:
         pass
     finally:
+        feeds.stop()
         server.server_close()
 
 
@@ -7238,6 +7583,20 @@ def ensure_sidebars(target=None):
 
 
 def main():
+    if sys.argv[1:2] == ['auth-token'] and len(sys.argv) == 2:
+        print(WebSecurity.from_environment().token)
+        return
+    if sys.argv[1:2] == ['snapshot-worker'] and len(sys.argv) == 2:
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        # Icons belong to the parent cache, never spawn grandchildren per scan.
+        global project_technology
+        project_technology = lambda _path: ''
+        for _request in sys.stdin:
+            signal.alarm(12)
+            payload = {**local_agents_payload(), 'version': install_version()}
+            print(json.dumps(payload, ensure_ascii=False), flush=True)
+            signal.alarm(0)
+        return
     if sys.argv[1:2] == ['update']:
         sys.exit(run_update(sys.argv[2:]))
     if sys.argv[1:2] == ['project-technology'] and len(sys.argv) == 3:
@@ -7286,7 +7645,7 @@ def main():
     elif args.command == 'prune':
         prune_sidebars()
     elif args.command == 'web':
-        host = '0.0.0.0'
+        host = '127.0.0.1'
         port = 7788
         fleet_only = False
         rest = list(args.args)

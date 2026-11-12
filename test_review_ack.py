@@ -12,6 +12,7 @@ import time
 import unittest
 from unittest.mock import patch
 from urllib.request import Request, urlopen
+from test_http_support import domain_web_handler
 
 
 spec = importlib.util.spec_from_file_location('attention_review_tests', Path(__file__).with_name('attention.py'))
@@ -255,7 +256,7 @@ class ReviewAcknowledgementTests(unittest.TestCase):
         self.record()
         peer_reply = {'ok': True, 'revision': 17, 'host': 'lab'}
         with patch.object(a, 'load_peers', return_value=[dict(name='lab', url='http://lab:7788/')]), \
-             patch.object(a, 'urlopen') as remote:
+             patch.object(a, 'peer_urlopen') as remote:
             remote.return_value.__enter__.return_value.read.return_value = json.dumps(peer_reply).encode()
             code, body = a.dispatch_ack(self.payload(17, host='lab'))
         self.assertEqual(code, 200)
@@ -272,7 +273,7 @@ class ReviewAcknowledgementTests(unittest.TestCase):
 
     def test_web_ack_route_persists_reviewed_state_in_next_feed(self):
         self.record()
-        base_handler = a.make_web_handler()
+        base_handler = domain_web_handler(app=a)
 
         class QuietHandler(base_handler):
             def log_message(self, *args):
@@ -309,7 +310,7 @@ class ReviewAcknowledgementTests(unittest.TestCase):
         self.assertEqual(code, 404)
         self.assertFalse(body['ok'])
         with patch.object(a, 'load_peers', return_value=[dict(name='lab', url='http://lab:7788')]), \
-             patch.object(a, 'urlopen', side_effect=OSError('offline')):
+             patch.object(a, 'peer_urlopen', side_effect=OSError('offline')):
             code, body = a.dispatch_ack(self.payload(host='lab'))
         self.assertEqual(code, 502)
         self.assertFalse(body['ok'])
