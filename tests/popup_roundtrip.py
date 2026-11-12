@@ -15,6 +15,7 @@ import time
 from unittest.mock import patch
 
 root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root))
 spec = importlib.util.spec_from_file_location('attention', root/'attention.py')
 a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
