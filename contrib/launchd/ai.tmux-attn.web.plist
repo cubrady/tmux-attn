@@ -11,6 +11,8 @@
     <string>__HOST__</string>
     <string>__PORT__</string>
   </array>
+  <key>ProcessType</key>
+  <string>Interactive</string>
   <key>WorkingDirectory</key>
   <string>__HOME__</string>
   <key>RunAtLoad</key>

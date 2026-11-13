@@ -3517,6 +3517,7 @@ class LocalSnapshotCollector:
                 raise ValueError('Invalid local snapshot')
             for row in payload['agents']:
                 row['project_technology'] = project_technology(row.get('path', ''))
+                row.update(cached_git_workdir_info(row.get('path', '')))
             with _AGENT_FEED_LOCK:
                 _AGENT_FEED_LAST.update(last_success_at=time.time(), last_error=None)
             return payload
@@ -3742,6 +3743,7 @@ def fleet_payload(include_local=True, peer_timeout=PEER_FETCH_TIMEOUT, now=None,
 
 USAGE_PROVIDERS = ('codex', 'claude', 'cursor', 'antigravity')
 _USAGE_CACHE = {}
+_USAGE_FETCH_ERRORS = {}  # At most one scrubbed diagnostic per supported provider.
 _USAGE_TTL = 180.0
 _USAGE_STALE_TTL = 1800.0
 _USAGE_TIMEOUT = 15.0
@@ -4220,23 +4222,37 @@ def _fetch_cursor_direct_usage(rpc=_cursor_dashboard_rpc, tokens=None, now=None)
 def _fetch_provider_usage(provider, binary=None, runner=_run_codexbar_json):
     if provider not in USAGE_PROVIDERS:
         return []
+    started = time.monotonic()
+    error_kind = 'missing_binary'
     if provider == 'cursor' and runner is _run_codexbar_json:
         direct = _fetch_cursor_direct_usage()
         if direct:
+            _USAGE_FETCH_ERRORS.pop(provider, None)
             return direct
     binary = binary if binary is not None else codexbar_bin()
     if binary:
-        for args in (
+        commands = (
             [binary, 'usage', '--provider', provider, '--all-accounts', '--no-credits', '--format', 'json'],
             [binary, 'usage', '--provider', provider, '--no-credits', '--format', 'json'],
-        ):
+        )
+        if provider == 'antigravity' and os.environ.get('TMUX_ATTN_AGY_AUTH_SCOPE') in ('file', 'keychain'):
+            # Explicit storage scope targets the ambient CLI login. Configured
+            # CodexBar token accounts are separate identities, not that login.
+            commands = commands[1:]
+        for args in commands:
             try:
                 items = runner(args)
-            except Exception:
+                error_kind = 'provider_error' if any(isinstance(item, dict) and item.get('error') for item in items) else 'empty_usage'
+            except Exception as exc:
+                # Class names identify timeouts/JSON/process failures without
+                # retaining provider messages, command output or credentials.
+                error_kind = type(exc).__name__
                 items = []
             accounts = [row for item in items if (row := _normalize_usage_account(item, provider)) is not None]
             if accounts:
+                _USAGE_FETCH_ERRORS.pop(provider, None)
                 return accounts
+    _USAGE_FETCH_ERRORS[provider] = {'kind': error_kind, 'elapsed_s': round(time.monotonic() - started, 3)}
     return []
 
 
@@ -4655,6 +4671,9 @@ def usage_snapshot_payload(providers, force_refresh=False, now=None):
             accounts.extend({**row, 'source': row.get('source') or source} for row in rows)
             statuses[provider] = {'state': 'refreshing' if provider in _USAGE_REFRESHING else 'ready' if rows and not stale else 'unavailable',
                                   'source': source, 'observed_at': max((r['observed_at'] for r in rows), default=None)}
+            fetch_error = _USAGE_FETCH_ERRORS.get(provider)
+            if fetch_error:
+                statuses[provider]['last_error'] = dict(fetch_error)
         _persist_usage_snapshots()
     return {'ok': True, 'providers': wanted, 'accounts': accounts, 'provider_status': statuses,
             'updated_at': int(max((r['observed_at'] for r in accounts), default=now))}
@@ -4850,6 +4869,7 @@ def dispatch_web_inbox(payload, include_local=True, fleet=None):
 
 _GIT_ENV_CACHE = {}
 _GIT_ENV_TTL = 25.0
+_GIT_SNAPSHOTS = SnapshotCache(ttl=25, max_age=300, max_workers=2, capacity=256)
 
 _PROJECT_TECH_CACHE = {}
 _PROJECT_MANIFESTS = (
@@ -5255,6 +5275,14 @@ def project_technology(path):
 
 def repo_name(path):
     return Path(path).name if path else ''
+
+
+def cached_git_workdir_info(path):
+    empty = {'repo': repo_name(path), 'branch': '', 'dirty': False}
+    if not path:
+        return empty
+    entry = _GIT_SNAPSHOTS.get(path, lambda: git_workdir_info(path))
+    return entry['payload'] or empty
 
 
 def git_workdir_info(path):
@@ -7673,8 +7701,9 @@ def ensure_sidebars(target=None):
 def snapshot_worker(trace_after=6):
     """Keep the last slow scan's Python stacks, without logging conversation data."""
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    global project_technology
+    global project_technology, git_workdir_info
     project_technology = lambda _path: ''
+    git_workdir_info = lambda path: {'repo': repo_name(path), 'branch': '', 'dirty': False}
     STATE.mkdir(parents=True, exist_ok=True)
     trace_path = STATE / 'snapshot-timeout.log'
     fd = os.open(trace_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0), 0o600)

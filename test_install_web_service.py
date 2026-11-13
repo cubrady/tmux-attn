@@ -98,6 +98,7 @@ elif name == 'curl': print('{"ok":true}')
         self.assertEqual(config['EnvironmentVariables']['TMUX_ATTN_ALLOWED_ORIGINS'], origins)
         self.assertEqual(config['EnvironmentVariables']['TMUX_ATTN_AUTH_KEY_FILE'], key)
         self.assertEqual(config['EnvironmentVariables']['TMUX_ATTN_AGY_AUTH_SCOPE'], 'file')
+        self.assertEqual(config['ProcessType'], 'Interactive')
         self.assertIn(['curl', '-s', '-m', '3', 'http://100.64.0.10:7799/api/health'], self.commands())
 
     def test_systemd_escapes_environment_without_injecting_directives(self):

@@ -185,6 +185,31 @@ print(json.dumps({'ok': True, 'agents': [], 'pid': os.getpid()}), flush=True)
             thread.join(2)
 
 
+    def test_blocked_git_enrichment_does_not_hold_agent_snapshot(self):
+        import time
+        from feed_snapshots import SnapshotCache
+        release, entered = threading.Event(), threading.Event()
+        def slow_git(path):
+            entered.set()
+            release.wait(3)
+            return {'repo':'project','branch':'main','dirty':True}
+        self.scripts.append("import json,sys\nfor line in sys.stdin: print(json.dumps({'ok':True,'agents':[{'pane':'%2','state':'RUNNING','path':'/project'}]}),flush=True)")
+        with patch.object(a, '_GIT_SNAPSHOTS', SnapshotCache(ttl=25,max_workers=2,capacity=256)), patch.object(a,'git_workdir_info',side_effect=slow_git), patch.object(a,'project_technology',return_value=''):
+            collector=self.collector()
+            try:
+                start=time.monotonic(); first=collector()
+                self.assertLess(time.monotonic()-start,1)
+                self.assertEqual(first['agents'][0]['state'],'RUNNING')
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(collector()['agents'][0]['branch'],'')
+                self.assertEqual(a._GIT_SNAPSHOTS.status()['active'],1)
+            finally:
+                release.set()
+            deadline=time.monotonic()+1
+            while a._GIT_SNAPSHOTS.status()['active'] and time.monotonic()<deadline: time.sleep(.005)
+            self.assertEqual(collector()['agents'][0]['branch'],'main')
+
+
 class SnapshotWorkerCliTests(unittest.TestCase):
     def test_actual_worker_cli_handles_multiple_requests_and_exits_on_parent_eof(self):
         script = '''import attention as a, sys

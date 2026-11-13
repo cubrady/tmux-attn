@@ -54,6 +54,63 @@ class AntigravityUsageTests(unittest.TestCase):
 
 
 class AntigravityAuthScopeTests(unittest.TestCase):
+    def setUp(self):
+        errors = patch.object(a, '_USAGE_FETCH_ERRORS', {})
+        errors.start()
+        self.addCleanup(errors.stop)
+
+    def test_fetch_diagnostics_distinguish_timeout_and_provider_error_without_messages(self):
+        with patch.dict(os.environ, {'TMUX_ATTN_AGY_AUTH_SCOPE': 'file'}):
+            def timeout(command):
+                raise subprocess.TimeoutExpired('private-command', 15, output='private-token')
+            a._fetch_provider_usage('antigravity', binary='codexbar', runner=timeout)
+            diagnostic = a._USAGE_FETCH_ERRORS['antigravity']
+            self.assertEqual(diagnostic['kind'], 'TimeoutExpired')
+            self.assertIsInstance(diagnostic['elapsed_s'], (int, float))
+            self.assertNotIn('private', str(diagnostic))
+            a._fetch_provider_usage('antigravity', binary='codexbar', runner=lambda _: [
+                {'error': {'message': 'private-token', 'kind': 'sensitive-provider-message'}}])
+            self.assertEqual(a._USAGE_FETCH_ERRORS['antigravity']['kind'], 'provider_error')
+            self.assertNotIn('private', str(a._USAGE_FETCH_ERRORS))
+            a._fetch_provider_usage('antigravity', binary='codexbar', runner=lambda _: [
+                {'provider': 'antigravity', 'usage': {'primary': {'usedPercent': 31}}}])
+            self.assertNotIn('antigravity', a._USAGE_FETCH_ERRORS)
+
+    def test_usage_status_exposes_scrubbed_fetch_diagnostic(self):
+        a._USAGE_FETCH_ERRORS['antigravity'] = {'kind': 'TimeoutExpired', 'elapsed_s': 15.001}
+        with patch.object(a, '_USAGE_CACHE', {}), patch.object(a, '_USAGE_REFRESHING', set()), \
+             patch.object(a, '_USAGE_REFRESH_ATTEMPTS', {'antigravity': 100}), \
+             patch.object(a, '_load_usage_snapshots'), patch.object(a, 'codexbar_snapshot_accounts', return_value={}), \
+             patch.object(a, '_persist_usage_snapshots'):
+            payload = a.usage_snapshot_payload(['antigravity'], now=101)
+        self.assertEqual(payload['provider_status']['antigravity']['last_error'],
+                         {'kind': 'TimeoutExpired', 'elapsed_s': 15.001})
+
+    def test_explicit_scope_queries_only_ambient_antigravity_login(self):
+        for scope in ('file', 'keychain'):
+            with self.subTest(scope=scope), patch.dict(os.environ, {'TMUX_ATTN_AGY_AUTH_SCOPE': scope}):
+                commands = []
+                def unavailable(command):
+                    commands.append(command)
+                    return [{'provider': 'antigravity', 'error': {'kind': 'provider'}}]
+                self.assertEqual(a._fetch_provider_usage('antigravity', binary='codexbar', runner=unavailable), [])
+                self.assertEqual(len(commands), 1)
+                self.assertNotIn('--all-accounts', commands[0])
+                commands.clear()
+                a._fetch_provider_usage('codex', binary='codexbar', runner=unavailable)
+                self.assertIn('--all-accounts', commands[0])
+
+    def test_inherited_scope_retains_configured_account_discovery(self):
+        with patch.dict(os.environ, {'TMUX_ATTN_AGY_AUTH_SCOPE': 'inherit'}):
+            commands = []
+            def unavailable(command):
+                commands.append(command)
+                return []
+            a._fetch_provider_usage('antigravity', binary='codexbar', runner=unavailable)
+            self.assertEqual(len(commands), 2)
+            self.assertIn('--all-accounts', commands[0])
+            self.assertNotIn('--all-accounts', commands[1])
+
     def test_explicit_scope_changes_only_antigravity_child_environment(self):
         for scope in ('file', 'keychain'):
             with patch.dict(os.environ, {'TMUX_ATTN_AGY_AUTH_SCOPE': scope, 'SSH_TTY': 'original', 'SSH_CONNECTION': 'original'}), patch.object(a.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='[{"provider":"antigravity"}]')) as run:

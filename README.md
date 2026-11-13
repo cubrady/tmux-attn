@@ -328,3 +328,8 @@ Slow local snapshot scans record Python stacks in
 `~/.local/state/tmux-attn/snapshot-timeout.log` after six seconds, before the
 collector's eight-second deadline. The dashboard marks failed or older-than-ten-second
 host snapshots as delayed instead of presenting HTTP success as fresh agent status.
+
+Git branch/dirty metadata is collected through a bounded background cache in the
+web process, separately from status snapshots. macOS launchd runs this interactive
+web service with `ProcessType=Interactive`, so its CLI helpers do not inherit the
+default daemon CPU/I/O throttling that can exhaust short collection deadlines.
