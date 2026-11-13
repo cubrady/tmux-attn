@@ -415,7 +415,7 @@
       0%, 100% { opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent); }
       50% { opacity: 0.45; box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 10%, transparent); }
     }
-    .live[data-state="offline"] {
+    .live[data-state="offline"], .live[data-state="stale"] {
       color: var(--danger);
       border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
       background: color-mix(in srgb, var(--danger) 12%, var(--card));
@@ -4003,6 +4003,7 @@
         return `<div class="usage-card" data-usage-provider="${escapeHtml(acc.provider)}" data-usage-account="${escapeHtml(acc.account || acc.label)}">` +
           `<div class="usage-card-head">` +
             `<span class="usage-card-id" title="${escapeHtml(`${providerName} · ${acc.account || acctLabel}`)}">${badge}<span>${escapeHtml(acctLabel)}</span></span>` +
+            (acc.upstream_source ? `<span class="usage-plan">${escapeHtml(acc.upstream_source)}${acc.auth_scope === 'file' ? ' · 檔案登入' : acc.auth_scope === 'keychain' ? ' · Keychain' : ''}</span>` : '') +
             (acc.stale ? '<span class="usage-plan">快取</span>' : '') +
             (acc.plan ? `<span class="usage-plan">${escapeHtml(acc.plan)}</span>` : '') +
           `</div>` +
@@ -6262,6 +6263,14 @@
       const clock = document.getElementById('clock');
       if (!clock) return;
       if (state) clock.dataset.state = state;
+      const degraded = latestHosts.filter(h => !h.pending && (h.ok === false || h.snapshot?.last_error || Number(h.snapshot?.age_s) > 10));
+      if (degraded.length && clock.dataset.state !== 'loading') {
+        clock.dataset.state = 'stale';
+        clock.textContent = '狀態更新延遲 · 顯示舊資料';
+        clock.title = degraded.map(h => `${h.name}：${h.snapshot?.age_s != null ? Math.floor(h.snapshot.age_s) + ' 秒前取樣' : '更新失敗'}`).join('；');
+        return;
+      }
+      if (clock.dataset.state === 'stale') clock.dataset.state = 'live';
       const mode = clock.dataset.state;
       if (mode === 'loading') {
         clock.textContent = '…';
@@ -6591,7 +6600,7 @@
     setInterval(refresh, POLL_MS);
     setInterval(() => {
       const state = document.getElementById('clock')?.dataset.state;
-      if (state === 'live' || state === 'offline' || state === 'updating') paintClock();
+      if (state === 'live' || state === 'offline' || state === 'updating' || state === 'stale') paintClock();
     }, 1000);
   </script>
 </body>

@@ -224,5 +224,32 @@ a.main()
         self.assertEqual(child.returncode, -signal.SIGALRM, errors.decode())
 
 
+
+
+class SnapshotTraceTests(unittest.TestCase):
+    def test_slow_scan_records_stack_and_successful_scans_do_not_grow_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = """import io,sys,time,pathlib
+import attention as a
+a.STATE=pathlib.Path(sys.argv[1])
+a.install_version=lambda:'test'
+def slow():
+ time.sleep(.15)
+ return {'ok':True,'agents':[]}
+a.local_agents_payload=slow
+sys.stdin=io.StringIO('{}\\n')
+a.snapshot_worker(trace_after=.05)
+p=a.STATE/'snapshot-timeout.log'
+first=p.read_text()
+assert 'Timeout' in first and 'slow' in first,first
+a.local_agents_payload=lambda:{'ok':True,'agents':[]}
+sys.stdin=io.StringIO('{}\\n{}\\n')
+a.snapshot_worker(trace_after=1)
+assert p.read_text()==first
+"""
+            result = subprocess.run([sys.executable, '-c', script, directory], cwd=a.ROOT, capture_output=True, text=True, timeout=4)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

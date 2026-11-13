@@ -91,12 +91,13 @@ elif name == 'curl': print('{"ok":true}')
         key = str(self.home / 'key "%n" & token.key')
         origins = 'https://work.tailnet.ts.net,http://100.64.0.10:7799'
         result = self.run_install('Darwin', TMUX_ATTN_WEB_HOST='100.64.0.10', TMUX_ATTN_WEB_PORT='7799',
-                                  TMUX_ATTN_ALLOWED_ORIGINS=origins, TMUX_ATTN_AUTH_KEY_FILE=key)
+                                  TMUX_ATTN_ALLOWED_ORIGINS=origins, TMUX_ATTN_AUTH_KEY_FILE=key, TMUX_ATTN_AGY_AUTH_SCOPE='file')
         self.assertEqual(result.returncode, 0, result.stderr)
         config = plistlib.loads(self.plist().read_bytes())
         self.assertEqual(config['ProgramArguments'][-2:], ['100.64.0.10', '7799'])
         self.assertEqual(config['EnvironmentVariables']['TMUX_ATTN_ALLOWED_ORIGINS'], origins)
         self.assertEqual(config['EnvironmentVariables']['TMUX_ATTN_AUTH_KEY_FILE'], key)
+        self.assertEqual(config['EnvironmentVariables']['TMUX_ATTN_AGY_AUTH_SCOPE'], 'file')
         self.assertIn(['curl', '-s', '-m', '3', 'http://100.64.0.10:7799/api/health'], self.commands())
 
     def test_systemd_escapes_environment_without_injecting_directives(self):

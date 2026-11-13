@@ -4861,3 +4861,25 @@ test('manual quota refresh on a remote execution host refreshes the homepage sou
   assert.deepEqual(calls,['/api/work-usage?host=home&refresh=1']);
   assert.equal(vm.runInContext('workAccounts[0].windows[0].usedPercent',ui.context),20);
 });
+
+
+test('HTTP success with old snapshots stays visibly stale until source recovers', () => {
+  const ui = dashboard();
+  ui.context.applyHostSlice({hosts:[{name:'local',ok:false,stale:true,snapshot:{age_s:1320,last_error:'TimeoutExpired'}}],agents:[]});
+  ui.context.paintClock('live');
+  assert.equal(ui.elements.get('clock').dataset.state,'stale');
+  assert.match(ui.elements.get('clock').textContent,/顯示舊資料/);
+  assert.match(ui.elements.get('clock').title,/1320 秒前取樣/);
+  ui.context.applyHostSlice({hosts:[{name:'local',ok:true,snapshot:{age_s:1,last_error:null}}],agents:[]});
+  assert.equal(ui.elements.get('clock').dataset.state,'live');
+  assert.doesNotMatch(ui.elements.get('clock').textContent,/舊資料/);
+  ui.context.applyHostSlice({hosts:[{name:'local',ok:true,snapshot:{age_s:120,last_error:null}}],agents:[]});
+  assert.equal(ui.elements.get('clock').dataset.state,'stale');
+});
+
+test('Antigravity usage names the upstream source and authentication scope', () => {
+ const ui=dashboard();
+ ui.render({hosts:[],agents:[{...agent('', 'RUNNING'),agent:'agy'}],summary:{}});
+ ui.renderUsage({accounts:[{provider:'antigravity',account:'antigravity',upstream_source:'cli',auth_scope:'file',windows:[{label:'Gemini weekly',usedPercent:31}]}]});
+ assert.match(ui.elements.get('agent-usage').innerHTML,/cli · 檔案登入/);
+});

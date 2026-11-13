@@ -315,3 +315,16 @@ shellcheck bootstrap.sh install.sh install_web_service.sh update.sh
 
 GitHub Actions 會在 push／PR 自動執行上述檢查，涵蓋 Python 3.11 與 3.14。
 Python 整合測試使用臨時 HOME 和獨立 tmux server，驗證安裝、hooks、遷移與還原。
+
+
+Antigravity usage authentication can be selected for the web service with
+`TMUX_ATTN_AGY_AUTH_SCOPE=file` (agy file tokens) or `keychain`; the default
+`inherit` preserves the process environment. This setting applies only to the
+Antigravity quota subprocess, and the panel labels the selected scope and actual
+CodexBar source. Match the scope used by your terminal CLI; separate logins can
+have different quota groups and limits.
+
+Slow local snapshot scans record Python stacks in
+`~/.local/state/tmux-attn/snapshot-timeout.log` after six seconds, before the
+collector's eight-second deadline. The dashboard marks failed or older-than-ten-second
+host snapshots as delayed instead of presenting HTTP success as fresh agent status.

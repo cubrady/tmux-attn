@@ -8,6 +8,7 @@ import curses
 import html
 import datetime
 import fcntl
+import faulthandler
 import hashlib
 import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3863,7 +3864,7 @@ def _normalize_usage_account(item, fallback_provider):
             windows = extra_windows
     if not windows:
         return None
-    return {
+    result = {
         'provider': provider,
         'account': account or provider,
         'label': _short_account_label(account, provider),
@@ -3871,15 +3872,35 @@ def _normalize_usage_account(item, fallback_provider):
         'windows': windows,
         'updatedAt': clean(str(usage.get('updatedAt') or '')),
     }
+    # Cache provenance (live/saved-cache) is separate from the provider selected
+    # by CodexBar (app/cli/ide/oauth). Retain the latter for quota comparisons.
+    upstream_source = clean(str(item.get('source') or ''), 64)
+    if upstream_source:
+        result['upstream_source'] = upstream_source
+    if item.get('auth_scope') in ('file', 'keychain'):
+        result['auth_scope'] = item['auth_scope']
+    return result
 
 
 def _run_codexbar_json(cmd, timeout=_USAGE_TIMEOUT):
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    env = None
+    scope = os.environ.get('TMUX_ATTN_AGY_AUTH_SCOPE', 'inherit')
+    if 'antigravity' in cmd and scope in ('file', 'keychain'):
+        env = dict(os.environ)
+        for key in ('SSH_TTY', 'SSH_CONNECTION', 'SSH_CLIENT'):
+            env.pop(key, None)
+        if scope == 'file':
+            # agy uses file tokens when SSH_TTY is set; scope this to quota reads.
+            env['SSH_TTY'] = 'tmux-attn-file-auth'
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **({'env': env} if env is not None else {}))
     raw = (proc.stdout or '').strip()
     if not raw:
         return []
     data = json.loads(raw)
-    return data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+    items = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+    if env is not None:
+        items = [{**item, 'auth_scope': scope} if isinstance(item, dict) else item for item in items]
+    return items
 
 
 def _cursor_access_tokens(home=None):
@@ -4335,6 +4356,9 @@ def _usage_cached_rows(rows, provider, observed, now, max_age):
     for row in rows[:100]:
         if not isinstance(row, dict) or row.get('provider') != provider or not row.get('windows'):
             continue
+        scope = os.environ.get('TMUX_ATTN_AGY_AUTH_SCOPE', 'inherit')
+        if provider == 'antigravity' and scope in ('file', 'keychain') and row.get('auth_scope') != scope:
+            continue
         sampled = usage_timestamp(row.get('updatedAt')) or usage_timestamp(row.get('observed_at')) or observed
         if sampled is None or not -60 <= now - sampled <= max_age:
             continue
@@ -4350,6 +4374,9 @@ def _usage_cached_rows(rows, provider, observed, now, max_age):
 def _merge_usage_accounts(provider, rows, previous, now, source):
     """Merge individual account observations; a partial source cannot erase other accounts."""
     old = _usage_cached_rows(previous[1], provider, previous[0], now, _USAGE_PERSIST_MAX_AGE) if previous else []
+    scope = os.environ.get('TMUX_ATTN_AGY_AUTH_SCOPE', 'inherit')
+    if provider == 'antigravity' and scope in ('file', 'keychain'):
+        rows = [row for row in rows if row.get('auth_scope') == scope]
     identity = lambda row: str(row.get('account') or row.get('label') or provider).strip().casefold()
     known = any(identity(row) != provider for row in [*old, *rows])
     prior = {identity(row): row for row in old if not known or identity(row) != provider}
@@ -7643,6 +7670,38 @@ def ensure_sidebars(target=None):
             tmux('wait-for', '-U', lock)
 
 
+def snapshot_worker(trace_after=6):
+    """Keep the last slow scan's Python stacks, without logging conversation data."""
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    global project_technology
+    project_technology = lambda _path: ''
+    STATE.mkdir(parents=True, exist_ok=True)
+    trace_path = STATE / 'snapshot-timeout.log'
+    fd = os.open(trace_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, 'a') as trace:
+        for _request in sys.stdin:
+            if os.fstat(trace.fileno()).st_size > 65536:
+                trace.seek(0)
+                trace.truncate()
+            signal.alarm(12)
+            before = trace.tell()
+            trace.write(f'Scan started {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n')
+            trace.flush()
+            start = trace.tell()
+            faulthandler.dump_traceback_later(trace_after, file=trace)
+            try:
+                payload = {**local_agents_payload(), 'version': install_version()}
+                print(json.dumps(payload, ensure_ascii=False), flush=True)
+            finally:
+                faulthandler.cancel_dump_traceback_later()
+                signal.alarm(0)
+                # Successful quick scans do not grow the diagnostic log.
+                if trace.tell() == start:
+                    trace.seek(before)
+                    trace.truncate()
+
+
 def main():
     if sys.argv[1:2] == ['codexbar-widgets'] and len(sys.argv) == 3:
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
@@ -7653,15 +7712,7 @@ def main():
         print(WebSecurity.from_environment().token)
         return
     if sys.argv[1:2] == ['snapshot-worker'] and len(sys.argv) == 2:
-        signal.signal(signal.SIGALRM, signal.SIG_DFL)
-        # Icons belong to the parent cache, never spawn grandchildren per scan.
-        global project_technology
-        project_technology = lambda _path: ''
-        for _request in sys.stdin:
-            signal.alarm(12)
-            payload = {**local_agents_payload(), 'version': install_version()}
-            print(json.dumps(payload, ensure_ascii=False), flush=True)
-            signal.alarm(0)
+        snapshot_worker()
         return
     if sys.argv[1:2] == ['update']:
         sys.exit(run_update(sys.argv[2:]))

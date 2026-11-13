@@ -7,7 +7,7 @@
 #   sh install_web_service.sh --uninstall
 #
 # Env: TMUX_ATTN_WEB_HOST (default 127.0.0.1), TMUX_ATTN_WEB_PORT (default 7788)
-#      TMUX_ATTN_ALLOWED_ORIGINS, TMUX_ATTN_AUTH_KEY_FILE (persisted in the service)
+#      TMUX_ATTN_ALLOWED_ORIGINS, TMUX_ATTN_AUTH_KEY_FILE, TMUX_ATTN_AGY_AUTH_SCOPE (persisted)
 set -eu
 
 HOST="${TMUX_ATTN_WEB_HOST:-127.0.0.1}"
@@ -114,7 +114,7 @@ try:
 except ValueError as error:
     raise SystemExit(f'Invalid web service configuration: {error}')
 
-environment = {key: os.environ[key] for key in ('TMUX_ATTN_ALLOWED_ORIGINS', 'TMUX_ATTN_AUTH_KEY_FILE')
+environment = {key: os.environ[key] for key in ('TMUX_ATTN_ALLOWED_ORIGINS', 'TMUX_ATTN_AUTH_KEY_FILE', 'TMUX_ATTN_AGY_AUTH_SCOPE')
                if os.environ.get(key)}
 replacements = {'__HOME__': os.environ['HOME'], '__USER__': user, '__HOST__': host, '__PORT__': port}
 
