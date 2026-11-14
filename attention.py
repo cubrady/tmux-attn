@@ -4235,6 +4235,11 @@ def _fetch_provider_usage(provider, binary=None, runner=_run_codexbar_json):
             [binary, 'usage', '--provider', provider, '--all-accounts', '--no-credits', '--format', 'json'],
             [binary, 'usage', '--provider', provider, '--no-credits', '--format', 'json'],
         )
+        if provider == 'claude':
+            # Auto may stall on browser cookies or an expired OAuth export even
+            # when Claude's interactive CLI has a working, current login.
+            commands += ([binary, 'usage', '--provider', provider, '--source', 'cli',
+                          '--no-credits', '--format', 'json'],)
         if provider == 'antigravity' and os.environ.get('TMUX_ATTN_AGY_AUTH_SCOPE') in ('file', 'keychain'):
             # Explicit storage scope targets the ambient CLI login. Configured
             # CodexBar token accounts are separate identities, not that login.
@@ -6012,6 +6017,35 @@ def post_peer_update(url, ref, timeout=8):
     return data
 
 
+def fleet_publication_error(target):
+    """Peers can only fetch commits published on the hub checkout's upstream."""
+    src = install_source()
+    if src is None:
+        return 'hub 找不到 checkout，無法確認更新版本是否已推送'
+    try:
+        def git(*args):
+            return subprocess.run(['git', '-C', str(src), *args], capture_output=True,
+                                  text=True, timeout=8, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+        branch = git('symbolic-ref', '--quiet', '--short', 'HEAD')
+        if branch.returncode:
+            return 'hub checkout 未設定 upstream，無法確認更新版本是否已推送'
+        name = git('config', '--get', f'branch.{branch.stdout.strip()}.remote')
+        merge = git('config', '--get', f'branch.{branch.stdout.strip()}.merge')
+        if name.returncode or merge.returncode or name.stdout.strip() == '.':
+            return 'hub checkout 未設定遠端 upstream'
+        published = git('ls-remote', '--exit-code', name.stdout.strip(), merge.stdout.strip())
+        if published.returncode:
+            return '無法連線確認遠端版本，請稍後重試'
+        tip = published.stdout.split()[0]
+        if not _SHA40.fullmatch(tip):
+            return '無法確認遠端版本，請稍後重試'
+        if target == tip or git('merge-base', '--is-ancestor', target, tip).returncode == 0:
+            return ''
+        return 'hub 版本尚未確認已推送至 upstream；請先 push 並同步 checkout，再更新客戶端'
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        return '無法確認遠端版本，請稍後重試'
+
+
 def fleet_update(fetch=fetch_peer_health, post=post_peer_update, names=None, ref=None):
     """Ask every peer that is not already on this commit to update itself."""
     target = install_commit()
@@ -6024,6 +6058,10 @@ def fleet_update(fetch=fetch_peer_health, post=post_peer_update, names=None, ref
     peers = load_peers()
     if names is not None:
         peers = [peer for peer in peers if peer['name'] in names]
+    if peers:
+        error = fleet_publication_error(target)
+        if error:
+            return 409, {'ok': False, 'error': error}
 
     def one(peer):
         name = peer['name']

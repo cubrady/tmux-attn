@@ -436,7 +436,10 @@ def default_ref(src):
 def choose_target(src, ref, explicit):
     """The commit to deploy. Moves only forward: a checkout that is ahead keeps its own HEAD."""
     head = git(src, 'rev-parse', 'HEAD')
-    target = git(src, 'rev-parse', '--verify', f'{ref}^{{commit}}')
+    target = git(src, 'rev-parse', '--verify', f'{ref}^{{commit}}', check=False)
+    if not SHA.fullmatch(target):
+        raise UpdateError(f'target {ref} is unavailable in this checkout after fetch; '
+                          'push the hub commit to the peer upstream before retrying')
     if target == head or git_ok(src, 'merge-base', '--is-ancestor', head, target):
         return target
     if git_ok(src, 'merge-base', '--is-ancestor', target, head):

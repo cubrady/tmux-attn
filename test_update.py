@@ -294,6 +294,16 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.text('web/index.html'), '<p>v2</p>\n')
         self.assertEqual(self.head(self.client), middle)
 
+    def test_unpublished_explicit_target_has_actionable_error_without_mutations(self):
+        self.publish({'web/index.html': '<p>local</p>\n'}, 'unpublished', push=False)
+        missing = self.head(self.author)
+        with self.assertRaisesRegex(update.UpdateError, 'push the hub commit'):
+            self.run_update('--ref', missing)
+        self.assertEqual(self.head(self.client), self.v1)
+        self.assertEqual(self.text('web/index.html'), '<p>v1</p>\n')
+        self.assertEqual(self.services.calls, [])
+        self.assertEqual(self.backups(), [])
+
     # --- failure and rollback
 
     def test_unhealthy_web_service_rolls_everything_back_and_leaves_the_checkout_alone(self):

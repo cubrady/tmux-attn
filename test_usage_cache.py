@@ -2,6 +2,7 @@ import datetime
 import io
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -10,6 +11,46 @@ from pathlib import Path
 from unittest.mock import patch
 
 import attention as a
+
+
+class ClaudeUsageSourceTests(unittest.TestCase):
+    def test_claude_cli_fallback_recovers_failed_auto_sources(self):
+        for failure in ('timeout', 'expired_oauth', 'empty'):
+            with self.subTest(failure=failure), patch.object(a, '_USAGE_FETCH_ERRORS', {}):
+                commands = []
+
+                def runner(command):
+                    commands.append(command)
+                    if '--source' not in command:
+                        if failure == 'timeout':
+                            raise subprocess.TimeoutExpired(command, 15)
+                        return [{'provider': 'claude', 'error': {'kind': 'provider'}}] if failure == 'expired_oauth' else []
+                    return [{'provider': 'claude', 'source': 'claude', 'usage': {
+                        'identity': {'accountEmail': 'current@example.com', 'loginMethod': 'Team'},
+                        'primary': {'usedPercent': 7, 'windowMinutes': 300},
+                        'secondary': {'usedPercent': 62, 'windowMinutes': 10080}}}]
+
+                rows = a._fetch_provider_usage('claude', binary='codexbar', runner=runner)
+                self.assertEqual(len(commands), 3)
+                self.assertEqual(commands[-1][commands[-1].index('--source') + 1], 'cli')
+                self.assertEqual(rows[0]['account'], 'current@example.com')
+                self.assertEqual(rows[0]['upstream_source'], 'claude')
+                self.assertEqual([w['usedPercent'] for w in rows[0]['windows']], [7, 62])
+                self.assertNotIn('claude', a._USAGE_FETCH_ERRORS)
+
+    def test_successful_configured_accounts_do_not_launch_claude_cli(self):
+        commands = []
+
+        def runner(command):
+            commands.append(command)
+            return [{'provider': 'claude', 'account': account, 'usage': {
+                'primary': {'usedPercent': 12, 'windowMinutes': 300}}}
+                for account in ('first@example.com', 'second@example.com')]
+
+        rows = a._fetch_provider_usage('claude', binary='codexbar', runner=runner)
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--all-accounts', commands[0])
+        self.assertEqual(len(rows), 2)
 
 
 class UsageSnapshotTests(unittest.TestCase):

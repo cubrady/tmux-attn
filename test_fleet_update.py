@@ -19,6 +19,9 @@ def git(repo, *args, check=True):
 
 class FleetUpdateTests(unittest.TestCase):
     def setUp(self):
+        publication = patch.object(a, 'fleet_publication_error', return_value='')
+        self.publication = publication.start()
+        self.addCleanup(publication.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.previous_state = a.STATE
@@ -120,6 +123,16 @@ class FleetUpdateTests(unittest.TestCase):
         self.assertTrue(by_name['old']['manual'])
         self.assertEqual(by_name['down']['error'], 'OSError')
 
+    def test_unpublished_hub_is_refused_before_contacting_peers(self):
+        self.publication.return_value = 'push hub first'
+        fetch, post = Mock(), Mock()
+        with patch.object(a, 'install_commit', return_value='a' * 40), \
+                patch.object(a, 'load_peers', return_value=[{'name': 'peer', 'url': 'peer'}]):
+            code, body = a.fleet_update(fetch=fetch, post=post)
+        self.assertEqual((code, body['error']), (409, 'push hub first'))
+        fetch.assert_not_called()
+        post.assert_not_called()
+
     def test_status_waits_for_exit_and_reports_failure_after_rollback(self):
         target = 'c' * 40
         peers = [{'name': name, 'url': name} for name in ('running', 'success', 'failed', 'down', 'legacy', 'stale')]
@@ -208,6 +221,31 @@ class FleetUpdateTests(unittest.TestCase):
             status, body = get(f'from={first[:12]}')
             self.assertEqual(status, 200)
             self.assertEqual(body['commits'][0]['subject'], 'second commit')
+
+
+class PublicationTests(unittest.TestCase):
+    def test_real_upstream_requires_published_target_and_accepts_ancestors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            origin, repo = Path(tmp) / 'origin.git', Path(tmp) / 'repo'
+            git(Path(tmp), 'init', '--bare', '-b', 'main', str(origin))
+            git(Path(tmp), 'clone', str(origin), str(repo))
+            (repo / 'note').write_text('first')
+            git(repo, 'add', '.')
+            git(repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'first')
+            first = git(repo, 'rev-parse', 'HEAD').stdout.strip()
+            git(repo, 'push', '-u', 'origin', 'main')
+            (repo / 'note').write_text('second')
+            git(repo, 'add', '.')
+            git(repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'second')
+            second = git(repo, 'rev-parse', 'HEAD').stdout.strip()
+            with patch.object(a, 'install_source', return_value=repo):
+                self.assertEqual(a.fleet_publication_error(first), '')
+                self.assertIn('push', a.fleet_publication_error(second))
+                git(repo, 'push', 'origin', 'main')
+                self.assertEqual(a.fleet_publication_error(second), '')
+                self.assertEqual(a.fleet_publication_error(first), '')
+                with patch.object(a.subprocess, 'run', side_effect=subprocess.TimeoutExpired('git', 8)):
+                    self.assertTrue(a.fleet_publication_error(second))
 
 
 if __name__ == '__main__':
