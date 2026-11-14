@@ -6018,7 +6018,11 @@ def post_peer_update(url, ref, timeout=8):
 
 
 def fleet_publication_error(target):
-    """Peers can only fetch commits published on the hub checkout's upstream."""
+    """Require publication evidence recorded by a successful push or fetch.
+
+    Use the tracking ref: the web service need not have interactive SSH/keychain
+    access. Peers still fetch and verify the exact target before deploying.
+    """
     src = install_source()
     if src is None:
         return 'hub 找不到 checkout，無法確認更新版本是否已推送'
@@ -6026,17 +6030,16 @@ def fleet_publication_error(target):
         def git(*args):
             return subprocess.run(['git', '-C', str(src), *args], capture_output=True,
                                   text=True, timeout=8, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+        upstream = git('rev-parse', '--verify', '@{upstream}^{commit}')
+        if upstream.returncode:
+            return 'hub checkout 未設定 upstream，無法確認更新版本是否已推送'
         branch = git('symbolic-ref', '--quiet', '--short', 'HEAD')
         if branch.returncode:
-            return 'hub checkout 未設定 upstream，無法確認更新版本是否已推送'
-        name = git('config', '--get', f'branch.{branch.stdout.strip()}.remote')
-        merge = git('config', '--get', f'branch.{branch.stdout.strip()}.merge')
-        if name.returncode or merge.returncode or name.stdout.strip() == '.':
             return 'hub checkout 未設定遠端 upstream'
-        published = git('ls-remote', '--exit-code', name.stdout.strip(), merge.stdout.strip())
-        if published.returncode:
-            return '無法連線確認遠端版本，請稍後重試'
-        tip = published.stdout.split()[0]
+        remote = git('config', '--get', f'branch.{branch.stdout.strip()}.remote')
+        if remote.returncode or remote.stdout.strip() == '.':
+            return 'hub checkout 未設定遠端 upstream'
+        tip = upstream.stdout.strip()
         if not _SHA40.fullmatch(tip):
             return '無法確認遠端版本，請稍後重試'
         if target == tip or git('merge-base', '--is-ancestor', target, tip).returncode == 0:

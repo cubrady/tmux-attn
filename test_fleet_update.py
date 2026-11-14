@@ -224,6 +224,21 @@ class FleetUpdateTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_missing_or_local_branch_upstream_cannot_prove_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, 'init', '-b', 'main')
+            (repo / 'note').write_text('first')
+            git(repo, 'add', '.')
+            git(repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'first')
+            target = git(repo, 'rev-parse', 'HEAD').stdout.strip()
+            with patch.object(a, 'install_source', return_value=repo):
+                self.assertIn('upstream', a.fleet_publication_error(target))
+                git(repo, 'branch', 'local-published')
+                git(repo, 'branch', '--set-upstream-to=local-published', 'main')
+                self.assertEqual(git(repo, 'config', '--get', 'branch.main.remote').stdout.strip(), '.')
+                self.assertIn('遠端 upstream', a.fleet_publication_error(target))
+
     def test_real_upstream_requires_published_target_and_accepts_ancestors(self):
         with tempfile.TemporaryDirectory() as tmp:
             origin, repo = Path(tmp) / 'origin.git', Path(tmp) / 'repo'
