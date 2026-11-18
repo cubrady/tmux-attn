@@ -895,9 +895,6 @@
       line-height: 1.25;
       padding-left: 2.65rem;
     }
-    .usage-pace.tone-ok {
-      color: var(--muted);
-    }
     .usage-pace.tone-danger {
       color: var(--danger);
     }
@@ -3986,10 +3983,6 @@
               ? ` · 預計 ${formatUsageDurationSec(win.pace.etaSeconds)} 後用盡`
               : '';
             paceHtml = `<div class="usage-pace">⚡ ${escapeHtml(delta + eta)}</div>`;
-          } else if (win.pace && win.pace.willLastToReset === true) {
-            paceHtml = `<div class="usage-pace tone-ok">✓ 可撐到重置${resetInfo ? ` · ${escapeHtml(resetInfo)}` : ''}</div>`;
-          } else if (resetInfo) {
-            paceHtml = `<div class="usage-pace tone-ok">↺ ${escapeHtml(resetInfo)}</div>`;
           }
           return `<div class="usage-win">` +
             (acc.provider === 'antigravity' ? `<div class="usage-win-tag">${escapeHtml(win.label)}</div>` : '') +
