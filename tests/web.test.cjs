@@ -3966,6 +3966,7 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
             windowMinutes: 300,
             resetsAt: new Date(Date.now() + 180 * 60 * 1000).toISOString(),
             resetDescription: '4:20 PM',
+            pace: { stage: 'behind', deltaPercent: -20, expectedUsedPercent: 40, willLastToReset: true },
           },
         ],
       },
@@ -4054,6 +4055,8 @@ test('coding agent usage shows only active providers, skips pi, and expands deta
   assert.match(box.innerHTML, /class="usage-bar-expected" style="left:88%"/);
   assert.match(box.innerHTML, /超前 56% · 預計 9h 24m 後用盡/);
   assert.match(box.innerHTML, /已用盡/);
+  assert.match(box.innerHTML, /可撐到重置/);
+  assert.match(box.innerHTML, /↺ .*後重置/);
 
   // 5. Clicking refresh forces a refresh=1 call and keeps panel open
   box.listeners.click({ target: { closest: sel => sel === '[data-usage-refresh]' ? {} : null } });

@@ -3794,7 +3794,17 @@ def _short_account_label(account, provider):
     return local_part[:24]
 
 
-def _normalize_usage_window(key, raw_win, raw_label, raw_pace):
+def _pace_from_window(used_pct, resets_at, window_minutes, now_s=None):
+    """Derive burn-rate pace when upstream only supplies percent + reset window."""
+    end_s = usage_timestamp(resets_at)
+    if end_s is None or not isinstance(window_minutes, int) or isinstance(window_minutes, bool) or window_minutes <= 0:
+        return None
+    end_ms = int(round(end_s * 1000.0))
+    start_ms = end_ms - int(window_minutes) * 60_000
+    return _cursor_window_pace(used_pct, start_ms, end_ms, time.time() if now_s is None else float(now_s))
+
+
+def _normalize_usage_window(key, raw_win, raw_label, raw_pace, now_s=None):
     if not isinstance(raw_win, dict):
         return None
     used = raw_win.get('usedPercent')
@@ -3827,6 +3837,11 @@ def _normalize_usage_window(key, raw_win, raw_label, raw_pace):
             'deltaPercent': round(float(delta)) if isinstance(delta, (int, float)) and not isinstance(delta, bool) else None,
             'expectedUsedPercent': round(float(expected)) if isinstance(expected, (int, float)) and not isinstance(expected, bool) else None,
         }
+    pace = window.get('pace')
+    if not isinstance(pace, dict) or pace.get('willLastToReset') is None:
+        synthesized = _pace_from_window(used_pct, window['resetsAt'], win_mins, now_s=now_s)
+        if synthesized is not None:
+            window['pace'] = synthesized
     return window
 
 
@@ -4154,8 +4169,6 @@ def _build_cursor_usage_account(period_data, plan_data=None, me_data=None, sand_
         }
         pace = _cursor_window_pace(pct, start_ms, end_ms, now_s)
         if pace is not None:
-            if key != 'primary':
-                pace = {**pace, 'willLastToReset': True, 'etaSeconds': None}
             win['pace'] = pace
         windows.append(win)
     bot = _cursor_bot_window(sand_data, now_s)

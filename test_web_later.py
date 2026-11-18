@@ -153,6 +153,44 @@ class WebLaterTests(unittest.TestCase):
         a.usage_payload('codex', force_refresh=True, now=1060.0, binary='/usr/bin/codexbar', runner=fake_runner)
         self.assertEqual(len(calls), before_calls + 1)
 
+    def test_normalize_usage_window_synthesizes_pace_from_reset_window(self):
+        # Mid-cycle at 20% used over a 5h window lasting 2.5h more is on track.
+        resets = datetime.datetime.fromtimestamp(1_000_000 + 2.5 * 3600, tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        win = a._normalize_usage_window(
+            'primary',
+            {'usedPercent': 20, 'windowMinutes': 300, 'resetsAt': resets, 'resetDescription': 'soon'},
+            'Session',
+            None,
+            now_s=1_000_000.0,
+        )
+        self.assertEqual(win['usedPercent'], 20)
+        self.assertIn('pace', win)
+        self.assertTrue(win['pace']['willLastToReset'])
+        self.assertEqual(win['pace']['expectedUsedPercent'], 50)
+        self.assertLessEqual(win['pace']['deltaPercent'], 0)
+
+        # Same window at 90% used burns out before reset.
+        hot = a._normalize_usage_window(
+            'primary',
+            {'usedPercent': 90, 'windowMinutes': 300, 'resetsAt': resets},
+            'Session',
+            None,
+            now_s=1_000_000.0,
+        )
+        self.assertFalse(hot['pace']['willLastToReset'])
+        self.assertGreater(hot['pace']['etaSeconds'], 0)
+
+        # Upstream pace wins when already complete.
+        kept = a._normalize_usage_window(
+            'secondary',
+            {'usedPercent': 90, 'windowMinutes': 300, 'resetsAt': resets},
+            'Weekly',
+            {'willLastToReset': True, 'deltaPercent': 1, 'expectedUsedPercent': 50, 'etaSeconds': None, 'stage': 'behind'},
+            now_s=1_000_000.0,
+        )
+        self.assertTrue(kept['pace']['willLastToReset'])
+        self.assertEqual(kept['pace']['deltaPercent'], 1)
+
     def test_cursor_direct_usage_builds_monthly_included_api_and_auto_windows(self):
         def fake_rpc(token, method):
             self.assertEqual(token, 'valid-jwt-token')
@@ -181,7 +219,9 @@ class WebLaterTests(unittest.TestCase):
         self.assertEqual([w['shortLabel'] for w in acc['windows']], ['月', 'API', 'Auto'])
         self.assertEqual([w['usedPercent'] for w in acc['windows']], [63, 88, 60])
         self.assertFalse(acc['windows'][0]['pace']['willLastToReset'])
-        self.assertTrue(acc['windows'][1]['pace']['willLastToReset'])
+        self.assertFalse(acc['windows'][1]['pace']['willLastToReset'])
+        self.assertFalse(acc['windows'][2]['pace']['willLastToReset'])
+        self.assertGreater(acc['windows'][1]['pace']['etaSeconds'], 0)
 
     def _cursor_period_rpc(self, sand):
         def fake_rpc(token, method):
