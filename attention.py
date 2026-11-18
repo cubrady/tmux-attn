@@ -4696,6 +4696,10 @@ def usage_snapshot_payload(providers, force_refresh=False, now=None):
     return {'ok': True, 'providers': wanted, 'accounts': accounts, 'provider_status': statuses,
             'updated_at': int(max((r['observed_at'] for r in accounts), default=now))}
 
+DRAFT_MAX_TEXT = 8000
+DRAFT_MAX_NAME = 255
+
+
 def web_later_db():
     """Web-only grouping; no pane event, tmux status, or hook reads this database."""
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -4711,6 +4715,10 @@ def web_later_db():
             host TEXT NOT NULL, pane TEXT NOT NULL, pid TEXT NOT NULL,
             revision INTEGER NOT NULL, item_id TEXT NOT NULL,
             PRIMARY KEY(host,pane,pid,revision,item_id))''')
+        con.execute('''CREATE TABLE IF NOT EXISTS drafts (
+            host TEXT NOT NULL, pane TEXT NOT NULL, pid TEXT NOT NULL,
+            text TEXT NOT NULL, attachments TEXT NOT NULL, updated_at INTEGER NOT NULL,
+            PRIMARY KEY(host,pane,pid))''')
         return con
     except Exception:
         con.close()
@@ -4719,6 +4727,177 @@ def web_later_db():
 
 def web_later_key(agent):
     return (str(agent.get('host') or ''), str(agent.get('pane') or ''), str(agent.get('pid') or ''))
+
+
+def sanitize_draft_attachments(value):
+    """Keep only sendable attachment refs; drop anything the send path would reject."""
+    if not isinstance(value, list) or len(value) > MAX_IMAGES:
+        return None
+    safe, seen = [], set()
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        upload_id = item.get('id')
+        name = item.get('name')
+        kind = item.get('kind')
+        if (kind not in ('image', 'file') or not isinstance(upload_id, str)
+                or not isinstance(name, str) or not name or len(name) > DRAFT_MAX_NAME
+                or upload_id in seen):
+            return None
+        if kind == 'image' and not IMAGE_ID_RE.match(upload_id):
+            return None
+        if kind == 'file' and not FILE_ID_RE.match(upload_id):
+            return None
+        seen.add(upload_id)
+        safe.append({'id': upload_id, 'name': clean(name, DRAFT_MAX_NAME), 'kind': kind})
+    return safe
+
+
+def empty_web_draft():
+    return {'text': '', 'attachments': [], 'updated_at': 0}
+
+
+def read_web_draft(host, pane, pid):
+    with closing(web_later_db()) as con:
+        row = con.execute(
+            'SELECT text, attachments, updated_at FROM drafts WHERE host=? AND pane=? AND pid=?',
+            (host, pane, pid)).fetchone()
+    if not row:
+        return empty_web_draft()
+    text, raw_attachments, updated_at = row
+    try:
+        attachments = sanitize_draft_attachments(json.loads(raw_attachments))
+    except (TypeError, ValueError):
+        attachments = None
+    if (not isinstance(text, str) or type(updated_at) is not int or updated_at < 1
+            or attachments is None):
+        return empty_web_draft()
+    return {'text': text, 'attachments': attachments, 'updated_at': updated_at}
+
+
+def clear_web_draft(host, pane, pid):
+    with closing(web_later_db()) as con, con:
+        con.execute('DELETE FROM drafts WHERE host=? AND pane=? AND pid=?', (host, pane, pid))
+
+
+def write_web_draft(host, pane, pid, text, attachments, updated_at):
+    """Last-write-wins by updated_at; empty drafts delete the row."""
+    current = read_web_draft(host, pane, pid)
+    if current['updated_at'] > updated_at:
+        return current
+    if not text and not attachments:
+        clear_web_draft(host, pane, pid)
+        return empty_web_draft()
+    with closing(web_later_db()) as con, con:
+        con.execute(
+            'INSERT OR REPLACE INTO drafts(host,pane,pid,text,attachments,updated_at) VALUES(?,?,?,?,?,?)',
+            (host, pane, pid, text, json.dumps(attachments, ensure_ascii=False, separators=(',', ':')),
+             updated_at))
+    return {'text': text, 'attachments': attachments, 'updated_at': updated_at}
+
+
+def prune_web_drafts(con, agents, online):
+    """Drop drafts whose pane disappeared while its host is still reachable."""
+    for host, pane, pid in con.execute('SELECT host,pane,pid FROM drafts').fetchall():
+        if host in online and (host, pane, pid) not in agents:
+            con.execute('DELETE FROM drafts WHERE host=? AND pane=? AND pid=?', (host, pane, pid))
+
+
+def dispatch_web_draft(payload):
+    """Persist or clear a composer draft shared across browsers on this web hub."""
+    if not isinstance(payload, dict):
+        return 400, {'ok': False, 'error': 'invalid json'}
+    host = clean(str(payload.get('host') or ''))
+    pane = clean(payload.get('pane') or '')
+    pid = clean(str(payload.get('pid') or ''))
+    if not pane or not pid or len(host) > 240 or len(pane) > 240 or len(pid) > 240:
+        return 400, {'ok': False, 'error': 'host, pane, and pid are required'}
+    action = payload.get('action') or 'save'
+    if action not in ('save', 'clear'):
+        return 400, {'ok': False, 'error': 'action must be save or clear'}
+    if action == 'clear':
+        # Force-clear is reserved for successful send; clients clear via empty save + updated_at.
+        clear_web_draft(host, pane, pid)
+        return 200, {'ok': True, 'draft': empty_web_draft()}
+    text = payload.get('text')
+    updated_at = payload.get('updated_at')
+    attachments = sanitize_draft_attachments(payload.get('attachments') or [])
+    if not isinstance(text, str) or len(text) > DRAFT_MAX_TEXT:
+        return 400, {'ok': False, 'error': 'text must be at most 8000 characters'}
+    if has_control_chars(text, '\n\r\t'):
+        return 400, {'ok': False, 'error': 'text contains control characters'}
+    if type(updated_at) is not int or updated_at < 1:
+        return 400, {'ok': False, 'error': 'positive integer updated_at required'}
+    if attachments is None:
+        return 400, {'ok': False, 'error': 'invalid attachments'}
+    draft = write_web_draft(host, pane, pid, text, attachments, updated_at)
+    return 200, {'ok': True, 'draft': draft}
+
+
+def draft_get_response(query):
+    host = clean(str(query.get('host', [''])[0] or ''))
+    pane = clean(query.get('pane', [''])[0] or '')
+    pid = clean(str(query.get('pid', [''])[0] or ''))
+    if not pane or not pid or len(host) > 240 or len(pane) > 240 or len(pid) > 240:
+        return 400, {'ok': False, 'error': 'host, pane, and pid are required'}
+    return 200, {'ok': True, 'draft': read_web_draft(host, pane, pid)}
+
+def upload_file_content_type(upload_id):
+    ext = Path(upload_id).suffix.lower()
+    return {'.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif',
+            '.webp': 'image/webp'}.get(ext, 'application/octet-stream')
+
+
+def upload_file_response(query, fleet_only=False):
+    """Serve a previously uploaded attachment for draft previews; never an arbitrary path."""
+    host, pane, pid, upload_id = (query.get(key, [''])[0] for key in ('host', 'pane', 'pid', 'id'))
+    if (any(not isinstance(value, str) or len(value) > 240 for value in (host, pane, pid))
+            or not pane or not pid or not isinstance(upload_id, str) or not UPLOAD_ID_RE.match(upload_id)):
+        return 400, b'host, pane, pid, and id are required', {}
+    local = local_host_name()
+    if host and host != local:
+        peer = next((row for row in load_peers() if row['name'] == host), None)
+        if not peer:
+            return 404, b'Unknown host', {}
+        url = peer['url'].rstrip('/') + '/api/upload-file?' + urlencode({
+            'pane': pane, 'pid': pid, 'id': upload_id})
+        try:
+            with peer_urlopen(Request(url), timeout=PEER_UPLOAD_TIMEOUT) as response:
+                data = response.read(MAX_UPLOAD_BYTES + 1)
+                if len(data) > MAX_UPLOAD_BYTES:
+                    return 413, b'Upload too large', {}
+                headers = {key: response.headers[key] for key in (
+                    'Content-Type', 'Content-Disposition', 'X-Content-Type-Options', 'Referrer-Policy')
+                    if key in response.headers}
+                if 'Content-Type' not in headers:
+                    return 502, b'Update tmux-attn on the source host to preview drafts', {}
+                return 200, data, headers
+        except HTTPError as exc:
+            with exc:
+                if exc.code == 404:
+                    return 404, b'Upload not found, or source host needs a tmux-attn update', {}
+                return exc.code, exc.read(4096), {}
+        except Exception:
+            return 502, b'Source host unavailable; retry when it is online', {}
+    if fleet_only:
+        return 400, b'Source host required', {}
+    path = upload_path(upload_id)
+    if not path:
+        return 404, b'Upload not found', {}
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 404, b'Upload not found', {}
+    if len(data) > MAX_UPLOAD_BYTES:
+        return 413, b'Upload too large', {}
+    content_type = upload_file_content_type(upload_id)
+    disposition = 'inline' if content_type.startswith('image/') else 'attachment'
+    return 200, data, {
+        'Content-Type': content_type,
+        'Content-Disposition': f"{disposition}; filename*=UTF-8''{quote(upload_id, safe='')}",
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+    }
 
 
 def web_later_fleet(fleet):
@@ -4736,8 +4915,8 @@ def web_later_fleet(fleet):
                 con.execute('DELETE FROM later WHERE host=? AND pane=? AND pid=?', (host, pane, pid))
             elif agent is not None:
                 agent['later'] = True
+        prune_web_drafts(con, agents, online)
     return web_inbox_fleet(fleet)
-
 
 def dispatch_web_later(payload, include_local=True, fleet=None):
     """Move a viewed completion into/out of the Web-only later group."""
@@ -7478,6 +7657,20 @@ def make_web_handler(fleet_only=False, bind='127.0.0.1', port=7788, *, security=
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if path == '/api/upload-file':
+                code, body, headers = upload_file_response(parse_qs(urlparse(self.path).query), fleet_only)
+                self.send_response(code)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                for key, value in ({'Content-Type': 'application/octet-stream', **headers}).items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == '/api/draft':
+                code, body = draft_get_response(parse_qs(urlparse(self.path).query))
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
             if path in ('/api/work-options', '/api/work-usage'):
                 host = parse_qs(urlparse(self.path).query).get('host', [''])[0]
                 try:
@@ -7647,6 +7840,14 @@ def make_web_handler(fleet_only=False, bind='127.0.0.1', port=7788, *, security=
                     code, body = 500, {'ok': False, 'error': 'failed to update inbox'}
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
+            if path == '/api/draft':
+                try:
+                    code, body = dispatch_web_draft(payload)
+                except Exception as exc:
+                    sys.stderr.write(f'web /api/draft: {type(exc).__name__}: {exc}\n')
+                    code, body = 500, {'ok': False, 'error': 'failed to update draft'}
+                self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
+                return
             if path == '/api/update':
                 code, body = start_local_update(payload.get('ref'))
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
@@ -7669,6 +7870,10 @@ def make_web_handler(fleet_only=False, bind='127.0.0.1', port=7788, *, security=
                 code, body = action(payload)
                 if body.get('ok') and path in ('/api/send', '/api/kill', '/api/ack', '/api/answer', '/api/work/start'):
                     snapshots.invalidate(payload.get('host', ''))
+                if body.get('ok') and path == '/api/send':
+                    clear_web_draft(clean(str(payload.get('host') or '')),
+                                   clean(payload.get('pane') or ''),
+                                   clean(str(payload.get('pid') or '')))
                 self._send(code, json.dumps(body, ensure_ascii=False), 'application/json; charset=utf-8')
                 return
             self._send(404, json.dumps({'ok': False, 'error': 'not found'}), 'application/json; charset=utf-8')

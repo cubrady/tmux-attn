@@ -3463,6 +3463,10 @@
     const readerMessages = new Map();
     const replyDrafts = new Map();
     const DRAFT_STORE_PREFIX = 'attn.replyDraft.';
+    const DRAFT_SYNC_MS = 450;
+    let draftSyncTimer = 0;
+    let draftSyncSeq = 0;
+    let sheetDraftToken = 0;
     const MAX_ATTACHMENTS = 30;
     const MAX_IMAGE_EDGE = 2048;
     const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
@@ -3475,24 +3479,166 @@
     function agentKey(a) {
       return [a.host || '', a.pane || '', a.pid || ''].join('|');
     }
-    function saveReplyDraft(key, text) {
+    function emptyDraft() {
+      return { text: '', attachments: [], updated_at: 0 };
+    }
+    function normalizeDraftAttachments(value) {
+      if (!Array.isArray(value)) return [];
+      const seen = new Set();
+      const out = [];
+      for (const item of value) {
+        if (!item || typeof item !== 'object') continue;
+        const id = item.id;
+        const name = item.name;
+        const kind = item.kind;
+        if ((kind !== 'image' && kind !== 'file') || typeof id !== 'string' || !id
+            || typeof name !== 'string' || !name || seen.has(id)) continue;
+        seen.add(id);
+        out.push({ id, name, kind });
+        if (out.length >= MAX_ATTACHMENTS) break;
+      }
+      return out;
+    }
+    function normalizeDraft(value) {
+      if (!value) return emptyDraft();
+      if (typeof value === 'object' && value !== null && typeof value.text === 'string') {
+        const attachments = normalizeDraftAttachments(value.attachments);
+        const updated = Number(value.updated_at);
+        return {
+          text: value.text,
+          attachments,
+          updated_at: Number.isFinite(updated) && updated > 0 ? Math.trunc(updated)
+            : ((value.text || attachments.length) ? Date.now() : 0),
+        };
+      }
+      if (typeof value === 'string') {
+        try {
+          const parsed = JSON.parse(value);
+          if (parsed && typeof parsed === 'object' && typeof parsed.text === 'string') {
+            return normalizeDraft(parsed);
+          }
+        } catch (_) { /* plain-text drafts from older builds */ }
+        return value ? { text: value, attachments: [], updated_at: Date.now() } : emptyDraft();
+      }
+      return emptyDraft();
+    }
+    function draftEqual(a, b) {
+      const left = normalizeDraft(a);
+      const right = normalizeDraft(b);
+      return left.text === right.text
+        && JSON.stringify(left.attachments) === JSON.stringify(right.attachments);
+    }
+    function newerDraft(a, b) {
+      const left = normalizeDraft(a);
+      const right = normalizeDraft(b);
+      return (right.updated_at || 0) > (left.updated_at || 0) ? right : left;
+    }
+    function currentComposerDraft() {
+      return {
+        text: document.getElementById('sheet-text').value,
+        attachments: attachments
+          .filter(item => item.status === 'ready' && item.uploadId)
+          .map(item => ({ id: item.uploadId, name: item.name, kind: item.kind })),
+        updated_at: Date.now(),
+      };
+    }
+    function saveReplyDraft(key, draft) {
       if (!key) return;
-      replyDrafts.set(key, text);
-      try {
-        if (text) localStorage.setItem(DRAFT_STORE_PREFIX + key, text);
-        else localStorage.removeItem(DRAFT_STORE_PREFIX + key);
-      } catch (_) { /* Keep drafts in memory when browser storage is unavailable. */ }
+      const normalized = normalizeDraft(draft);
+      const empty = !normalized.text && !normalized.attachments.length;
+      if (empty) {
+        replyDrafts.delete(key);
+        try { localStorage.removeItem(DRAFT_STORE_PREFIX + key); }
+        catch (_) { /* Keep drafts in memory when browser storage is unavailable. */ }
+        return;
+      }
+      replyDrafts.set(key, normalized);
+      try { localStorage.setItem(DRAFT_STORE_PREFIX + key, JSON.stringify(normalized)); }
+      catch (_) { /* Keep drafts in memory when browser storage is unavailable. */ }
     }
     function readReplyDraft(key) {
-      if (replyDrafts.has(key)) return replyDrafts.get(key);
-      try {
-        return localStorage.getItem(DRAFT_STORE_PREFIX + key) || '';
-      } catch (_) {
-        return replyDrafts.get(key) || '';
-      }
+      if (replyDrafts.has(key)) return normalizeDraft(replyDrafts.get(key));
+      try { return normalizeDraft(localStorage.getItem(DRAFT_STORE_PREFIX + key) || ''); }
+      catch (_) { return emptyDraft(); }
     }
-    function saveCurrentReplyDraft() {
-      if (sheetOpen) saveReplyDraft(selectedKey, document.getElementById('sheet-text').value);
+    function saveCurrentReplyDraft({ sync = true } = {}) {
+      if (!sheetOpen || !selectedKey) return;
+      const draft = currentComposerDraft();
+      const prev = readReplyDraft(selectedKey);
+      if (draftEqual(prev, draft)) return;
+      saveReplyDraft(selectedKey, draft);
+      if (sync) scheduleDraftSync(selectedKey);
+    }
+    function attachmentPreviewUrl(agent, uploadId) {
+      const params = new URLSearchParams({
+        host: agent.host || '', pane: agent.pane, pid: String(agent.pid), id: uploadId,
+      });
+      return '/api/upload-file?' + params.toString();
+    }
+    function applyDraftToComposer(agent, draft) {
+      const normalized = normalizeDraft(draft);
+      document.getElementById('sheet-text').value = normalized.text || '';
+      attachments.forEach(item => {
+        if (item.previewUrl && String(item.previewUrl).startsWith('blob:')) URL.revokeObjectURL(item.previewUrl);
+      });
+      attachments = normalized.attachments.map(item => ({
+        key: `att-${++attachmentSeq}`,
+        name: item.name,
+        kind: item.kind,
+        previewUrl: item.kind === 'image' ? attachmentPreviewUrl(agent, item.id) : '',
+        status: 'ready',
+        uploadId: item.id,
+        error: '',
+      }));
+      renderAttachments();
+    }
+    async function fetchServerDraft(agent) {
+      const params = new URLSearchParams({
+        host: agent.host || '', pane: agent.pane, pid: String(agent.pid),
+      });
+      const res = await fetch('/api/draft?' + params.toString(), {
+        cache: 'no-store', signal: AbortSignal.timeout(8000),
+      });
+      const body = await res.json();
+      if (!res.ok || !body.ok) throw new Error(body.error || ('HTTP ' + res.status));
+      return normalizeDraft(body.draft);
+    }
+    async function pushDraftToServer(agent, draft) {
+      const normalized = normalizeDraft(draft);
+      const updatedAt = normalized.updated_at || Date.now();
+      const res = await fetch('/api/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: agent.host || '', pane: agent.pane, pid: agent.pid, action: 'save',
+          text: normalized.text, attachments: normalized.attachments, updated_at: updatedAt,
+        }),
+        signal: AbortSignal.timeout(8000),
+      });
+      const body = await res.json();
+      if (!res.ok || !body.ok) throw new Error(body.error || ('HTTP ' + res.status));
+      return normalizeDraft(body.draft);
+    }
+    function scheduleDraftSync(key) {
+      clearTimeout(draftSyncTimer);
+      draftSyncTimer = setTimeout(() => { syncDraftNow(key); }, DRAFT_SYNC_MS);
+    }
+    async function syncDraftNow(key) {
+      const agent = latestAgents.find(a => agentKey(a) === key && a.tracked);
+      if (!agent) return;
+      const draft = readReplyDraft(key);
+      const seq = ++draftSyncSeq;
+      const pushedAt = draft.updated_at || 0;
+      try {
+        const result = await pushDraftToServer(agent, draft);
+        if (seq !== draftSyncSeq) return;
+        if ((result.updated_at || 0) > pushedAt) {
+          saveReplyDraft(key, result);
+          if (sheetOpen && selectedKey === key) applyDraftToComposer(agent, result);
+        }
+      } catch (_) {
+        if (seq === draftSyncSeq) { /* keep local; next edit retries */ }
+      }
     }
     // Both commands pin the deployed code to the hub's own commit, so a peer converges on the hub, not on main.
     const updateCommand = hub => `tmux-attn update --ref ${hub}`;
@@ -4803,6 +4949,7 @@
     function closeSheet() {
       const openedFrom = selectedKey;
       saveCurrentReplyDraft();
+      sheetDraftToken += 1;
       closeReader();
       clearAttachments();
       sheetOpen = false;
@@ -4886,19 +5033,23 @@
       if (!attachments.some(item => item.key === key)) return false;
       attachments = attachments.map(item => item.key === key ? { ...item, ...patch } : item);
       renderAttachments();
+      if (patch && (patch.status === 'ready' || patch.status === 'error')) saveCurrentReplyDraft();
       return true;
     }
     function clearAttachments() {
-      attachments.forEach(item => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl); });
+      attachments.forEach(item => {
+        if (item.previewUrl && String(item.previewUrl).startsWith('blob:')) URL.revokeObjectURL(item.previewUrl);
+      });
       attachments = [];
       renderAttachments();
     }
     function removeAttachment(key) {
       const item = attachments.find(row => row.key === key);
       if (!item) return;
-      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      if (item.previewUrl && String(item.previewUrl).startsWith('blob:')) URL.revokeObjectURL(item.previewUrl);
       attachments = attachments.filter(row => row.key !== key);
       renderAttachments();
+      saveCurrentReplyDraft();
     }
     async function uploadAttachment(agent, key, file) {
       const sheetKey = agentKey(agent);
@@ -5374,11 +5525,11 @@
       fillSheetMeta(agent);
       if (refreshPreview) loadSheetPreview(agent);
     }
-    function openSheet(agent) {
+    async function openSheet(agent) {
       saveCurrentReplyDraft();
-      clearAttachments();
-      if (agentKey(agent) !== selectedKey) document.getElementById('sheet-text').value = readReplyDraft(agentKey(agent));
-      selectedKey = agentKey(agent);
+      const key = agentKey(agent);
+      const local = readReplyDraft(key);
+      selectedKey = key;
       sheetOpen = true;
       sheetPreviewKey = '';
       sheetPreviewFull = false;
@@ -5390,6 +5541,7 @@
       sheetTasksDoneOpen = (normalizeTasks(agent?.tasks)?.total || 0) <= 6;
       sheetQuestions = [];
       renderSheetQuestions();
+      applyDraftToComposer(agent, local);
       fillSheet(agent, { refreshPreview: true });
       document.getElementById('sheet-status').textContent = '';
       document.getElementById('sheet-status').className = 'sheet-feedback';
@@ -5403,6 +5555,15 @@
       if (card) card.classList.add('selected');
       // Focus the transcript, not the reply box: focusing a textarea raises the on-screen keyboard on phones.
       requestAnimationFrame(() => document.getElementById('sheet-preview').focus());
+      const token = ++sheetDraftToken;
+      try {
+        const server = await fetchServerDraft(agent);
+        if (token !== sheetDraftToken || !sheetOpen || selectedKey !== key) return;
+        const merged = newerDraft(local, server);
+        if (!draftEqual(merged, local)) applyDraftToComposer(agent, merged);
+        saveReplyDraft(key, merged);
+        if ((merged.updated_at || 0) > (server.updated_at || 0)) scheduleDraftSync(key);
+      } catch (_) { /* Keep the local draft when the hub is briefly unreachable. */ }
     }
     function syncSheetFromData() {
       if (!sheetOpen || !selectedKey) return;
@@ -6024,7 +6185,14 @@
       if (typeof form.requestSubmit === 'function') form.requestSubmit(send);
       else if (typeof send.click === 'function') send.click();
     });
-    window.addEventListener('pagehide', saveCurrentReplyDraft);
+    window.addEventListener('pagehide', () => {
+      const key = selectedKey;
+      saveCurrentReplyDraft({ sync: false });
+      if (key) {
+        clearTimeout(draftSyncTimer);
+        syncDraftNow(key);
+      }
+    });
     document.getElementById('reader-body').addEventListener('click', (event) => {
       if (!event.target.closest('[data-retry]')) return;
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
@@ -6075,7 +6243,9 @@
       const text = document.getElementById('sheet-text').value;
       if (!agent || button.disabled) return;
       const targetKey = agentKey(agent);
-      saveReplyDraft(targetKey, text);
+      clearTimeout(draftSyncTimer);
+      draftSyncSeq += 1;
+      saveCurrentReplyDraft({ sync: false });
       if (attachments.some(item => item.status === 'uploading')) {
         setSheetStatus(UPLOADING_NOTICE);
         return;
@@ -6099,15 +6269,12 @@
         });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
-        if (!sheetOpen || selectedKey !== targetKey) {
-          if (readReplyDraft(targetKey) === text) saveReplyDraft(targetKey, '');
-          return;
-        }
+        saveReplyDraft(targetKey, emptyDraft());
+        if (!sheetOpen || selectedKey !== targetKey) return;
         status.className = 'sheet-feedback ok';
         status.textContent = '已貼上';
         const input = document.getElementById('sheet-text');
         if (input.value === text) input.value = '';
-        saveReplyDraft(targetKey, input.value);
         clearAttachments();
         sentAt.set(agentKey(agent), Date.now());
         refresh();
