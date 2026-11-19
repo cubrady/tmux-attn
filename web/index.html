@@ -85,7 +85,10 @@
       padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
       -webkit-font-smoothing: antialiased;
     }
-    body.sheet-open { overflow: hidden; }
+    body.sheet-open {
+      overflow: hidden;
+      overscroll-behavior-x: none;
+    }
     .wrap {
       width: min(100%, var(--max));
       margin: 0 auto;
@@ -1941,6 +1944,7 @@
       display: flex;
       align-items: flex-end;
       justify-content: center;
+      overscroll-behavior-x: none;
     }
     .sheet-scrim {
       position: absolute;
@@ -1963,6 +1967,16 @@
       border-radius: 16px 16px 0 0;
       padding: 0 14px calc(12px + env(safe-area-inset-bottom));
       box-shadow: 0 -12px 40px rgb(0 0 0 / 0.12);
+      overscroll-behavior-x: none;
+    }
+    .sheet-edge-swipe {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 28px;
+      z-index: 6;
+      touch-action: none;
     }
     @media (prefers-reduced-motion: no-preference) {
       .sheet-scrim { animation: fade-in 180ms var(--ease); }
@@ -3026,6 +3040,7 @@
   <div class="sheet-root" id="sheet-root" hidden>
     <button type="button" class="sheet-scrim" id="sheet-scrim" aria-label="關閉"></button>
     <div class="sheet" id="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title" aria-describedby="sheet-context">
+      <div class="sheet-edge-swipe" id="sheet-edge-swipe" aria-hidden="true"></div>
       <div class="sheet-drag" id="sheet-drag">
         <div class="sheet-handle" aria-hidden="true"></div>
         <div class="sheet-host" id="sheet-host" hidden></div>
@@ -5266,6 +5281,7 @@
       setSheetLoading(false);
       clearViewport();
       resetDrag();
+      resetSheetSwipe();
       resetComposerDrag();
       selectedKey = '';
       sheetPreviewKey = '';
@@ -5737,6 +5753,10 @@
       if (event.target.closest('.reader-top')) return 'top';
       const rect = root.getBoundingClientRect ? root.getBoundingClientRect() : { left: 0 };
       return (event.clientX - rect.left) <= 28 ? 'edge' : '';
+    }
+    function sheetSwipeOrigin(event) {
+      if (event.target.closest('button, a, input, textarea, select, label')) return false;
+      return Boolean(event.target.closest('.sheet-edge-swipe, #sheet-edge-swipe'));
     }
     function confirmSheetMeta(agent, revision, token) {
       if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== agentKey(agent) || sheetPreviewRevision !== revision) return;
@@ -6439,6 +6459,73 @@
     dragZone.addEventListener('pointerup', endDrag);
     dragZone.addEventListener('pointercancel', resetDrag);
     dragZone.addEventListener('lostpointercapture', resetDrag);
+    // Card sheet: swipe right from the left edge to dismiss (claims the browser back-gesture zone).
+    let sheetSwipe = null;
+    function resetSheetSwipe() {
+      const active = sheetSwipe;
+      sheetSwipe = null;
+      const panel = document.getElementById('sheet-panel');
+      if (active && active.captured && panel.releasePointerCapture) {
+        try { panel.releasePointerCapture(active.id); } catch (_) { /* already released */ }
+      }
+      if (!panel.style) return;
+      // Vertical header-drag owns transform while active; do not clear mid-drag.
+      if (!drag) {
+        panel.style.transform = '';
+        panel.classList.remove('dragging');
+      }
+    }
+    const sheetPanel = document.getElementById('sheet-panel');
+    const sheetEdge = document.getElementById('sheet-edge-swipe');
+    function onSheetSwipeDown(event) {
+      if (!sheetOpen || readerOpen || drag || event.pointerType === 'mouse' || event.isPrimary === false) return;
+      if (!sheetSwipeOrigin(event)) return;
+      sheetSwipe = {
+        x: event.clientX, y: event.clientY, at: performance.now(), id: event.pointerId, locked: false, captured: false,
+      };
+    }
+    function onSheetSwipeMove(event) {
+      if (!sheetSwipe || event.pointerId !== sheetSwipe.id || drag) return;
+      const dx = event.clientX - sheetSwipe.x;
+      const dy = event.clientY - sheetSwipe.y;
+      if (!sheetSwipe.locked) {
+        if (Math.abs(dy) > 24 && Math.abs(dy) > Math.abs(dx)) {
+          resetSheetSwipe();
+          return;
+        }
+        if (dx < 12 || Math.abs(dx) < Math.abs(dy)) return;
+        sheetSwipe.locked = true;
+        sheetSwipe.at = performance.now();
+        sheetPanel.classList.add('dragging');
+        if (sheetPanel.setPointerCapture) {
+          sheetPanel.setPointerCapture(event.pointerId);
+          sheetSwipe.captured = true;
+        }
+      }
+      if (event.cancelable) event.preventDefault();
+      sheetPanel.style.transform = `translateX(${Math.max(0, dx)}px)`;
+    }
+    function endSheetSwipe(event) {
+      if (!sheetSwipe || event.pointerId !== sheetSwipe.id) return;
+      const locked = sheetSwipe.locked;
+      const outcome = locked
+        ? swipeOutcome(event.clientX - sheetSwipe.x, performance.now() - sheetSwipe.at)
+        : 'back';
+      resetSheetSwipe();
+      if (outcome === 'dismiss') closeSheet();
+    }
+    sheetEdge.addEventListener('pointerdown', onSheetSwipeDown);
+    sheetPanel.addEventListener('pointermove', onSheetSwipeMove);
+    sheetPanel.addEventListener('pointerup', endSheetSwipe);
+    sheetPanel.addEventListener('pointercancel', resetSheetSwipe);
+    sheetPanel.addEventListener('lostpointercapture', () => {
+      if (sheetSwipe) sheetSwipe.captured = false;
+      resetSheetSwipe();
+    });
+    // Non-passive touchmove so a locked edge-swipe can cancel the browser's back gesture.
+    sheetPanel.addEventListener('touchmove', (event) => {
+      if (sheetSwipe && sheetSwipe.locked && event.cancelable) event.preventDefault();
+    }, { passive: false });
     // Detail reader: swipe right from the left edge or header to go back (touch/pen only).
     let readerSwipe = null;
     function resetReaderSwipe() {

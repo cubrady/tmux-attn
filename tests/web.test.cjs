@@ -3054,6 +3054,59 @@ test('the pointer is captured so a drag keeps following the finger outside the h
   assert.equal(captured, 1);
 });
 
+test('swiping the sheet right from the left edge closes it and ignores the mouse', () => {
+  const { swipeOutcome, sheetSwipeOrigin } = dashboard().context;
+  assert.equal(swipeOutcome(120, 600), 'dismiss');
+  assert.equal(sheetSwipeOrigin({ target: { closest: s => (s.includes('sheet-edge-swipe') ? {} : null) } }), true);
+  assert.equal(sheetSwipeOrigin({ target: { closest: s => (s === 'button' ? {} : null) } }), false);
+
+  const ui = dashboard();
+  const style = {};
+  const classes = new Set();
+  const panel = ui.elements.get('sheet-panel');
+  panel.style = style;
+  panel.classList = { add: c => classes.add(c), remove: c => classes.delete(c), toggle() {} };
+  let captured = 0;
+  let released = 0;
+  panel.setPointerCapture = () => { captured += 1; };
+  panel.releasePointerCapture = () => { released += 1; };
+  const a = sheetAgent();
+  ui.render({ agents: [a] });
+  ui.open(a);
+  assert.equal(ui.elements.get('sheet-root').hidden, false);
+
+  const edge = ui.elements.get('sheet-edge-swipe');
+  const at = (x, y, extra = {}) => ({
+    clientX: x, clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true,
+    cancelable: true, preventDefault() {},
+    target: { closest: s => (String(s).includes('sheet-edge-swipe') ? edge : null) },
+    currentTarget: edge,
+    ...extra,
+  });
+  edge.listeners.pointerdown(at(8, 120));
+  ui.setNow(100); panel.listeners.pointermove(at(16, 122));
+  assert.equal(style.transform || undefined, undefined, 'no transform before horizontal lock');
+  panel.listeners.pointermove(at(80, 124));
+  assert.equal(style.transform, 'translateX(72px)');
+  assert.equal(classes.has('dragging'), true);
+  assert.equal(captured, 1);
+  ui.setNow(900); panel.listeners.pointerup(at(80, 124));
+  assert.equal(ui.elements.get('sheet-root').hidden, false, 'a short drag springs back');
+  assert.equal(style.transform, '');
+  assert.equal(released, 1);
+
+  edge.listeners.pointerdown(at(8, 120));
+  ui.setNow(1000); panel.listeners.pointermove(at(180, 128));
+  ui.setNow(1100); panel.listeners.pointerup(at(180, 128));
+  assert.equal(ui.elements.get('sheet-root').hidden, true);
+
+  ui.open(a);
+  edge.listeners.pointerdown(at(8, 120, { pointerType: 'mouse' }));
+  panel.listeners.pointermove(at(200, 120, { pointerType: 'mouse' }));
+  panel.listeners.pointerup(at(200, 120, { pointerType: 'mouse' }));
+  assert.equal(ui.elements.get('sheet-root').hidden, false, 'mouse must not dismiss');
+});
+
 test('swiping the reader right from the header or left edge closes it', async () => {
   const { swipeOutcome, readerSwipeOrigin } = dashboard().context;
   assert.equal(swipeOutcome(120, 600), 'dismiss');
