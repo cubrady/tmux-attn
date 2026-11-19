@@ -1752,6 +1752,107 @@
       background: var(--bg);
       font-weight: 600;
     }
+    /* Wide tables: summary card in the reading flow; full grid opens in a viewer. */
+    .md-table-card {
+      margin: 0.55em 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--bg-elevated) 88%, var(--line));
+      overflow: hidden;
+    }
+    .md-table-open {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px 14px;
+      border: 0;
+      background: transparent;
+      color: var(--fg);
+      font: 500 0.9rem/1.35 var(--font);
+      text-align: left;
+      cursor: pointer;
+    }
+    .md-table-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .md-table-open-meta { color: var(--muted); font: 0.75rem/1.35 var(--mono); flex: 0 0 auto; }
+    .md-table-open-label { min-width: 0; }
+    .md-table-preview {
+      padding: 0 14px 12px;
+      font: 0.78rem/1.4 var(--mono);
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .md-table-full { display: none; }
+    .table-viewer[hidden] { display: none !important; }
+    .table-viewer {
+      position: fixed;
+      inset: var(--vv-top, 0px) 0 auto 0;
+      height: var(--vv-h, 100dvh);
+      z-index: 40;
+      display: flex;
+      justify-content: center;
+      background: color-mix(in srgb, var(--bg) 92%, #000);
+    }
+    .table-viewer-panel {
+      width: min(100%, 52rem);
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+    }
+    .table-viewer-top {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--bg-elevated);
+    }
+    .table-viewer-top h2 {
+      margin: 0;
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .table-viewer-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 14px 12px calc(16px + env(safe-area-inset-bottom));
+      overscroll-behavior: contain;
+    }
+    .table-viewer-body table {
+      display: block;
+      width: max-content;
+      min-width: 100%;
+      max-width: none;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+      line-height: 1.4;
+    }
+    .table-viewer-body th,
+    .table-viewer-body td {
+      border: 1px solid var(--line);
+      padding: 6px 10px;
+      text-align: left;
+      vertical-align: top;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .table-viewer-body th {
+      position: sticky;
+      top: 0;
+      background: var(--bg-elevated);
+      font-weight: 650;
+      z-index: 1;
+    }
     .preview-line .text.md hr {
       border: 0;
       border-top: 1px solid var(--line);
@@ -2524,6 +2625,65 @@
       padding: 0 14px calc(12px + env(safe-area-inset-bottom));
       background: var(--bg);
     }
+    .reader-reply-trigger {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 44px;
+      padding: 10px 14px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--bg-elevated);
+      color: var(--muted);
+      font: 500 0.95rem/1.35 var(--font);
+      text-align: left;
+      cursor: pointer;
+    }
+    .reader-reply-trigger[hidden] { display: none !important; }
+    .reader-reply-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .reader-reply-trigger.has-draft { color: var(--fg); }
+    .reader-reply-trigger-hint {
+      flex: 0 0 auto;
+      font: 0.72rem/1 var(--mono);
+      color: var(--accent);
+    }
+    .reader-compose .sheet-compose { border-top: 0; padding-top: 0; }
+    .reader-compose .composer textarea {
+      min-height: 48px;
+      max-height: min(22dvh, calc(var(--vv-h, 100dvh) * 0.22));
+    }
+    .reader-compose-collapse {
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .reader-compose-collapse[hidden] { display: none !important; }
+    .reader-compose-collapse:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .reader-compose-collapse svg { width: 18px; height: 18px; display: block; }
+    @media (max-height: 500px) {
+      .reader-top {
+        padding: calc(6px + env(safe-area-inset-top)) 12px 6px;
+        gap: 8px;
+      }
+      .reader-heading h2 { font-size: 0.92rem; }
+      .reader-sub { display: none; }
+      .reader-body { padding: 12px 12px; }
+      .reader-compose { padding: 0 12px calc(8px + env(safe-area-inset-bottom)); }
+      .reader-compose .composer textarea {
+        min-height: 40px;
+        max-height: min(18dvh, calc(var(--vv-h, 100dvh) * 0.18));
+      }
+    }
 
     /* Skeleton placeholders for first load + refresh */
     .skel {
@@ -2903,6 +3063,10 @@
               </svg>
             </button>
             <input type="file" id="sheet-file" accept="image/*,.txt,.md,.csv,.tsv,.json,.log,.xml,.yaml,.yml,.ini,.cfg,.toml,.doc,.docx,.xls,.xlsx,.ppt,.pptx" multiple hidden>
+            <span style="flex:1 1 auto"></span>
+            <button type="button" class="reader-compose-collapse" id="reader-compose-collapse" aria-label="收合回覆" title="收合回覆" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
             <button type="submit" class="composer-btn send" id="sheet-send" aria-label="送出" title="送出（⌘↵ / Ctrl+Enter）">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M22 2L11 13"/>
@@ -2932,7 +3096,27 @@
       </header>
       <div class="reader-body" id="reader-body" tabindex="0"></div>
       <span class="reader-status" id="reader-status" aria-live="polite"></span>
-      <div class="reader-compose" id="reader-compose"></div>
+      <div class="reader-compose" id="reader-compose">
+        <button type="button" class="reader-reply-trigger" id="reader-reply-trigger">
+          <span class="reader-reply-trigger-label" id="reader-reply-trigger-label">回覆</span>
+          <span class="reader-reply-trigger-hint" id="reader-reply-trigger-hint" hidden>有草稿</span>
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <div class="table-viewer" id="table-viewer" hidden>
+    <section class="table-viewer-panel" role="dialog" aria-modal="true" aria-labelledby="table-viewer-title">
+      <header class="table-viewer-top">
+        <button type="button" class="icon-btn" id="table-viewer-close" aria-label="關閉表格" title="關閉表格">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <h2 id="table-viewer-title">完整表格</h2>
+        <button type="button" class="icon-btn" id="table-viewer-copy" aria-label="複製表格" title="複製表格">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+        </button>
+      </header>
+      <div class="table-viewer-body" id="table-viewer-body" tabindex="0"></div>
     </section>
   </div>
 
@@ -3456,6 +3640,9 @@
     let readerPushed = false;
     let readerToken = 0;
     let readerText = '';
+    let readerComposeExpanded = false;
+    let tableViewerOpen = false;
+    let tableViewerText = '';
     let routeSettled = false;
     const readerSigs = new Map();
     const READER_SIG_STORE = 'attn.readerSigs';
@@ -3591,6 +3778,7 @@
         error: '',
       }));
       renderAttachments();
+      if (readerOpen) refreshReaderReplyTrigger();
     }
     async function fetchServerDraft(agent) {
       const params = new URLSearchParams({
@@ -4380,6 +4568,125 @@
       node.setAttribute('target', '_blank');
       node.setAttribute('rel', 'noopener noreferrer');
     }
+    const WIDE_TABLE_MIN_COLS = 3;
+
+    function countTableCols(rowHtml) {
+      return (String(rowHtml || '').match(/<(?:th|td)\b/gi) || []).length;
+    }
+
+    function tablePreviewText(tableHtml) {
+      const rows = String(tableHtml || '').match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+      const source = rows[1] || rows[0] || '';
+      const cells = [];
+      for (const match of source.matchAll(/<(?:th|td)\b[^>]*>([\s\S]*?)<\/(?:th|td)>/gi)) {
+        const plain = match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (plain) cells.push(plain);
+        if (cells.length >= 3) break;
+      }
+      return cells.join(' · ');
+    }
+
+    function wrapWideMarkdownTables(html) {
+      return String(html || '').replace(/<table\b[\s\S]*?<\/table>/gi, (tableHtml) => {
+        const rows = tableHtml.match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+        const cols = rows.length ? countTableCols(rows[0]) : 0;
+        if (cols < WIDE_TABLE_MIN_COLS) return tableHtml;
+        const preview = escapeHtml(tablePreviewText(tableHtml));
+        const meta = `${rows.length} 列 × ${cols} 欄`;
+        return `<div class="md-table-card" data-table-cols="${cols}" data-table-rows="${rows.length}">`
+          + `<button type="button" class="md-table-open" data-table-open>`
+          + `<span class="md-table-open-label">查看完整表格</span>`
+          + `<span class="md-table-open-meta">${escapeHtml(meta)}</span>`
+          + `</button>`
+          + (preview ? `<div class="md-table-preview">${preview}</div>` : '')
+          + `<div class="md-table-full">${tableHtml}</div>`
+          + `</div>`;
+      });
+    }
+
+    function readerHasDraft() {
+      const text = (document.getElementById('sheet-text').value || '').trim();
+      return Boolean(text || attachments.length);
+    }
+
+    function refreshReaderReplyTrigger() {
+      const trigger = document.getElementById('reader-reply-trigger');
+      const label = document.getElementById('reader-reply-trigger-label');
+      const hint = document.getElementById('reader-reply-trigger-hint');
+      const hasDraft = readerHasDraft();
+      label.textContent = hasDraft ? '繼續回覆' : '回覆';
+      hint.hidden = !hasDraft;
+      trigger.classList.toggle('has-draft', hasDraft);
+    }
+
+    function setReaderComposeExpanded(expanded) {
+      readerComposeExpanded = Boolean(expanded) && readerOpen;
+      const form = document.getElementById('sheet-form');
+      const trigger = document.getElementById('reader-reply-trigger');
+      const collapse = document.getElementById('reader-compose-collapse');
+      if (!readerOpen) {
+        form.hidden = false;
+        trigger.hidden = false;
+        collapse.hidden = true;
+        return;
+      }
+      form.hidden = !readerComposeExpanded;
+      trigger.hidden = readerComposeExpanded;
+      collapse.hidden = !readerComposeExpanded;
+      refreshReaderReplyTrigger();
+      requestAnimationFrame(() => {
+        if (readerComposeExpanded) {
+          const box = document.getElementById('sheet-text');
+          if (box && typeof box.focus === 'function') box.focus();
+        } else if (trigger && typeof trigger.focus === 'function') {
+          trigger.focus();
+        }
+      });
+    }
+
+    function closeTableViewer({ restoreFocus = true } = {}) {
+      if (!tableViewerOpen) return;
+      tableViewerOpen = false;
+      tableViewerText = '';
+      document.getElementById('table-viewer').hidden = true;
+      document.getElementById('table-viewer-body').innerHTML = '';
+      document.getElementById('reader-root').inert = false;
+      if (restoreFocus && readerOpen) {
+        requestAnimationFrame(() => {
+          const body = document.getElementById('reader-body');
+          if (body && typeof body.focus === 'function') body.focus();
+        });
+      }
+    }
+
+    function openTableViewerFromCard(card) {
+      const full = card && card.querySelector && card.querySelector('.md-table-full');
+      if (!full) return;
+      const body = document.getElementById('table-viewer-body');
+      const html = full.innerHTML || '';
+      body.innerHTML = html;
+      tableViewerText = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const rows = Number(card.dataset.tableRows) || 0;
+      const cols = Number(card.dataset.tableCols) || 0;
+      document.getElementById('table-viewer-title').textContent =
+        rows && cols ? `完整表格 · ${rows}×${cols}` : '完整表格';
+      tableViewerOpen = true;
+      document.getElementById('table-viewer').hidden = false;
+      document.getElementById('reader-root').inert = true;
+      requestAnimationFrame(() => { if (typeof body.focus === 'function') body.focus(); });
+    }
+
+    async function copyTableViewerText() {
+      if (!tableViewerText) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(tableViewerText);
+        else legacyCopy(tableViewerText);
+        document.getElementById('reader-status').textContent = '已複製表格';
+      } catch (_) {
+        document.getElementById('reader-status').textContent = '無法複製';
+      }
+    }
+
     function renderMarkdown(text, fileContext = null) {
       const raw = String(text ?? '');
       if (!raw) return '';
@@ -5042,6 +5349,7 @@
       });
       attachments = [];
       renderAttachments();
+      if (readerOpen) refreshReaderReplyTrigger();
     }
     function removeAttachment(key) {
       const item = attachments.find(row => row.key === key);
@@ -5050,6 +5358,7 @@
       attachments = attachments.filter(row => row.key !== key);
       renderAttachments();
       saveCurrentReplyDraft();
+      if (readerOpen) refreshReaderReplyTrigger();
     }
     async function uploadAttachment(agent, key, file) {
       const sheetKey = agentKey(agent);
@@ -5152,10 +5461,18 @@
       readerHash = '';
       readerPushed = false;
       readerText = '';
+      readerComposeExpanded = false;
       readerToken += 1;
-      document.getElementById('reader-root').hidden = true;
+      closeTableViewer({ restoreFocus: false });
+      const readerRoot = document.getElementById('reader-root');
+      readerRoot.inert = false;
+      readerRoot.hidden = true;
       document.getElementById('sheet-root').inert = false;
-      document.getElementById('sheet-panel').appendChild(document.getElementById('sheet-form'));
+      const form = document.getElementById('sheet-form');
+      form.hidden = false;
+      document.getElementById('reader-compose-collapse').hidden = true;
+      document.getElementById('reader-reply-trigger').hidden = false;
+      document.getElementById('sheet-panel').appendChild(form);
       document.body.classList.remove('reader-open');
       document.getElementById('reader-body').innerHTML = '';
       document.getElementById('reader-status').textContent = '';
@@ -5188,7 +5505,7 @@
       if (data.partial) note = '<p class="reader-note">完整內容還在同步，稍後重新開啟即可看到全文。</p>';
       else if (data.truncated) note = `<p class="reader-note">內容過長，僅顯示前 ${text.length} 字（共 ${Number(data.chars) || 0} 字）。</p>`;
       const fileContext = route?.role === 'agent' ? { agent: route, text } : null;
-      return `<div class="preview-line reader-line"><div class="text md">${renderMarkdown(text, fileContext)}</div></div>${note}`
+      return `<div class="preview-line reader-line"><div class="text md">${wrapWideMarkdownTables(renderMarkdown(text, fileContext))}</div></div>${note}`
         + (route?.role === 'agent' ? outputFilesHtml(text, route, data.output_files) : '');
     }
     function readerSnapshot(route, sig) {
@@ -5267,12 +5584,14 @@
     function showReader(agent, route) {
       readerOpen = true;
       readerHash = window.location.hash;
+      closeTableViewer();
       document.getElementById('reader-title').textContent = route.role === 'user' ? '你的訊息' : 'Agent 回覆';
       document.getElementById('reader-sub').textContent = readerSubLine(agent);
       document.getElementById('reader-status').textContent = '';
       document.getElementById('reader-root').hidden = false;
       // Share the form itself so drafts, attachments and upload handlers stay intact across views.
       document.getElementById('reader-compose').appendChild(document.getElementById('sheet-form'));
+      setReaderComposeExpanded(false);
       document.getElementById('sheet-root').inert = true;
       applyViewport();
       document.body.classList.add('reader-open');
@@ -6062,6 +6381,8 @@
       if (event.key !== 'Escape') return;
       if (workOpen) closeWork();
       else if (infoOpen) closeInfo({ focusToggle: true });
+      else if (tableViewerOpen) closeTableViewer();
+      else if (readerOpen && readerComposeExpanded) setReaderComposeExpanded(false);
       else if (readerOpen) closeReader();
       else if (sheetOpen) closeSheet();
     });
@@ -6175,7 +6496,10 @@
     });
     document.getElementById('reader-back').addEventListener('click', closeReader);
     document.getElementById('reader-copy').addEventListener('click', copyReaderText);
-    document.getElementById('sheet-text').addEventListener('input', saveCurrentReplyDraft);
+    document.getElementById('sheet-text').addEventListener('input', () => {
+      saveCurrentReplyDraft();
+      if (readerOpen) refreshReaderReplyTrigger();
+    });
     document.getElementById('sheet-text').addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || event.isComposing || !(event.metaKey || event.ctrlKey)) return;
       const form = document.getElementById('sheet-form');
@@ -6194,12 +6518,21 @@
       }
     });
     document.getElementById('reader-body').addEventListener('click', (event) => {
+      const tableOpen = event.target.closest('[data-table-open]');
+      if (tableOpen) {
+        openTableViewerFromCard(tableOpen.closest('.md-table-card'));
+        return;
+      }
       if (!event.target.closest('[data-retry]')) return;
       const agent = latestAgents.find(a => agentKey(a) === selectedKey && a.tracked);
       const route = parseReaderHash(window.location.hash);
       if (!agent || !route) return;
       loadReaderMessage(agent, route, '');
     });
+    document.getElementById('reader-reply-trigger').addEventListener('click', () => setReaderComposeExpanded(true));
+    document.getElementById('reader-compose-collapse').addEventListener('click', () => setReaderComposeExpanded(false));
+    document.getElementById('table-viewer-close').addEventListener('click', closeTableViewer);
+    document.getElementById('table-viewer-copy').addEventListener('click', copyTableViewerText);
     document.getElementById('sheet-attach').addEventListener('click', () => document.getElementById('sheet-file').click());
     const fileInput = document.getElementById('sheet-file');
     fileInput.addEventListener('change', () => {

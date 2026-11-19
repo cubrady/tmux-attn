@@ -1647,6 +1647,10 @@ test('the reader contains the same composer and preserves the draft on back navi
   await t.tap('agent', 0);
   await t.settle();
   assert.equal(form.parentNode, t.el('reader-compose'));
+  assert.equal(form.hidden, true, 'reader opens in reading mode with the composer collapsed');
+  assert.equal(t.el('reader-reply-trigger').hidden, false);
+  assert.equal(t.el('reader-reply-trigger-label').textContent, '繼續回覆');
+  assert.equal(t.el('reader-reply-trigger-hint').hidden, false);
   assert.equal(t.el('sheet-text').value, 'draft reply');
   assert.equal(t.ui.elements.has('reader-reply'), false);
   assert.equal(focused, 0, 'opening a message does not bring up the keyboard');
@@ -1654,7 +1658,104 @@ test('the reader contains the same composer and preserves the draft on back navi
   t.browser.window.history.back();
   await t.settle();
   assert.equal(form.parentNode, t.el('sheet-panel'));
+  assert.equal(form.hidden, false);
   assert.equal(t.el('sheet-text').value, 'draft reply from the reader');
+});
+
+test('reader reply trigger expands the shared composer and Escape collapses it first', async () => {
+  const t = readerSetup();
+  const focused = [];
+  t.el('sheet-text').focus = () => { focused.push('text'); };
+  t.el('reader-reply-trigger').focus = () => { focused.push('trigger'); };
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(t.el('sheet-form').hidden, true);
+  assert.equal(t.el('reader-reply-trigger-label').textContent, '回覆');
+  focused.length = 0;
+  await t.el('reader-reply-trigger').listeners.click();
+  await flush();
+  assert.equal(t.el('sheet-form').hidden, false);
+  assert.equal(t.el('reader-reply-trigger').hidden, true);
+  assert.equal(t.el('reader-compose-collapse').hidden, false);
+  assert.deepEqual(focused, ['text']);
+  t.el('sheet-text').value = 'keep me';
+  t.el('sheet-text').listeners.input();
+  t.ui.document.listeners.keydown({ key: 'Escape' });
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('sheet-form').hidden, true);
+  assert.equal(t.el('reader-reply-trigger').hidden, false);
+  assert.equal(t.el('sheet-text').value, 'keep me');
+  assert.ok(focused.includes('trigger'));
+  await t.el('reader-reply-trigger').listeners.click();
+  await flush();
+  assert.equal(t.el('sheet-form').hidden, false);
+  assert.equal(t.el('sheet-text').value, 'keep me');
+  t.ui.document.listeners.keydown({ key: 'Escape' });
+  await t.settle();
+  t.ui.document.listeners.keydown({ key: 'Escape' });
+  await t.settle();
+  assert.equal(t.el('reader-root').hidden, true);
+});
+
+test('Escape closes table viewer before collapsing the reader composer', async () => {
+  const t = readerSetup({ message: () => jsonReply({
+    ok: true, role: 'agent',
+    text: 'FULL agent 0',
+    chars: 12, truncated: false,
+  }) });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  // Inject a wide table card into the loaded reader body HTML path via helper.
+  const table = '<table><tr><th>A</th><th>B</th><th>C</th></tr><tr><td>1</td><td>2</td><td>3</td></tr></table>';
+  const wrapped = t.ui.context.wrapWideMarkdownTables(table);
+  const fullHtml = wrapped.match(/<div class="md-table-full">([\s\S]*?)<\/div>/)[1];
+  await t.el('reader-reply-trigger').listeners.click();
+  await flush();
+  t.ui.context.openTableViewerFromCard({
+    dataset: { tableRows: '2', tableCols: '3' },
+    querySelector: selector => selector === '.md-table-full' ? { innerHTML: fullHtml } : null,
+  });
+  assert.equal(t.el('table-viewer').hidden, false);
+  assert.equal(t.el('reader-root').inert, true);
+  t.ui.document.listeners.keydown({ key: 'Escape' });
+  assert.equal(t.el('table-viewer').hidden, true);
+  assert.equal(t.el('reader-root').inert, false);
+  assert.equal(t.el('reader-root').hidden, false);
+  assert.equal(t.el('sheet-form').hidden, false, 'composer stays expanded after closing the table');
+  t.ui.document.listeners.keydown({ key: 'Escape' });
+  assert.equal(t.el('sheet-form').hidden, true);
+  assert.equal(t.el('reader-root').hidden, false);
+});
+
+test('wide markdown tables become summary cards with a full-table viewer', () => {
+  const ui = dashboard();
+  const table = '<table><tr><th>A</th><th>B</th><th>C</th></tr>'
+    + '<tr><td>one</td><td>two</td><td>three</td></tr></table>';
+  const narrow = '<table><tr><th>A</th><th>B</th></tr><tr><td>one</td><td>two</td></tr></table>';
+  const wrapped = ui.context.wrapWideMarkdownTables(`<p>hi</p>${table}<p>x</p>${narrow}`);
+  assert.match(wrapped, /md-table-card/);
+  assert.match(wrapped, /查看完整表格/);
+  assert.match(wrapped, /2 列 × 3 欄/);
+  assert.match(wrapped, /one · two · three/);
+  assert.equal((wrapped.match(/md-table-card/g) || []).length, 1);
+  assert.match(wrapped, /<table><tr><th>A<\/th><th>B<\/th><\/tr>/);
+  assert.equal(ui.context.wrapWideMarkdownTables(narrow), narrow);
+
+  const fullHtml = wrapped.match(/<div class="md-table-full">([\s\S]*?)<\/div>/)[1];
+  const card = {
+    dataset: { tableRows: '2', tableCols: '3' },
+    querySelector: selector => selector === '.md-table-full' ? { innerHTML: fullHtml } : null,
+  };
+  ui.context.openTableViewerFromCard(card);
+  assert.equal(ui.elements.get('table-viewer').hidden, false);
+  assert.match(ui.elements.get('table-viewer-body').innerHTML, /<table>/);
+  assert.match(ui.elements.get('table-viewer-title').textContent, /2×3/);
+  ui.document.listeners.keydown({ key: 'Escape' });
+  assert.equal(ui.elements.get('table-viewer').hidden, true);
+  assert.equal(ui.elements.get('table-viewer-body').innerHTML, '');
 });
 
 test('sending directly from the reader returns to the dashboard route', async () => {
