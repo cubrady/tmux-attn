@@ -2540,7 +2540,8 @@
       background: var(--bg);
     }
     @media (prefers-reduced-motion: no-preference) {
-      .reader-root { animation: reader-in 200ms var(--ease); }
+      .reader-root { animation: reader-in 200ms var(--ease); transition: transform 180ms var(--ease); }
+      .reader-root.dragging { transition: none; animation: none; }
     }
     @keyframes reader-in {
       from { transform: translateX(14px); opacity: 0; }
@@ -2561,6 +2562,7 @@
       padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
       border-bottom: 1px solid var(--line);
       background: var(--bg-elevated);
+      touch-action: none;
     }
     .reader-heading { flex: 1 1 auto; min-width: 0; }
     .reader-heading h2 {
@@ -5463,6 +5465,7 @@
       readerText = '';
       readerComposeExpanded = false;
       readerToken += 1;
+      resetReaderSwipe();
       closeTableViewer({ restoreFocus: false });
       const readerRoot = document.getElementById('reader-root');
       readerRoot.inert = false;
@@ -5725,6 +5728,15 @@
     }
     function dragOutcome(dy, ms) {
       return dy >= 96 || (dy >= 40 && dy / Math.max(ms, 1) > 0.5) ? 'dismiss' : 'back';
+    }
+    function swipeOutcome(dx, ms) {
+      return dx >= 96 || (dx >= 40 && dx / Math.max(ms, 1) > 0.5) ? 'dismiss' : 'back';
+    }
+    function readerSwipeOrigin(event, root) {
+      if (event.target.closest('button, a, input, textarea, select, label')) return '';
+      if (event.target.closest('.reader-top')) return 'top';
+      const rect = root.getBoundingClientRect ? root.getBoundingClientRect() : { left: 0 };
+      return (event.clientX - rect.left) <= 28 ? 'edge' : '';
     }
     function confirmSheetMeta(agent, revision, token) {
       if (!sheetOpen || token !== sheetPreviewToken || selectedKey !== agentKey(agent) || sheetPreviewRevision !== revision) return;
@@ -6427,6 +6439,63 @@
     dragZone.addEventListener('pointerup', endDrag);
     dragZone.addEventListener('pointercancel', resetDrag);
     dragZone.addEventListener('lostpointercapture', resetDrag);
+    // Detail reader: swipe right from the left edge or header to go back (touch/pen only).
+    let readerSwipe = null;
+    function resetReaderSwipe() {
+      const active = readerSwipe;
+      readerSwipe = null;
+      const root = document.getElementById('reader-root');
+      if (active && active.captured && root.releasePointerCapture) {
+        try { root.releasePointerCapture(active.id); } catch (_) { /* already released */ }
+      }
+      if (!root.style) return;
+      root.style.transform = '';
+      root.classList.remove('dragging');
+    }
+    const readerRoot = document.getElementById('reader-root');
+    readerRoot.addEventListener('pointerdown', (event) => {
+      if (!readerOpen || tableViewerOpen || event.pointerType === 'mouse' || event.isPrimary === false) return;
+      if (!readerSwipeOrigin(event, readerRoot)) return;
+      readerSwipe = {
+        x: event.clientX, y: event.clientY, at: performance.now(), id: event.pointerId, locked: false, captured: false,
+      };
+    });
+    readerRoot.addEventListener('pointermove', (event) => {
+      if (!readerSwipe || event.pointerId !== readerSwipe.id) return;
+      const dx = event.clientX - readerSwipe.x;
+      const dy = event.clientY - readerSwipe.y;
+      if (!readerSwipe.locked) {
+        // Wait for intent: vertical wins → leave the pointer to native scrolling.
+        if (Math.abs(dy) > 24 && Math.abs(dy) > Math.abs(dx)) {
+          resetReaderSwipe();
+          return;
+        }
+        if (dx < 12 || Math.abs(dx) < Math.abs(dy)) return;
+        readerSwipe.locked = true;
+        readerSwipe.at = performance.now();
+        readerRoot.classList.add('dragging');
+        if (readerRoot.setPointerCapture) {
+          readerRoot.setPointerCapture(event.pointerId);
+          readerSwipe.captured = true;
+        }
+      }
+      readerRoot.style.transform = `translateX(${Math.max(0, dx)}px)`;
+    });
+    function endReaderSwipe(event) {
+      if (!readerSwipe || event.pointerId !== readerSwipe.id) return;
+      const locked = readerSwipe.locked;
+      const outcome = locked
+        ? swipeOutcome(event.clientX - readerSwipe.x, performance.now() - readerSwipe.at)
+        : 'back';
+      resetReaderSwipe();
+      if (outcome === 'dismiss') closeReader();
+    }
+    readerRoot.addEventListener('pointerup', endReaderSwipe);
+    readerRoot.addEventListener('pointercancel', resetReaderSwipe);
+    readerRoot.addEventListener('lostpointercapture', () => {
+      if (readerSwipe) readerSwipe.captured = false;
+      resetReaderSwipe();
+    });
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', applyViewport);
       window.visualViewport.addEventListener('scroll', applyViewport);

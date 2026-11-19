@@ -3054,6 +3054,104 @@ test('the pointer is captured so a drag keeps following the finger outside the h
   assert.equal(captured, 1);
 });
 
+test('swiping the reader right from the header or left edge closes it', async () => {
+  const { swipeOutcome, readerSwipeOrigin } = dashboard().context;
+  assert.equal(swipeOutcome(120, 600), 'dismiss');
+  assert.equal(swipeOutcome(60, 80), 'dismiss', 'a quick flick');
+  assert.equal(swipeOutcome(60, 900), 'back');
+  assert.equal(swipeOutcome(-50, 100), 'back');
+  assert.equal(readerSwipeOrigin({
+    clientX: 120, target: { closest: s => (s === '.reader-top' ? {} : null) },
+  }, { getBoundingClientRect: () => ({ left: 0 }) }), 'top');
+  assert.equal(readerSwipeOrigin({
+    clientX: 12, target: { closest: () => null },
+  }, { getBoundingClientRect: () => ({ left: 0 }) }), 'edge');
+  assert.equal(readerSwipeOrigin({
+    clientX: 120, target: { closest: s => (s === 'button' ? {} : null) },
+  }, { getBoundingClientRect: () => ({ left: 0 }) }), '');
+
+  const t = readerSetup();
+  const style = {};
+  const classes = new Set();
+  const root = t.el('reader-root');
+  root.style = style;
+  root.classList = { add: c => classes.add(c), remove: c => classes.delete(c), toggle() {} };
+  root.getBoundingClientRect = () => ({ left: 0 });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+  assert.equal(root.hidden, false);
+
+  let captured = 0;
+  let released = 0;
+  root.setPointerCapture = () => { captured += 1; };
+  root.releasePointerCapture = () => { released += 1; };
+  const at = (x, y, extra = {}) => ({
+    clientX: x, clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true,
+    target: { closest: s => (s === '.reader-top' ? {} : null) },
+    currentTarget: root,
+    ...extra,
+  });
+  root.listeners.pointerdown(at(40, 20));
+  t.ui.setNow(100); root.listeners.pointermove(at(48, 22));
+  assert.equal(style.transform || undefined, undefined, 'no transform before horizontal lock');
+  assert.equal(captured, 0);
+  root.listeners.pointermove(at(90, 24));
+  assert.equal(style.transform, 'translateX(50px)');
+  assert.equal(classes.has('dragging'), true);
+  assert.equal(captured, 1);
+  t.ui.setNow(900); root.listeners.pointerup(at(90, 24));
+  assert.equal(root.hidden, false, 'a short drag springs back');
+  assert.equal(style.transform, '');
+  assert.equal(released, 1);
+
+  root.listeners.pointerdown(at(40, 20));
+  t.ui.setNow(1000); root.listeners.pointermove(at(200, 28));
+  t.ui.setNow(1100); root.listeners.pointerup(at(200, 28));
+  assert.equal(root.hidden, true);
+  assert.equal(t.el('sheet-root').hidden, false);
+});
+
+test('reader swipe ignores the mouse, buttons, vertical scrolls and a second finger', async () => {
+  const t = readerSetup();
+  const style = {};
+  const root = t.el('reader-root');
+  root.style = style;
+  root.classList = { add() {}, remove() {}, toggle() {} };
+  root.getBoundingClientRect = () => ({ left: 0 });
+  await openSheetWithPreview(t);
+  await t.tap('agent', 0);
+  await t.settle();
+
+  const ev = (x, y, extra = {}) => ({
+    clientX: x, clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true,
+    target: { closest: () => null },
+    currentTarget: { setPointerCapture() {} },
+    ...extra,
+  });
+  root.listeners.pointerdown(ev(10, 40, { pointerType: 'mouse' }));
+  root.listeners.pointermove(ev(220, 40, { pointerType: 'mouse' }));
+  root.listeners.pointerup(ev(220, 40, { pointerType: 'mouse' }));
+  assert.equal(root.hidden, false, 'mouse must not dismiss');
+
+  root.listeners.pointerdown(ev(10, 40, {
+    target: { closest: s => (s.includes('button') ? {} : null) },
+  }));
+  root.listeners.pointerup(ev(220, 40));
+  assert.equal(root.hidden, false, 'a button press is not a swipe');
+
+  root.listeners.pointerdown(ev(10, 40));
+  t.ui.setNow(100); root.listeners.pointermove(ev(30, 120));
+  assert.equal(style.transform || '', '', 'vertical scroll cancels the swipe');
+  root.listeners.pointerup(ev(220, 40));
+  assert.equal(root.hidden, false);
+
+  root.listeners.pointerdown(ev(10, 40));
+  root.listeners.pointermove(ev(180, 44, { pointerId: 2 }));
+  root.listeners.pointerup(ev(220, 40, { pointerId: 2 }));
+  assert.equal(root.hidden, false, 'another pointer cannot finish this swipe');
+});
+
 test('the reader makes the sheet beneath it inert and gives it back when it closes', async () => {
   const t = readerSetup();
   await openSheetWithPreview(t);
