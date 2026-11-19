@@ -3641,6 +3641,8 @@
     let laterExpanded = false;
     const laterBusy = new Set();
     let sheetOpen = false;
+    let sheetHist = false;
+    let sheetHistIgnorePop = false;
     let sheetPreviewKey = '';
     let sheetPreviewFull = false;
     let sheetPreviewUpdated = 0;
@@ -5270,11 +5272,33 @@
         announceKill(`關閉失敗：${e.message}`);
       }
     }
-    function closeSheet() {
+    function pushSheetHistory() {
+      // Mobile browsers own the left-edge Back swipe; a history entry lets that gesture close the sheet.
+      if (sheetHist) return;
+      try {
+        const url = window.location.pathname + window.location.search + (window.location.hash || '');
+        window.history.pushState({ attnSheet: 1 }, '', url);
+        sheetHist = true;
+      } catch (_) { /* ignore: sandboxed or missing history API in tests */ }
+    }
+    function closeSheet({ fromPopstate = false } = {}) {
       const openedFrom = selectedKey;
+      const wasOpen = sheetOpen;
+      const hadHist = sheetHist;
+      const readerWasPushed = readerOpen && readerPushed;
       saveCurrentReplyDraft();
       sheetDraftToken += 1;
-      closeReader();
+      sheetHist = false;
+      if (readerOpen) {
+        if (fromPopstate || hadHist) {
+          // Drop the reader without an extra history.back(); sheet history handles depth.
+          readerPushed = false;
+          hideReader();
+          if (fromPopstate) clearRoute();
+        } else {
+          closeReader();
+        }
+      }
       clearAttachments();
       sheetOpen = false;
       setPageInert(false);
@@ -5303,6 +5327,12 @@
       // The page behind was inert, so focus fell to <body>; give it back to the card that opened the sheet.
       const card = openedFrom && document.querySelector(`.card[data-key="${CSS.escape(openedFrom)}"] .card-open`);
       if (card) card.focus();
+      if (wasOpen && hadHist && !fromPopstate) {
+        sheetHistIgnorePop = true;
+        try { window.history.go(-(readerWasPushed ? 2 : 1)); }
+        catch (_) { /* history unavailable */ }
+        Promise.resolve().then(() => { sheetHistIgnorePop = false; });
+      }
     }
     function setSheetStatus(message, kind = '') {
       const status = document.getElementById('sheet-status');
@@ -5899,6 +5929,7 @@
       document.getElementById('sheet-root').hidden = false;
       markClippedPreviews(); // the first render happened while hidden, when nothing can be measured
       document.body.classList.add('sheet-open');
+      pushSheetHistory();
       setPageInert(true);
       applyViewport();
       document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
@@ -6417,6 +6448,19 @@
       else if (readerOpen && readerComposeExpanded) setReaderComposeExpanded(false);
       else if (readerOpen) closeReader();
       else if (sheetOpen) closeSheet();
+    });
+    window.addEventListener('popstate', (event) => {
+      if (sheetHistIgnorePop) return;
+      if (!sheetOpen) {
+        sheetHist = false;
+        return;
+      }
+      // Back from the reader lands on the sheet entry; keep the sheet open.
+      if (event.state && event.state.attnSheet) {
+        sheetHist = true;
+        return;
+      }
+      closeSheet({ fromPopstate: true });
     });
     window.addEventListener('hashchange', applyRoute);
     // Line wraps change when the web font arrives or the window resizes, so the clipped marks must follow.

@@ -1430,8 +1430,14 @@ test('a sheet closed while an image is still being prepared never uploads it', a
 
 function fakeBrowser() {
   const listeners = {};
-  const state = { hash: '', stack: [''], selection: '' };
-  const fire = () => Promise.resolve().then(() => listeners.hashchange && listeners.hashchange());
+  const state = { hash: '', stack: [''], hist: [null], selection: '' };
+  const fireHash = () => Promise.resolve().then(() => listeners.hashchange && listeners.hashchange());
+  const firePop = () => Promise.resolve().then(() => listeners.popstate && listeners.popstate({
+    state: state.hist[state.hist.length - 1],
+  }));
+  const applyTop = () => {
+    state.hash = state.stack[state.stack.length - 1];
+  };
   return {
     state,
     listeners,
@@ -1441,13 +1447,44 @@ function fakeBrowser() {
       location: {
         pathname: '/', search: '',
         get hash() { return state.hash; },
-        set hash(value) { state.hash = value; state.stack.push(value); fire(); },
+        set hash(value) {
+          state.hash = value;
+          state.stack.push(value);
+          state.hist.push(null);
+          fireHash();
+        },
       },
       history: {
-        back() { state.stack.pop(); state.hash = state.stack[state.stack.length - 1]; fire(); },
-        replaceState(_state, _title, url) {
+        get state() { return state.hist[state.hist.length - 1]; },
+        pushState(histState, _title, url) {
+          const next = String(url || '').includes('#') ? '#' + String(url).split('#')[1] : (state.hash || '');
+          state.hash = next;
+          state.stack.push(next);
+          state.hist.push(histState);
+        },
+        replaceState(histState, _title, url) {
           state.hash = String(url).includes('#') ? '#' + String(url).split('#')[1] : '';
           state.stack[state.stack.length - 1] = state.hash;
+          state.hist[state.hist.length - 1] = histState;
+        },
+        back() {
+          if (state.stack.length <= 1) return;
+          state.stack.pop();
+          state.hist.pop();
+          applyTop();
+          firePop();
+          fireHash();
+        },
+        go(delta) {
+          const steps = Number(delta) || 0;
+          if (steps >= 0) return;
+          for (let i = 0; i < -steps && state.stack.length > 1; i += 1) {
+            state.stack.pop();
+            state.hist.pop();
+          }
+          applyTop();
+          firePop();
+          fireHash();
         },
       },
     },
@@ -1515,7 +1552,7 @@ test('tapping a message opens the reader on a history entry and loads its full t
   await t.tap('agent', 0);
   await t.settle();
   assert.equal(t.browser.state.hash, '#/m/lab/%251/123/agent/0');
-  assert.equal(t.browser.state.stack.length, 2);
+  assert.equal(t.browser.state.stack.length, 3);
   assert.equal(t.el('reader-root').hidden, false);
   assert.equal(t.el('reader-title').textContent, 'Agent 回覆');
   assert.match(t.el('reader-sub').textContent, /demo/);
@@ -1548,11 +1585,11 @@ async function assertCloseGestureRestoresSheet(gesture) {
   await openSheetWithPreview(t);
   await t.tap('agent', 0);
   await t.settle();
-  assert.equal(t.browser.state.stack.length, 2);
+  assert.equal(t.browser.state.stack.length, 3);
   await gesture(t);
   await t.settle();
   assert.equal(t.el('reader-root').hidden, true);
-  assert.equal(t.browser.state.stack.length, 1);
+  assert.equal(t.browser.state.stack.length, 2);
   assert.equal(t.el('sheet-root').hidden, false);
 }
 
@@ -1573,7 +1610,7 @@ test('taps on links and text selections do not open the reader', async () => {
   await t.tap('agent', 0);
   await t.settle();
   assert.equal(t.browser.state.hash, '');
-  assert.equal(t.browser.state.stack.length, 1);
+  assert.equal(t.browser.state.stack.length, 2);
   assert.equal(t.messages().length, 1, 'only the background reply prefetch was sent');
 });
 
@@ -3052,6 +3089,18 @@ test('the pointer is captured so a drag keeps following the finger outside the h
   ui.elements.get('sheet-drag').listeners.pointerdown({ clientY: 0, pointerId: 1, pointerType: 'touch', isPrimary: true,
     target: { closest: () => null }, currentTarget: { setPointerCapture: () => { captured += 1; } } });
   assert.equal(captured, 1);
+});
+
+test('browser back closes the open sheet via the history entry it pushed', async () => {
+  const t = readerSetup();
+  await openSheetWithPreview(t);
+  assert.equal(t.browser.state.stack.length, 2, 'opening the sheet pushes a history entry');
+  assert.equal(t.browser.state.hist[1] && t.browser.state.hist[1].attnSheet, 1);
+  assert.equal(t.el('sheet-root').hidden, false);
+  t.browser.window.history.back();
+  await t.settle();
+  assert.equal(t.el('sheet-root').hidden, true);
+  assert.equal(t.browser.state.stack.length, 1);
 });
 
 test('swiping the sheet right from the left edge closes it and ignores the mouse', () => {
