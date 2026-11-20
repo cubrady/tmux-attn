@@ -7,9 +7,12 @@ Wants=network-online.target
 Type=simple
 ExecStart=%h/.local/bin/tmux-attn web __HOST__ __PORT__
 __ENVIRONMENT__
-Restart=on-failure
+# always: SIGTERM is "clean" under on-failure, so external TERM (memory
+# pressure / stray kill) would leave the panel down until manual start.
+Restart=always
 RestartSec=2
-KillMode=process
+# control-group: process mode orphans snapshot-worker after the main PID dies.
+KillMode=control-group
 
 # Optional overrides via environment:
 #   systemctl --user edit tmux-attn-web
